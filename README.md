@@ -3,11 +3,23 @@
  <img width=200px height=200px src="../assets/logos/logo.png?raw=true" alt="Project logo"></a>
 </p>
 
+<div align="center">
+
+# ⚠️ ARCHIVED: Legacy Python Implementation
+
+**This branch contains the final Python implementation for Plex Framework 2.**
+
+> ⚠️ **DEPRECATION NOTICE**: Plex Framework 2 is deprecated and will reach end-of-life in 2026. No further development planned on this branch.
+
+---
+
+</div>
+
 <h3 align="center">Audnexus.bundle</h3>
 
 <div align="center">
 
-[![Status](https://img.shields.io/badge/status-active-success.svg)]()
+[![Status](https://img.shields.io/badge/status-archived-lightgrey.svg)]()
 [![GitHub Issues](https://img.shields.io/github/issues/djdembeck/Audnexus.bundle.svg)](https://github.com/djdembeck/Audnexus.bundle/issues)
 [![GitHub Pull Requests](https://img.shields.io/github/issues-pr/djdembeck/Audnexus.bundle.svg)](https://github.com/djdembeck/Audnexus.bundle/pulls)
 [![License](https://img.shields.io/badge/license-GNUGPL-blue.svg)](/LICENSE)
