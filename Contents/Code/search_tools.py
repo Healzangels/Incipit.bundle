@@ -302,7 +302,8 @@ class AlbumSearchTool(SearchTool):
                 for item in (track.items or []):
                     for part in (item.parts or []):
                         if part.duration:
-                            total += part.duration
+                            # Parts expose duration as a string in this model.
+                            total += int(part.duration)
             if total:
                 duration = total
         except Exception as e:

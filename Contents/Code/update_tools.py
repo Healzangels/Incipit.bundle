@@ -238,15 +238,26 @@ class AlbumUpdateTool(UpdateTool):
     def set_empty_variables(self):
         """
             Sets empty variables.
+
+            Every field parse_api_response fills conditionally must be reset
+            here, because the metadata setters read them unconditionally. Audible
+            records always carry a summary/publisher/author, but multi-provider
+            (Hardcover/OpenLibrary) records often don't — a missing one used to
+            crash the update with AttributeError (e.g. no 'synopsis').
         """
+        self.author = None
         self.date = None
         self.genres = None
+        self.narrator = None
         self.rating = None
         self.series = ''
         self.series2 = ''
         self.similar = None
+        self.studio = ''
         self.subtitle = ''
+        self.synopsis = ''
         self.thumb = ''
+        self.title = ''
         self.volume = ''
         self.volume2 = ''
 
