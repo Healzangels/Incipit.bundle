@@ -217,9 +217,23 @@ class AlbumSearchTool(SearchTool):
         """
         # First, normalize the name
         self.normalize_name()
-        # Album title query
-        album_param = 'title=' + urllib.quote(self.normalizedName)
 
+        if self.prefs['api_base_url']:
+            # incipit-api: always search by title. The API scores candidates on
+            # title (+ author when we have it) and filters on relevance, so a
+            # bare title is a valid query — unlike Audible's catalog search we
+            # must never drop to a `keywords`-only param with no title.
+            query = 'title=' + urllib.quote(self.normalizedName)
+            if self.media.artist:
+                query += '&author=' + urllib.quote(self.media.artist)
+            # Extra signals the API can use: duration (the veto), a filename
+            # ASIN, and the first track title (a fallback when the ALBUM tag is
+            # a bare series+number).
+            query += self.incipit_extra_args()
+            return query
+
+        # Audible catalog path.
+        album_param = 'title=' + urllib.quote(self.normalizedName)
         # Fix match/manual search doesn't provide author
         if self.media.artist:
             artist_param = '&author=' + urllib.quote(self.media.artist)
@@ -227,16 +241,7 @@ class AlbumSearchTool(SearchTool):
             # Use keyword search to supplement missing author
             album_param = 'keywords=' + urllib.quote(self.normalizedName)
             artist_param = ''
-        # Combine params
-        query = (album_param + artist_param)
-
-        # When targeting the incipit-api, add the extra signals it can use:
-        # duration (the veto), a filename ASIN, and the first track title (a
-        # fallback when the ALBUM tag is a bare series+number). Audible ignores
-        # these, but we only append them for the multi-provider path.
-        if self.prefs['api_base_url']:
-            query += self.incipit_extra_args()
-        return query
+        return album_param + artist_param
 
     def incipit_extra_args(self):
         """
@@ -244,26 +249,42 @@ class AlbumSearchTool(SearchTool):
             the media object so we can confirm how duration/tracks are exposed.
         """
         extra = ''
-        # Probe: log what the legacy media object actually exposes.
+        # Probe: log the media attributes we can reach (dir() is blocked in the
+        # plugin sandbox, so read specific attrs individually).
         try:
-            log.debug('incipit media attrs: ' + str(dir(self.media)))
+            log.debug(
+                'incipit media: artist=%s album=%s title=%s name=%s tracks=%s' % (
+                    getattr(self.media, 'artist', None),
+                    getattr(self.media, 'album', None),
+                    getattr(self.media, 'title', None),
+                    getattr(self.media, 'name', None),
+                    len(getattr(self.media, 'tracks', []) or []),
+                )
+            )
         except Exception as e:
-            log.error('incipit probe (dir) failed: %s', e)
+            log.error('incipit media log failed: %s', e)
 
-        # Duration (ms) — the differentiator. Try the likely access paths.
+        # Album duration (ms) = sum of the track part durations. A legacy album
+        # media object has no single .duration; it exposes tracks -> items ->
+        # parts, each part carrying its own duration.
         duration = None
-        for accessor in (
-            lambda: getattr(self.media, 'duration', None),
-            lambda: self.media.items[0].parts[0].duration,
-            lambda: self.media.parts[0].duration,
-        ):
+        try:
+            total = 0
+            for track in (getattr(self.media, 'tracks', None) or []):
+                for item in (getattr(track, 'items', None) or []):
+                    for part in (getattr(item, 'parts', None) or []):
+                        if getattr(part, 'duration', None):
+                            total += part.duration
+            if total:
+                duration = total
+        except Exception as e:
+            log.error('incipit duration probe failed: %s', e)
+        if not duration:
+            # Fall back to a direct attr in case a future media shape carries one.
             try:
-                value = accessor()
-                if value:
-                    duration = value
-                    break
+                duration = getattr(self.media, 'duration', None)
             except Exception:
-                continue
+                duration = None
         log.debug('incipit duration resolved: %s' % str(duration))
         if duration:
             extra += '&duration=' + urllib.quote(str(duration))
