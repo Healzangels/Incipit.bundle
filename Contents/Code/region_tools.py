@@ -93,8 +93,14 @@ class RegionTool:
     def get_content_type_url(self):
         """
             Returns the content type URL.
+
+            The API base URL is a user preference so the bundle can point at a
+            self-hosted or shared incipit-api instance instead of the public
+            audnexus. Defaults to the public audnexus, so out of the box the
+            bundle behaves exactly like upstream until it is pointed elsewhere.
         """
-        return 'https://api.audnex.us' + '/' + self.content_type
+        base = (Prefs['api_base_url'] or 'https://api.audnex.us').rstrip('/')
+        return base + '/' + self.content_type
 
     def get_search_url(self):
         """

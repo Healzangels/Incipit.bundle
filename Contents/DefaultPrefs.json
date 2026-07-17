@@ -7,6 +7,19 @@
         "default": "us"
     },
     {
+        "id": "api_base_url",
+        "label": "API base URL (point at your incipit-api instance; leave default for public audnexus)",
+        "type": "text",
+        "default": "https://api.audnex.us"
+    },
+    {
+        "id": "hardcover_token",
+        "label": "Your Hardcover API token (get your own free token at hardcover.app/settings; leave blank to skip Hardcover)",
+        "type": "text",
+        "option": "hidden",
+        "default": ""
+    },
+    {
         "id": "keep_existing_genres",
         "label": "Keep existing genres in place",
         "type": "bool",
