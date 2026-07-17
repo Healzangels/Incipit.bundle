@@ -309,7 +309,8 @@ class AlbumSearchTool(SearchTool):
         except Exception as e:
             log.error('incipit duration probe failed: %s', e)
         log.debug('incipit duration resolved: %s' % str(duration))
-        if duration:
+        # Plex reports -1 for a not-yet-analyzed file; only send a real runtime.
+        if duration and duration > 0:
             extra += '&duration=' + urllib.quote(str(duration))
 
         # Filename ASIN (Audiobookshelf/seanap tag), if present.
