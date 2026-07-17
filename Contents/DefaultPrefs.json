@@ -8,9 +8,9 @@
     },
     {
         "id": "api_base_url",
-        "label": "API base URL (point at your incipit-api instance; leave default for public audnexus)",
+        "label": "incipit-api URL to enable multi-source matching (Hardcover, OpenLibrary, duration) e.g. http://10.0.1.99:3737 — leave blank for standard Audible matching",
         "type": "text",
-        "default": "https://api.audnex.us"
+        "default": ""
     },
     {
         "id": "hardcover_token",

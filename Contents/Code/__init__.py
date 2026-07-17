@@ -495,16 +495,31 @@ def json_decode(output):
         return None
 
 
+def incipit_headers(url):
+    """
+        Attaches the user's own Hardcover token, but ONLY on requests to the
+        configured incipit-api host — never to Audible or any other host, so the
+        token can't leak to a third party.
+    """
+    base = Prefs['api_base_url']
+    token = Prefs['hardcover_token']
+    if base and token and url.startswith(base.rstrip('/')):
+        return {'x-hardcover-token': token}
+    return {}
+
+
 def make_request(url):
     """
         Makes and returns an HTTP request.
         Retries 4 times, increasing  time between each retry.
     """
+    headers = incipit_headers(url)
     sleep_time = 1
     num_retries = 4
     for x in range(0, num_retries):
         try:
-            make_request = HTTP.Request(url, timeout=90, sleep=sleep_time)
+            make_request = HTTP.Request(
+                url, headers=headers, timeout=90, sleep=sleep_time)
             str_error = None
             ssl_error = None
         except Exception as str_error:

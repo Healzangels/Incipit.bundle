@@ -34,8 +34,17 @@ class SearchTool:
         region_helper = RegionTool(
             content_type=self.content_type, query=query, region=self.region_override)
 
-        search_url = region_helper.get_api_search_url(
-        ) if self.content_type == 'books' else region_helper.get_search_url()
+        # Book search: use the multi-provider incipit-api ONLY when the operator
+        # has configured api_base_url; otherwise keep the standard Audible catalog
+        # search so a default install behaves like stock. Author search always
+        # goes to the audnexus-style API (public by default).
+        if self.content_type == 'books':
+            if self.prefs['api_base_url']:
+                search_url = region_helper.get_search_url()
+            else:
+                search_url = region_helper.get_api_search_url()
+        else:
+            search_url = region_helper.get_search_url()
         self.log_search_url(search_url)
         return search_url
 
@@ -220,7 +229,73 @@ class AlbumSearchTool(SearchTool):
             artist_param = ''
         # Combine params
         query = (album_param + artist_param)
+
+        # When targeting the incipit-api, add the extra signals it can use:
+        # duration (the veto), a filename ASIN, and the first track title (a
+        # fallback when the ALBUM tag is a bare series+number). Audible ignores
+        # these, but we only append them for the multi-provider path.
+        if self.prefs['api_base_url']:
+            query += self.incipit_extra_args()
         return query
+
+    def incipit_extra_args(self):
+        """
+            Builds the extra query params for the incipit-api search, and logs
+            the media object so we can confirm how duration/tracks are exposed.
+        """
+        extra = ''
+        # Probe: log what the legacy media object actually exposes.
+        try:
+            log.debug('incipit media attrs: ' + str(dir(self.media)))
+        except Exception as e:
+            log.error('incipit probe (dir) failed: %s', e)
+
+        # Duration (ms) — the differentiator. Try the likely access paths.
+        duration = None
+        for accessor in (
+            lambda: getattr(self.media, 'duration', None),
+            lambda: self.media.items[0].parts[0].duration,
+            lambda: self.media.parts[0].duration,
+        ):
+            try:
+                value = accessor()
+                if value:
+                    duration = value
+                    break
+            except Exception:
+                continue
+        log.debug('incipit duration resolved: %s' % str(duration))
+        if duration:
+            extra += '&duration=' + urllib.quote(str(duration))
+
+        # Filename ASIN (Audiobookshelf/seanap tag), if present.
+        try:
+            if self.media.filename:
+                fn = urllib.unquote(self.media.filename).decode('utf8')
+                asin_match = self.search_asin(fn)
+                if asin_match:
+                    extra += '&asin=' + urllib.quote(asin_match.group(0))
+        except Exception as e:
+            log.error('incipit asin probe failed: %s', e)
+
+        # First track title — fallback when the album tag has no real title.
+        track_title = None
+        for accessor in (
+            lambda: self.media.tracks[0].title,
+            lambda: self.media.children[0].title,
+        ):
+            try:
+                value = accessor()
+                if value:
+                    track_title = value
+                    break
+            except Exception:
+                continue
+        log.debug('incipit track title resolved: %s' % str(track_title))
+        if track_title and track_title != self.normalizedName:
+            extra += '&trackTitle=' + urllib.quote(track_title)
+
+        return extra
 
     def check_if_preorder(self, book_date):
         """
@@ -297,8 +372,17 @@ class AlbumSearchTool(SearchTool):
 
     def parse_api_response(self, api_response):
         """
-            Collects keys used for each item from API response,
-            for Plex search results.
+            Collects keys used for each item from API response, for Plex search
+            results. The incipit-api returns a flat list of scored candidates;
+            the Audible catalog returns {"products": [...]}. Branch on the shape.
+        """
+        if isinstance(api_response, list):
+            return self.parse_incipit_candidates(api_response)
+        return self.parse_audible_products(api_response)
+
+    def parse_audible_products(self, api_response):
+        """
+            Maps Audible catalog products to Plex search-result dicts.
         """
         search_results = []
         for item in api_response['products']:
@@ -322,6 +406,38 @@ class AlbumSearchTool(SearchTool):
                         'title': item['title'],
                     }
                 )
+        return search_results
+
+    def parse_incipit_candidates(self, candidates):
+        """
+            Maps incipit-api scored candidates (already past the server-side
+            duration veto and confidence floor) to Plex search-result dicts.
+            Authors and narrators arrive as name strings; the scorer indexes
+            [0]['name'] on each, so empties are backfilled to avoid a crash
+            (e.g. a Xanth book that has no narrator).
+        """
+        search_results = []
+        for c in candidates:
+            try:
+                authors = [{'name': a} for a in c.get('authors', []) if a]
+                if not authors:
+                    authors = [{'name': self.media.artist or ''}]
+                narrators = [{'name': n} for n in c.get('narrators', []) if n]
+                if not narrators:
+                    narrators = [{'name': ''}]
+                search_results.append(
+                    {
+                        'asin': c['id'] + '_' + self.region_override,
+                        'author': authors,
+                        'date': '',
+                        'language': 'english',
+                        'narrator': narrators,
+                        'region': self.region_override,
+                        'title': c.get('title', ''),
+                    }
+                )
+            except Exception as e:
+                log.error('incipit candidate parse failed: %s', e)
         return search_results
 
     def pre_search_logging(self):
