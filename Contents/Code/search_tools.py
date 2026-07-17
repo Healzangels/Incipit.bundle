@@ -669,8 +669,17 @@ class ArtistSearchTool(SearchTool):
 
     def set_media_artist(self):
         """
-            Sometimes artist isn't set but title is.
+            Fall back to the title ONLY when no artist is set.
+
+            A manual "Fix Match" puts the user's typed name in media.artist,
+            while the framework also loads the stored artist tree into
+            media.title. Overwriting artist with title unconditionally throws
+            away the user's correction — e.g. an artist mis-scanned as "2025"
+            (from a "2025 - Title" folder) could never be re-matched to its real
+            author because every search fell back to "2025".
         """
+        if self.media.artist:
+            return
         if self.media.title:
             self.media.artist = self.media.title
         else:
