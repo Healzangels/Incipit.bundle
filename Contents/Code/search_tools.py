@@ -224,8 +224,9 @@ class AlbumSearchTool(SearchTool):
             # bare title is a valid query — unlike Audible's catalog search we
             # must never drop to a `keywords`-only param with no title.
             query = 'title=' + urllib.quote(self.normalizedName)
-            if self.media.artist:
-                query += '&author=' + urllib.quote(self.media.artist)
+            author = self.resolve_author()
+            if author:
+                query += '&author=' + urllib.quote(author)
             # Extra signals the API can use: duration (the veto), a filename
             # ASIN, and the first track title (a fallback when the ALBUM tag is
             # a bare series+number).
@@ -242,6 +243,26 @@ class AlbumSearchTool(SearchTool):
             album_param = 'keywords=' + urllib.quote(self.normalizedName)
             artist_param = ''
         return album_param + artist_param
+
+    def resolve_author(self):
+        """
+            The album author for the incipit-api query. Album searches almost
+            never carry media.artist, but the parent artist (already matched)
+            IS the author, and the framework exposes it on parent_metadata.
+            Passing it lets the API score + disambiguate on author instead of
+            returning every title collision (e.g. the many unrelated books
+            named "Luck of the Draw").
+        """
+        if self.media.artist:
+            return self.media.artist
+        try:
+            parent = self.media.parent_metadata
+            if parent and parent.title:
+                log.debug('incipit author from parent: %s' % parent.title)
+                return parent.title
+        except Exception as e:
+            log.error('incipit author resolve failed: %s', e)
+        return ''
 
     def incipit_extra_args(self):
         """
@@ -264,14 +285,20 @@ class AlbumSearchTool(SearchTool):
         except Exception as e:
             log.error('incipit media log failed: %s', e)
 
-        # Album duration (ms) = sum of the track part durations. A legacy album
-        # media object has no single .duration; it exposes tracks -> items ->
-        # parts, each part carrying its own duration. Any missing link raises and
-        # is caught, leaving duration None.
+        # Album duration (ms) = sum of the track part durations. In the legacy
+        # album media object `tracks` is a dict keyed by track index, so iterate
+        # its values (iterating the dict itself yields string keys). Each track
+        # exposes items -> parts, each part carrying its own duration; any
+        # missing link raises and is caught, leaving duration None.
         duration = None
         try:
+            tracks = self.media.tracks
+            try:
+                track_iter = tracks.values()
+            except Exception:
+                track_iter = tracks
             total = 0
-            for track in (self.media.tracks or []):
+            for track in (track_iter or []):
                 for item in (track.items or []):
                     for part in (item.parts or []):
                         if part.duration:
@@ -736,8 +763,11 @@ class ScoreTool:
         if self.asin:
             plex_score_dict['id'] = self.asin
             data_to_log.append({'ASIN is': self.asin})
+        # Read unconditionally by the album search's display loop, so the key
+        # must always exist. OpenLibrary editions frequently have no resolved
+        # author, unlike Audible where it is always present.
+        plex_score_dict['author'] = self.author or ''
         if self.author:
-            plex_score_dict['author'] = self.author
             data_to_log.append({'Author is': self.author})
         if self.date:
             plex_score_dict['date'] = self.date
