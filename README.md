@@ -3,21 +3,20 @@
  <img width=200px height=200px src="../assets/logos/logo.png?raw=true" alt="Project logo"></a>
 </p>
 
-<h3 align="center">Audnexus.bundle</h3>
+<h3 align="center">Incipit.bundle</h3>
 
 <div align="center">
 
 [![Status](https://img.shields.io/badge/status-active-success.svg)]()
-[![GitHub Issues](https://img.shields.io/github/issues/djdembeck/Audnexus.bundle.svg)](https://github.com/djdembeck/Audnexus.bundle/issues)
-[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/djdembeck/Audnexus.bundle.svg)](https://github.com/djdembeck/Audnexus.bundle/pulls)
+[![GitHub Issues](https://img.shields.io/github/issues/Healzangels/Incipit.bundle.svg)](https://github.com/Healzangels/Incipit.bundle/issues)
+[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/Healzangels/Incipit.bundle.svg)](https://github.com/Healzangels/Incipit.bundle/pulls)
 [![License](https://img.shields.io/badge/license-GNUGPL-blue.svg)](/LICENSE)
-[![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/Audnexus.bundle)](https://www.codefactor.io/repository/github/djdembeck/Audnexus.bundle)
 
 </div>
 
 ---
 
-<p align="center"> An <a href="https://github.com/djdembeck/audnexus">audnex.us</a> client, providing rich author and audiobook data to Plex via its legacy plugin agent system.
+<p align="center"> Incipit is a Plex metadata agent for audiobooks that matches by content — title, author, and runtime — across multiple sources, so books that never had an Audible release still get matched. It is a fork of <a href="https://github.com/djdembeck/Audnexus.bundle">Audnexus.bundle</a> and talks to an <a href="https://github.com/Healzangels/incipit-api">incipit-api</a> instance (a fork of <a href="https://github.com/djdembeck/audnexus">audnexus</a>).
     <br> 
 </p>
 

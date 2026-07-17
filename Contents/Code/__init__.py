@@ -1,4 +1,4 @@
-# Audnexus Agent
+# Incipit (fork of Audnexus Agent)
 # coding: utf-8
 import json
 # Import internal tools
@@ -32,14 +32,14 @@ def Start():
     HTTP.Headers['Accept-Encoding'] = 'gzip'
     log.separator(
         msg=(
-            "Audnexus Audiobooks Agent v" + VERSION_NO
+            "Incipit Audiobooks Agent v" + VERSION_NO
         ),
         log_level="info"
     )
 
 
 class AudiobookArtist(Agent.Artist):
-    name = 'Audnexus Agent'
+    name = 'Incipit'
     languages = [
         Locale.Language.English,
         'de',
@@ -201,7 +201,7 @@ class AudiobookArtist(Agent.Artist):
 
     def call_item_api(self, helper):
         """
-            Calls Audnexus API to get author details,
+            Calls the metadata API to get author details,
             then calls helper to parse those details.
         """
         update_url = helper.build_url()
@@ -233,7 +233,7 @@ class AudiobookArtist(Agent.Artist):
 
 
 class AudiobookAlbum(Agent.Album):
-    name = 'Audnexus Agent'
+    name = 'Incipit'
     languages = [
         Locale.Language.English,
         'de',
@@ -429,7 +429,7 @@ class AudiobookAlbum(Agent.Album):
 
     def call_item_api(self, helper):
         """
-            Calls Audnexus API to get book details,
+            Calls the metadata API to get book details,
             then calls helper to parse those details.
         """
         update_url = helper.build_url()
