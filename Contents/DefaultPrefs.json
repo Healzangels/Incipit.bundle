@@ -25,6 +25,12 @@
         "default": "true"
     },
     {
+        "id": "strip_series_from_author",
+        "label": "Match authors tagged with a trailing series, e.g. \"Author (Series)\" -> \"Author\"",
+        "type": "bool",
+        "default": "true"
+    },
+    {
         "id": "simplify_title",
         "label": "Simplify book titles (remove subtitle, series part, (un)abridged, etc.)",
         "type": "bool",

@@ -87,6 +87,28 @@ class SearchTool:
             return re.match(contributor_regex, string).group(0)
         return string
 
+    def clear_series_text(self, string):
+        """
+            Strips a trailing series qualifier in parentheses from an author
+            name, e.g. "Davis Ashura (Instrument of Omens)" -> "Davis Ashura".
+
+            Some rips tag ALBUMARTIST with the series appended, so Plex creates a
+            separate, unmatched artist per series even though the real author
+            already exists. Removing the qualifier lets that phantom artist match
+            the real author instead of needing a manual artist match first.
+
+            Deliberately conservative: only a single trailing "(...)" is removed,
+            and only when a non-trivial name remains, so ordinary author names
+            (and names with no trailing parenthesis) are never altered.
+        """
+        if not string:
+            return string
+        stripped = re.sub(r'\s*\([^()]{1,60}\)\s*$', '', string).strip()
+        # Guard: if stripping leaves too little to be a name, keep the original.
+        if len(stripped) < 2:
+            return string
+        return stripped
+
     def log_search_url(self, search_url):
         """
             Logs the search URL.
@@ -435,6 +457,19 @@ class ArtistSearchTool(SearchTool):
                 self.media.artist = self.clear_contributor_text(
                     self.media.artist
                 )
+
+        # Strip a trailing "(Series)" qualifier so a phantom "Author (Series)"
+        # artist matches the real author. Opt-out via the pref for anyone who
+        # would rather leave such artists unmatched.
+        if self.prefs['strip_series_from_author']:
+            series_cleaned = self.clear_series_text(self.media.artist)
+            if series_cleaned != self.media.artist:
+                log.info(
+                    'Stripped series qualifier from author: "%s" -> "%s"',
+                    self.media.artist,
+                    series_cleaned
+                )
+                self.media.artist = series_cleaned
 
     def get_primary_author(self):
         """
