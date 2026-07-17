@@ -376,7 +376,11 @@ class AudiobookAlbum(Agent.Album):
         update_helper = AlbumUpdateTool(
             'books', force, lang, media, metadata, Prefs)
 
-        self.call_item_api(update_helper)
+        # A data fetch can legitimately fail (e.g. an Audible preorder ASIN that
+        # resolves to an empty product → 404). Don't let that raise and stall the
+        # whole library refresh — keep the existing metadata and move on.
+        if not self.call_item_api(update_helper):
+            return
 
         self.compile_metadata(update_helper)
 
@@ -431,14 +435,24 @@ class AudiobookAlbum(Agent.Album):
         """
             Calls the metadata API to get book details,
             then calls helper to parse those details.
+            Returns True on success, False if the fetch failed (so the caller
+            can skip the update instead of crashing the refresh).
         """
         update_url = helper.build_url()
-        request = str(make_request(update_url))
+        try:
+            request = str(make_request(update_url))
+        except Exception as e:
+            log.error(
+                'incipit book fetch failed for %s; keeping existing '
+                'metadata: %s', update_url, e
+            )
+            return False
         response = json_decode(request)
         helper.parse_api_response(response)
 
         # Set date to date object
         helper.date = self.getDateFromString(helper.date)
+        return True
 
     def compile_metadata(self, helper):
         """

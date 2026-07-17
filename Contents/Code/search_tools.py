@@ -479,6 +479,10 @@ class AlbumSearchTool(SearchTool):
                         'narrator': narrators,
                         'region': self.region_override,
                         'title': c.get('title', ''),
+                        # The API's 0-1 confidence (normalized title + author +
+                        # duration). Carried through so we score on it rather
+                        # than re-deriving a cruder score locally.
+                        'confidence': c.get('confidence'),
                     }
                 )
             except Exception as e:
@@ -809,6 +813,27 @@ class ScoreTool:
         """
             Scores a result.
         """
+        # incipit-api already scored and ranked these candidates on the
+        # NORMALIZED title (series suffix stripped) + author + duration. Trust
+        # that confidence directly instead of re-deriving a Levenshtein score
+        # from the RAW album tag, which over-penalizes series/folder-formatted
+        # names ("King of Duels: The Wandering Inn, Book 16" vs "King of Duels",
+        # "The Pilot [The Last Horizon 4]" vs "The Pilot").
+        incipit_conf = self.result_dict.get('confidence')
+        if incipit_conf is not None:
+            # Keep the API's best-first order; index nudges ties downward.
+            score = int(round(incipit_conf * 100)) - self.index
+            log.info("Result #" + str(self.index + 1))
+            plex_score_dict = self.score_create_result(score)
+            if score >= self.IGNORE_SCORE:
+                self.info.append(plex_score_dict)
+            else:
+                log.info(
+                    '# Score is below ignore boundary (%s)... Skipping!',
+                    self.IGNORE_SCORE
+                )
+            return
+
         # Array to hold score points for processing
         all_scores = []
 
