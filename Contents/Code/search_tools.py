@@ -249,16 +249,16 @@ class AlbumSearchTool(SearchTool):
             the media object so we can confirm how duration/tracks are exposed.
         """
         extra = ''
-        # Probe: log the media attributes we can reach (dir() is blocked in the
-        # plugin sandbox, so read specific attrs individually).
+        # Probe: log the media attributes we can reach. getattr() and dir() are
+        # BOTH blocked in the Plex plugin sandbox, so read attrs directly (these
+        # four are the same ones pre_search_logging reads successfully).
         try:
             log.debug(
-                'incipit media: artist=%s album=%s title=%s name=%s tracks=%s' % (
-                    getattr(self.media, 'artist', None),
-                    getattr(self.media, 'album', None),
-                    getattr(self.media, 'title', None),
-                    getattr(self.media, 'name', None),
-                    len(getattr(self.media, 'tracks', []) or []),
+                'incipit media: artist=%s album=%s title=%s name=%s' % (
+                    self.media.artist,
+                    self.media.album,
+                    self.media.title,
+                    self.media.name,
                 )
             )
         except Exception as e:
@@ -266,25 +266,20 @@ class AlbumSearchTool(SearchTool):
 
         # Album duration (ms) = sum of the track part durations. A legacy album
         # media object has no single .duration; it exposes tracks -> items ->
-        # parts, each part carrying its own duration.
+        # parts, each part carrying its own duration. Any missing link raises and
+        # is caught, leaving duration None.
         duration = None
         try:
             total = 0
-            for track in (getattr(self.media, 'tracks', None) or []):
-                for item in (getattr(track, 'items', None) or []):
-                    for part in (getattr(item, 'parts', None) or []):
-                        if getattr(part, 'duration', None):
+            for track in (self.media.tracks or []):
+                for item in (track.items or []):
+                    for part in (item.parts or []):
+                        if part.duration:
                             total += part.duration
             if total:
                 duration = total
         except Exception as e:
             log.error('incipit duration probe failed: %s', e)
-        if not duration:
-            # Fall back to a direct attr in case a future media shape carries one.
-            try:
-                duration = getattr(self.media, 'duration', None)
-            except Exception:
-                duration = None
         log.debug('incipit duration resolved: %s' % str(duration))
         if duration:
             extra += '&duration=' + urllib.quote(str(duration))
@@ -747,8 +742,11 @@ class ScoreTool:
         if self.date:
             plex_score_dict['date'] = self.date
             data_to_log.append({'Date is': self.date})
+        # The album search's display loop reads r['narrator'] unconditionally, so
+        # the key must always exist — Hardcover/OpenLibrary books frequently have
+        # no narrator, unlike Audible where it is always present.
+        plex_score_dict['narrator'] = self.narrator or ''
         if self.narrator:
-            plex_score_dict['narrator'] = self.narrator
             data_to_log.append({'Narrator is': self.narrator})
         if self.region:
             plex_score_dict['region'] = self.region
@@ -759,8 +757,9 @@ class ScoreTool:
         if self.title:
             plex_score_dict['title'] = self.title
             data_to_log.append({'Title is': self.title})
-        if self.year:
-            plex_score_dict['year'] = self.year
+        # Likewise read unconditionally by the display loop; '' when the
+        # candidate carries no parseable date (many provider records don't).
+        plex_score_dict['year'] = self.year or ''
 
         log.metadata(data_to_log, log_level="info")
         return plex_score_dict
