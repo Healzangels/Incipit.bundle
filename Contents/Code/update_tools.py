@@ -515,24 +515,15 @@ class ArtistUpdateTool(UpdateTool):
         if 'name' in response:
             self.name = response['name']
         if 'image' in response:
-            best_image = response['image']
-            # Prefer Hardcover's photo when it is higher-resolution than
-            # Audible's (some Audible author thumbnails are tiny).
-            alt_image = response.get('imageAlt')
-            if alt_image:
-                best_dims = self.measure_image(best_image)
-                alt_dims = self.measure_image(alt_image)
-                best_height = best_dims[0] if best_dims else 0
-                alt_height = alt_dims[0] if alt_dims else 0
-                if alt_height > best_height:
-                    log.info(
-                        'Using higher-res Hardcover author image '
-                        '(%dpx vs %dpx)' % (alt_height, best_height)
-                    )
-                    best_image = alt_image
-            squared_image = self.get_square_image(best_image)
+            # The API already picks the best author image (preferring Hardcover's
+            # curated portrait over Audible's — which is often the book cover, not
+            # a photo), so use it as the default poster.
+            squared_image = self.get_square_image(response['image'])
             log.debug('Author image: ' + squared_image)
             self.thumb = squared_image
+        if 'imageAlt' in response and response['imageAlt']:
+            # Offer the alternate (Audible) image as a secondary poster option.
+            self.thumb_secondary = response['imageAlt']
         if 'similar' in response:
             self.similar = response['similar']
 
@@ -556,6 +547,8 @@ class ArtistUpdateTool(UpdateTool):
         self.name = ''
         self.similar = []
         self.thumb = ''
+        # The alternate (Audible) author image, offered as a secondary poster.
+        self.thumb_secondary = ''
 
     def set_metadata_sort_title(self):
         """

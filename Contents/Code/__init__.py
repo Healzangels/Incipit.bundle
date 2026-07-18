@@ -258,6 +258,19 @@ class AudiobookArtist(Agent.Artist):
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=0
                     )
+            # Offer the alternate (Audible) author image as a secondary option.
+            if (
+                helper.thumb_secondary
+                and helper.thumb_secondary != helper.thumb
+            ):
+                if (
+                    helper.thumb_secondary not in helper.metadata.posters
+                    or helper.force
+                ):
+                    secondary_data = make_request(helper.thumb_secondary)
+                    if secondary_data is not None:
+                        helper.metadata.posters[helper.thumb_secondary] = \
+                            Proxy.Media(secondary_data, sort_order=1)
 
         helper.log_update_metadata()
 
