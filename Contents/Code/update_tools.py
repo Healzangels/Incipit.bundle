@@ -394,12 +394,10 @@ class AlbumUpdateTool(UpdateTool):
 
 
 class ArtistUpdateTool(UpdateTool):
-    def get_square_image(self, image_url):
+    def measure_image(self, image_url):
         """
-            Get square author photos from Audible
-
-            Crop each portrait photo to a square centered at the top,
-            and crop each landscape photo to a square at the horizontal center
+            Read a JPEG's (height, width) from the first bytes, or None on any
+            failure (non-JPEG, unreachable, truncated).
         """
         try:
             image_file_dl = urllib.urlopen(image_url)
@@ -408,13 +406,12 @@ class ArtistUpdateTool(UpdateTool):
 
             image_file = os.tmpfile()
             image_file.write(image_file_dl_contents)
-
             image_file.seek(0)
 
             head = image_file.read(24)
             if len(head) != 24:
                 image_file.close()
-                return image_url
+                return None
 
             image_file.seek(0)  # Read 0xff next
             size = 2
@@ -429,38 +426,44 @@ class ArtistUpdateTool(UpdateTool):
             # We are at a SOFn block
             image_file.seek(1, 1)  # Skip `precision' byte.
             height, width = struct.unpack('>HH', image_file.read(4))
-
             image_file.close()
+            return (height, width)
+        except Exception as err:
+            log.error('Could not measure image %s: %s' % (image_url, err))
+            return None
 
-            if (height > width):
-                # Return a portrait image centered at the top
-                w_str = str(width)
-                square_image_url = image_url.replace(
-                    '.jpg',
-                    '.__01_SX'+w_str+'_CR0,0,'+w_str+','+w_str+'__.jpg'
-                )
-                return square_image_url
-
-            if (width > height):
-                # Return a landscape image centered at the horizontal middle
-                h_str = str(height)
-                padding = str((width - height) / 2)
-                square_image_url = image_url.replace(
-                    '.jpg',
-                    '.__01_SY'+h_str+'_CR'+padding+',0,'+h_str+','+h_str+'__.jpg'
-                )
-                return square_image_url
-
+    def get_square_image(self, image_url):
+        """
+            Crop an Audible (Amazon) author photo to a square via Amazon's
+            crop-in-URL syntax: portrait centered at the top, landscape at the
+            horizontal center. Non-Amazon URLs (e.g. Hardcover) don't support
+            that syntax, so they are returned unchanged.
+        """
+        if 'amazon' not in image_url:
             return image_url
 
-        except Exception as err:
-            log.separator(
-                msg=(
-                    'Error getting square image for ' + self.media.title
-                ),
-                log_level="error"
+        dimensions = self.measure_image(image_url)
+        if not dimensions:
+            return image_url
+        height, width = dimensions
+
+        if (height > width):
+            # Return a portrait image centered at the top
+            w_str = str(width)
+            return image_url.replace(
+                '.jpg',
+                '.__01_SX'+w_str+'_CR0,0,'+w_str+','+w_str+'__.jpg'
             )
-            log.error(err)
+
+        if (width > height):
+            # Return a landscape image centered at the horizontal middle
+            h_str = str(height)
+            padding = str((width - height) / 2)
+            return image_url.replace(
+                '.jpg',
+                '.__01_SY'+h_str+'_CR'+padding+',0,'+h_str+','+h_str+'__.jpg'
+            )
+
         return image_url
 
     def parse_api_response(self, response):
@@ -476,8 +479,23 @@ class ArtistUpdateTool(UpdateTool):
         if 'name' in response:
             self.name = response['name']
         if 'image' in response:
-            squared_image = self.get_square_image(response['image'])
-            log.debug('Square image: ' + squared_image)
+            best_image = response['image']
+            # Prefer Hardcover's photo when it is higher-resolution than
+            # Audible's (some Audible author thumbnails are tiny).
+            alt_image = response.get('imageAlt')
+            if alt_image:
+                best_dims = self.measure_image(best_image)
+                alt_dims = self.measure_image(alt_image)
+                best_height = best_dims[0] if best_dims else 0
+                alt_height = alt_dims[0] if alt_dims else 0
+                if alt_height > best_height:
+                    log.info(
+                        'Using higher-res Hardcover author image '
+                        '(%dpx vs %dpx)' % (alt_height, best_height)
+                    )
+                    best_image = alt_image
+            squared_image = self.get_square_image(best_image)
+            log.debug('Author image: ' + squared_image)
             self.thumb = squared_image
         if 'similar' in response:
             self.similar = response['similar']
