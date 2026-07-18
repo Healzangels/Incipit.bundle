@@ -163,7 +163,7 @@ class AudiobookArtist(Agent.Artist):
         """
         query = helper.build_search_args()
         search_url = helper.build_url(query)
-        request = str(make_request(search_url))
+        request = str(make_request(search_url, cache_time=0))
         response = json_decode(request)
         # When using asin match, put it into array
         if isinstance(response, list):
@@ -390,7 +390,7 @@ class AudiobookAlbum(Agent.Album):
         """
         query = helper.build_search_args()
         search_url = helper.build_url(query)
-        request = str(make_request(search_url))
+        request = str(make_request(search_url, cache_time=0))
         response = json_decode(request)
         results_list = helper.parse_api_response(response)
         return results_list
@@ -522,10 +522,13 @@ def incipit_headers(url):
     return {}
 
 
-def make_request(url):
+def make_request(url, cache_time=None):
     """
         Makes and returns an HTTP request.
         Retries 4 times, increasing  time between each retry.
+        cache_time=0 bypasses the plugin HTTP cache — used for SEARCH calls so
+        an improved API result isn't masked by a stale cached response (data
+        lookups by ASIN stay cached, since those records are stable).
     """
     headers = incipit_headers(url)
     sleep_time = 1
@@ -533,7 +536,8 @@ def make_request(url):
     for x in range(0, num_retries):
         try:
             make_request = HTTP.Request(
-                url, headers=headers, timeout=90, sleep=sleep_time)
+                url, headers=headers, cacheTime=cache_time,
+                timeout=90, sleep=sleep_time)
             str_error = None
             ssl_error = None
         except Exception as str_error:
