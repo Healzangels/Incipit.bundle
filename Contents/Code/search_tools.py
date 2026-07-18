@@ -13,7 +13,8 @@ region_regex = re.compile(r'(?<=\[)[A-Za-z]{2}(?=\])')
 
 # Plex library section root paths, fetched once. Used to derive the author from
 # a file path (<root>/<Author>/...) when the ALBUMARTIST tag is missing or bad.
-_LIBRARY_ROOTS = None
+# NB: the Plex RestrictedPython sandbox forbids names starting with "_".
+LIBRARY_ROOTS_CACHE = None
 
 
 def get_library_roots():
@@ -21,9 +22,9 @@ def get_library_roots():
         The server's library section root paths, fetched once and cached.
         Returns [] on any failure (callers degrade to the tag-derived author).
     """
-    global _LIBRARY_ROOTS
-    if _LIBRARY_ROOTS is not None:
-        return _LIBRARY_ROOTS
+    global LIBRARY_ROOTS_CACHE
+    if LIBRARY_ROOTS_CACHE is not None:
+        return LIBRARY_ROOTS_CACHE
     roots = []
     try:
         xml = str(HTTP.Request(
@@ -31,7 +32,7 @@ def get_library_roots():
         roots = re.findall(r'<Location [^>]*path="([^"]+)"', xml)
     except Exception as e:
         log.error('incipit library roots fetch failed: %s', e)
-    _LIBRARY_ROOTS = roots
+    LIBRARY_ROOTS_CACHE = roots
     return roots
 
 
