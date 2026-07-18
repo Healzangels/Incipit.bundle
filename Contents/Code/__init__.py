@@ -91,14 +91,24 @@ class AudiobookArtist(Agent.Artist):
             search_helper.media.artist
         )
 
-        # Call search API
-        result = self.call_search_api(search_helper)
+        # Try each author in a multi-author tag until one matches. Handles
+        # narrator-first tags and slash/"and" co-authors where the real author
+        # is not listed first (e.g. "Jefferson Mays, Daniel Abraham, Ty Franck").
+        candidates = (
+            search_helper.author_candidates() or [search_helper.media.artist]
+        )
+        result = None
+        for candidate in candidates:
+            search_helper.media.artist = candidate
+            result = self.call_search_api(search_helper)
+            if result:
+                break
 
         # Write search result status to log
         if not result:
             log.warn(
                 'No results found for query "%s"',
-                search_helper.media.artist
+                ' / '.join(candidates)
             )
             return
         log.debug(

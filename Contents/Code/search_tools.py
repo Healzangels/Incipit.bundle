@@ -16,10 +16,12 @@ region_regex = re.compile(r'(?<=\[)[A-Za-z]{2}(?=\])')
 # NB: the Plex RestrictedPython sandbox forbids names starting with "_".
 LIBRARY_ROOTS_CACHE = None
 
-# Co-author separators for reducing a multi-author artist to its primary author:
-# comma, ampersand, semicolon, or the word "and". Whitespace around "and"/"&"
-# keeps it from splitting inside a name (e.g. "Rand", "Anderson").
-MULTI_AUTHOR_RE = re.compile(r'\s*,\s*|\s+&\s+|\s+and\s+|\s*;\s*', re.IGNORECASE)
+# Co-author separators for reducing a multi-author artist to its authors:
+# comma, ampersand, semicolon, slash, or the word "and". Whitespace around
+# "and"/"&" keeps it from splitting inside a name (e.g. "Rand", "Anderson").
+MULTI_AUTHOR_RE = re.compile(
+    r'\s*,\s*|\s+&\s+|\s+and\s+|\s*;\s*|\s*/\s*', re.IGNORECASE
+)
 
 
 def get_library_roots():
@@ -617,6 +619,24 @@ class ArtistSearchTool(SearchTool):
         query = 'name=' + urllib.quote(modified_artist_name)
         # Set param
         return query
+
+    def author_candidates(self):
+        """
+            Ordered author names parsed from a multi-author artist tag, each
+            cleaned of contributor/series text. The search tries them in order,
+            so when the first name is actually the narrator (e.g. "Jefferson
+            Mays, Daniel Abraham, Ty Franck" or "John Bellairs/George Guidall")
+            and matches nothing, the real author is tried next.
+        """
+        candidates = []
+        for part in MULTI_AUTHOR_RE.split(self.media.artist or ''):
+            cleaned = self.clear_contributor_text(part)
+            if self.prefs['strip_series_from_author']:
+                cleaned = self.clear_series_text(cleaned)
+            cleaned = cleaned.strip()
+            if cleaned and cleaned not in candidates:
+                candidates.append(cleaned)
+        return candidates
 
     def cleanup_author_name(self, name):
         """
