@@ -330,7 +330,10 @@ class AudiobookAlbum(Agent.Album):
             'fr': {'T_A': 'de', 'A_N': 'ac'},
             'it': {'T_A': 'di', 'A_N': 'con'}
         }
-        local_separators = separator_dict[lang]
+        # Fall back to English separators for languages not in the table
+        # (es/ja) so an album search never crashes with a KeyError.
+        local_separators = separator_dict.get(
+            lang, separator_dict[Locale.Language.English])
         log.debug(
             'Using localized separators "%s" and "%s"',
             local_separators['T_A'], local_separators['A_N']
