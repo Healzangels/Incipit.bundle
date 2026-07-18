@@ -362,8 +362,34 @@ class AlbumUpdateTool(UpdateTool):
             album_title = self.title + ': ' + self.subtitle
         else:
             album_title = self.title
+        album_title = self.strip_trailing_by_contributor(album_title)
         if not self.metadata.title or self.force:
             self.metadata.title = album_title
+
+    def strip_trailing_by_contributor(self, title):
+        """
+            Remove a trailing " by <Name>" from a title, but ONLY when <Name>
+            matches a credited author or narrator of this book. Audible sometimes
+            appends the ghostwriter ("Code Red: A Mitch Rapp Novel by Kyle Mills").
+            Matching against real contributors keeps legit titles like "Death by
+            Black Hole" or "Murder by the Book" intact.
+        """
+        matched = re.search(r'\s+by\s+(.+?)\s*$', title, flags=re.IGNORECASE)
+        if not matched:
+            return title
+        trailing = matched.group(1).strip().lower()
+        names = []
+        for person in (self.author or []):
+            name = person.get('name') if isinstance(person, dict) else None
+            if name:
+                names.append(name.strip().lower())
+        for person in (self.narrator or []):
+            name = person.get('name') if isinstance(person, dict) else None
+            if name:
+                names.append(name.strip().lower())
+        if trailing in names:
+            return title[:matched.start()].strip()
+        return title
 
     def simplify_title(self):
         """

@@ -483,9 +483,15 @@ class AudiobookAlbum(Agent.Album):
         # Thumb.
         # Kept here because of Proxy
         if helper.thumb:
+            # When preferring local art, add our cover only as a fallback (higher
+            # sort_order = lower priority) and don't re-prioritize it to the front,
+            # so a local cover.jpg (via Local Media Assets) keeps the default slot.
+            # For books with no local cover, ours is still the only option -> used.
+            prefer_local = Prefs['prefer_local_cover']
+            primary_order = 1 if prefer_local else 0
             if helper.thumb not in helper.metadata.posters or helper.force:
                 helper.metadata.posters[helper.thumb] = Proxy.Media(
-                    make_request(helper.thumb), sort_order=0
+                    make_request(helper.thumb), sort_order=primary_order
                 )
             # Keep the original cover as a secondary poster when a square cover
             # took the default slot, so it stays available to pick.
@@ -499,11 +505,14 @@ class AudiobookAlbum(Agent.Album):
                     or helper.force
                 ):
                     helper.metadata.posters[helper.thumb_secondary] = Proxy.Media(
-                        make_request(helper.thumb_secondary), sort_order=1
+                        make_request(helper.thumb_secondary),
+                        sort_order=primary_order + 1
                     )
                 valid_posters.append(helper.thumb_secondary)
-            # Re-prioritize so the (square) default poster is first.
-            helper.metadata.posters.validate_keys(valid_posters)
+            # Re-prioritize so our (square) default poster is first — but not when
+            # preferring local art, so the local cover.jpg stays the default.
+            if not prefer_local:
+                helper.metadata.posters.validate_keys(valid_posters)
         # Rating.
         helper.set_metadata_rating()
 
