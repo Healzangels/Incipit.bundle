@@ -16,6 +16,11 @@ region_regex = re.compile(r'(?<=\[)[A-Za-z]{2}(?=\])')
 # NB: the Plex RestrictedPython sandbox forbids names starting with "_".
 LIBRARY_ROOTS_CACHE = None
 
+# Co-author separators for reducing a multi-author artist to its primary author:
+# comma, ampersand, semicolon, or the word "and". Whitespace around "and"/"&"
+# keeps it from splitting inside a name (e.g. "Rand", "Anderson").
+MULTI_AUTHOR_RE = re.compile(r'\s*,\s*|\s+&\s+|\s+and\s+|\s*;\s*', re.IGNORECASE)
+
 
 def get_library_roots():
     """
@@ -680,7 +685,11 @@ class ArtistSearchTool(SearchTool):
         """
             Handles multi-artist lists.
         """
-        author_array = self.media.artist.split(', ')
+        author_array = [
+            a.strip()
+            for a in MULTI_AUTHOR_RE.split(self.media.artist)
+            if a.strip()
+        ]
         if len(author_array) > 1:
             self.find_non_contributor(author_array)
         else:
