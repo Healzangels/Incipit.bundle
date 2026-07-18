@@ -87,10 +87,6 @@ class AudiobookArtist(Agent.Artist):
         if not search_helper.media.artist:
             return
 
-        search_helper.media.artist = String.StripDiacritics(
-            search_helper.media.artist
-        )
-
         # Try each author in a multi-author tag until one matches. Handles
         # narrator-first tags and slash/"and" co-authors where the real author
         # is not listed first (e.g. "Jefferson Mays, Daniel Abraham, Ty Franck").
@@ -99,7 +95,7 @@ class AudiobookArtist(Agent.Artist):
         )
         result = None
         for candidate in candidates:
-            search_helper.media.artist = candidate
+            search_helper.media.artist = String.StripDiacritics(candidate)
             result = self.call_search_api(search_helper)
             if result:
                 break
@@ -163,7 +159,8 @@ class AudiobookArtist(Agent.Artist):
         update_helper = ArtistUpdateTool(
             'authors', force, lang, media, metadata, Prefs)
 
-        self.call_item_api(update_helper)
+        if not self.call_item_api(update_helper):
+            return
 
         self.compile_metadata(update_helper)
 
@@ -173,8 +170,14 @@ class AudiobookArtist(Agent.Artist):
         """
         query = helper.build_search_args()
         search_url = helper.build_url(query)
-        request = str(make_request(search_url, cache_time=0))
+        try:
+            request = str(make_request(search_url, cache_time=0))
+        except Exception as err:
+            log.error("Author search request failed: %s", err)
+            return []
         response = json_decode(request)
+        if response is None:
+            return []
         # When using asin match, put it into array
         if isinstance(response, list):
             arr_to_pass = response
@@ -211,13 +214,21 @@ class AudiobookArtist(Agent.Artist):
 
     def call_item_api(self, helper):
         """
-            Calls the metadata API to get author details,
-            then calls helper to parse those details.
+            Calls the metadata API to get author details, then parses them.
+            Returns True on success, False on any transport/decode failure so the
+            caller can keep existing metadata instead of crashing the refresh.
         """
         update_url = helper.build_url()
-        request = str(make_request(update_url))
+        try:
+            request = str(make_request(update_url))
+        except Exception as err:
+            log.error("Author update request failed: %s", err)
+            return False
         response = json_decode(request)
+        if response is None:
+            return False
         helper.parse_api_response(response)
+        return True
 
     def compile_metadata(self, helper):
         """
@@ -400,8 +411,14 @@ class AudiobookAlbum(Agent.Album):
         """
         query = helper.build_search_args()
         search_url = helper.build_url(query)
-        request = str(make_request(search_url, cache_time=0))
+        try:
+            request = str(make_request(search_url, cache_time=0))
+        except Exception as err:
+            log.error("Book search request failed: %s", err)
+            return []
         response = json_decode(request)
+        if response is None:
+            return []
         results_list = helper.parse_api_response(response)
         return results_list
 
@@ -458,6 +475,12 @@ class AudiobookAlbum(Agent.Album):
             )
             return False
         response = json_decode(request)
+        if response is None:
+            log.error(
+                'incipit book fetch returned no usable data for %s; '
+                'keeping existing metadata', update_url
+            )
+            return False
         helper.parse_api_response(response)
 
         # Set date to date object
@@ -539,7 +562,9 @@ def json_decode(output):
     """
     try:
         return json.loads(output, encoding="utf-8")
-    except AttributeError:
+    except (AttributeError, ValueError):
+        # ValueError: malformed/empty/HTML body (e.g. an API 500 page, or the
+        # "None" string when make_request returned nothing).
         return None
 
 
@@ -567,23 +592,17 @@ def make_request(url, cache_time=None):
     headers = incipit_headers(url)
     sleep_time = 1
     num_retries = 4
-    for x in range(0, num_retries):
+    response = None
+    for attempt in range(0, num_retries):
         try:
-            make_request = HTTP.Request(
+            response = HTTP.Request(
                 url, headers=headers, cacheTime=cache_time,
                 timeout=90, sleep=sleep_time)
-            str_error = None
-            ssl_error = None
-        except Exception as str_error:
-            log.error("Failed http request attempt #" + x + ": " + url)
-            log.error(str_error)
-        except SSLError as ssl_error:
-            log.error("Failed http request attempt #" + x + ": " + url)
-            log.error(ssl_error)
-
-        if str_error or ssl_error:
-            sleep(sleep_time)
-            sleep_time *= x
-        else:
             break
-    return make_request
+        except Exception as err:
+            log.error(
+                "Failed http request attempt #%d: %s" % (attempt + 1, url))
+            log.error(err)
+            sleep(sleep_time)
+            sleep_time *= 2
+    return response

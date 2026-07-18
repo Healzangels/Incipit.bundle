@@ -51,6 +51,9 @@ class SearchTool:
         self.media = media
         self.prefs = prefs
         self.results = results
+        # The full (pre-collapse) multi-author artist string, preserved by
+        # get_primary_author so author_candidates() can try each author in turn.
+        self.multi_author_source = None
 
     def build_url(self, query):
         """
@@ -628,8 +631,12 @@ class ArtistSearchTool(SearchTool):
             Mays, Daniel Abraham, Ty Franck" or "John Bellairs/George Guidall")
             and matches nothing, the real author is tried next.
         """
+        # Split the FULL author string (preserved before handle_multi_artist
+        # collapsed media.artist to the primary), falling back to the current
+        # artist if get_primary_author never ran.
+        source = self.multi_author_source or self.media.artist or ''
         candidates = []
-        for part in MULTI_AUTHOR_RE.split(self.media.artist or ''):
+        for part in MULTI_AUTHOR_RE.split(source):
             cleaned = self.clear_contributor_text(part)
             if self.prefs['strip_series_from_author']:
                 cleaned = self.clear_series_text(cleaned)
@@ -747,6 +754,11 @@ class ArtistSearchTool(SearchTool):
         # We need an author name to continue
         if not self.media.artist:
             return
+
+        # Preserve the full author string BEFORE handle_multi_artist collapses it
+        # to the primary, so author_candidates() can retry each author in order
+        # (e.g. narrator-first tags like "Jefferson Mays, Daniel Abraham, ...").
+        self.multi_author_source = self.media.artist
 
         # Handle multi-artist
         self.handle_multi_artist()

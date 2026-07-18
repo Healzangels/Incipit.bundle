@@ -264,14 +264,16 @@ class AlbumUpdateTool(UpdateTool):
             (Hardcover/OpenLibrary) records often don't — a missing one used to
             crash the update with AttributeError (e.g. no 'synopsis').
         """
-        self.author = None
+        # List-typed fields default to [] (not None) so the tag helpers can
+        # iterate them safely even when a provider record omits them.
+        self.author = []
         self.date = None
-        self.genres = None
-        self.narrator = None
+        self.genres = []
+        self.narrator = []
         self.rating = None
         self.series = ''
         self.series2 = ''
-        self.similar = None
+        self.similar = []
         self.studio = ''
         self.subtitle = ''
         self.synopsis = ''
@@ -536,11 +538,15 @@ class ArtistUpdateTool(UpdateTool):
 
     def set_empty_variables(self):
         """
-            Sets empty variables.
+            Sets empty variables. name/description are read unconditionally by
+            the metadata setters, and description is often absent (author with no
+            bio), so both must be initialised or the update raises AttributeError.
         """
         self.date = None
-        self.genres = None
-        self.similar = None
+        self.description = ''
+        self.genres = []
+        self.name = ''
+        self.similar = []
         self.thumb = ''
 
     def set_metadata_sort_title(self):
@@ -608,7 +614,7 @@ class TagTool:
         """
         if not self.helper.metadata.styles or self.helper.force:
             self.helper.metadata.styles.clear()
-            for narrator in self.helper.narrator:
+            for narrator in (self.helper.narrator or []):
                 self.helper.metadata.styles.add(narrator['name'].strip())
 
     def add_authors_to_moods(self):
@@ -618,7 +624,7 @@ class TagTool:
         contributor_regex = '.+?(?= -)'
         if not self.helper.metadata.moods or self.helper.force:
             # Loop through authors to check if it has contributor wording
-            for author in self.helper.author:
+            for author in (self.helper.author or []):
                 if not re.match(contributor_regex, author['name']):
                     self.helper.metadata.moods.add(author['name'].strip())
 
