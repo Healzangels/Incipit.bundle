@@ -415,8 +415,13 @@ class AlbumUpdateTool(UpdateTool):
             Prefixes volume number with 'Book' if it doesn't exist.
         """
         # incipit-api (Hardcover/OpenLibrary) can return a numeric series
-        # position; coerce to str so the regex/concatenation don't raise.
+        # position; coerce to str so the regex/concatenation don't raise. A
+        # missing/None position yields no volume rather than "Book None".
+        if string is None:
+            return ''
         string = str(string)
+        if not string.strip():
+            return ''
         book_regex = '(Book ?(\d*\.)?\d+[+-]?[\d]?)'
         if not re.match(book_regex, string):
             prefixed_string = ('Book ' + string)

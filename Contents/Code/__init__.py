@@ -97,6 +97,10 @@ class AudiobookArtist(Agent.Artist):
         for candidate in candidates:
             search_helper.media.artist = String.StripDiacritics(candidate)
             result = self.call_search_api(search_helper)
+            # None = request failed: abort rather than risk matching the next
+            # (wrong) author on a transient blip. [] = genuine miss: try next.
+            if result is None:
+                break
             if result:
                 break
 
@@ -170,14 +174,17 @@ class AudiobookArtist(Agent.Artist):
         """
         query = helper.build_search_args()
         search_url = helper.build_url(query)
+        # Return None (not []) on a transport/decode FAILURE so the multi-author
+        # retry loop can tell "this request errored" from "this author genuinely
+        # had no results" and not fall through to the wrong author on a blip.
         try:
             request = str(make_request(search_url, cache_time=0))
         except Exception as err:
             log.error("Author search request failed: %s", err)
-            return []
+            return None
         response = json_decode(request)
         if response is None:
-            return []
+            return None
         # When using asin match, put it into array
         if isinstance(response, list):
             arr_to_pass = response
@@ -246,9 +253,11 @@ class AudiobookArtist(Agent.Artist):
         # Kept here because of Proxy
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
-                helper.metadata.posters[helper.thumb] = Proxy.Media(
-                    make_request(helper.thumb), sort_order=0
-                )
+                thumb_data = make_request(helper.thumb)
+                if thumb_data is not None:
+                    helper.metadata.posters[helper.thumb] = Proxy.Media(
+                        thumb_data, sort_order=0
+                    )
 
         helper.log_update_metadata()
 
@@ -418,10 +427,10 @@ class AudiobookAlbum(Agent.Album):
             request = str(make_request(search_url, cache_time=0))
         except Exception as err:
             log.error("Book search request failed: %s", err)
-            return []
+            return None
         response = json_decode(request)
         if response is None:
-            return []
+            return None
         results_list = helper.parse_api_response(response)
         return results_list
 
@@ -516,9 +525,11 @@ class AudiobookAlbum(Agent.Album):
             prefer_local = Prefs['prefer_local_cover']
             primary_order = 1 if prefer_local else 0
             if helper.thumb not in helper.metadata.posters or helper.force:
-                helper.metadata.posters[helper.thumb] = Proxy.Media(
-                    make_request(helper.thumb), sort_order=primary_order
-                )
+                thumb_data = make_request(helper.thumb)
+                if thumb_data is not None:
+                    helper.metadata.posters[helper.thumb] = Proxy.Media(
+                        thumb_data, sort_order=primary_order
+                    )
             # Keep the original cover as a secondary poster when a square cover
             # took the default slot, so it stays available to pick.
             valid_posters = [helper.thumb]
@@ -530,10 +541,13 @@ class AudiobookAlbum(Agent.Album):
                     helper.thumb_secondary not in helper.metadata.posters
                     or helper.force
                 ):
-                    helper.metadata.posters[helper.thumb_secondary] = Proxy.Media(
-                        make_request(helper.thumb_secondary),
-                        sort_order=primary_order + 1
-                    )
+                    secondary_data = make_request(helper.thumb_secondary)
+                    if secondary_data is not None:
+                        helper.metadata.posters[helper.thumb_secondary] = \
+                            Proxy.Media(
+                                secondary_data,
+                                sort_order=primary_order + 1
+                            )
                 valid_posters.append(helper.thumb_secondary)
             # Re-prioritize so our (square) default poster is first — but not when
             # preferring local art, so the local cover.jpg stays the default.
@@ -606,6 +620,8 @@ def make_request(url, cache_time=None):
             log.error(
                 "Failed http request attempt #%d: %s" % (attempt + 1, url))
             log.error(err)
-            sleep(sleep_time)
-            sleep_time *= 2
+            # No point sleeping after the final attempt.
+            if attempt < num_retries - 1:
+                sleep(sleep_time)
+                sleep_time *= 2
     return response
