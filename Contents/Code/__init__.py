@@ -477,8 +477,23 @@ class AudiobookAlbum(Agent.Album):
                 helper.metadata.posters[helper.thumb] = Proxy.Media(
                     make_request(helper.thumb), sort_order=0
                 )
-                # Re-prioritize the poster to the first position
-                helper.metadata.posters.validate_keys([helper.thumb])
+            # Keep the original cover as a secondary poster when a square cover
+            # took the default slot, so it stays available to pick.
+            valid_posters = [helper.thumb]
+            if (
+                helper.thumb_secondary
+                and helper.thumb_secondary != helper.thumb
+            ):
+                if (
+                    helper.thumb_secondary not in helper.metadata.posters
+                    or helper.force
+                ):
+                    helper.metadata.posters[helper.thumb_secondary] = Proxy.Media(
+                        make_request(helper.thumb_secondary), sort_order=1
+                    )
+                valid_posters.append(helper.thumb_secondary)
+            # Re-prioritize so the (square) default poster is first.
+            helper.metadata.posters.validate_keys(valid_posters)
         # Rating.
         helper.set_metadata_rating()
 

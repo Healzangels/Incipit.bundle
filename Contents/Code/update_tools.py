@@ -233,6 +233,12 @@ class AlbumUpdateTool(UpdateTool):
             self.synopsis = response['summary']
         if 'image' in response:
             self.thumb = response['image']
+        if 'imageSquare' in response and response['imageSquare']:
+            # Plex music art is square. Prefer the native square cover (Apple)
+            # as the default poster, keeping the original as a secondary option
+            # rather than dropping it.
+            self.thumb_secondary = self.thumb
+            self.thumb = response['imageSquare']
         if 'similar' in response:
             self.similar = response['similar']
         if 'subtitle' in response:
@@ -270,6 +276,9 @@ class AlbumUpdateTool(UpdateTool):
         self.subtitle = ''
         self.synopsis = ''
         self.thumb = ''
+        # The original (usually portrait) cover, kept as a secondary poster when
+        # a native square cover is used as the default.
+        self.thumb_secondary = ''
         self.title = ''
         self.volume = ''
         self.volume2 = ''
