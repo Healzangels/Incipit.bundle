@@ -315,8 +315,20 @@ class AlbumSearchTool(SearchTool):
             folder_author = self.author_from_path()
             if folder_author:
                 log.debug('incipit author from folder: %s' % folder_author)
-                return folder_author
+                return self.clean_search_author(folder_author)
 
+        return self.clean_search_author(author or '')
+
+    def clean_search_author(self, author):
+        """
+            Strip a trailing "(Series)" qualifier from the book-search author so
+            the API scores on the real author ("Terry Pratchett (Discworld)" ->
+            "Terry Pratchett"), mirroring the artist-match path. Without this the
+            "(Discworld)" tanks author-similarity and drags the whole match below
+            the auto-match threshold.
+        """
+        if author and self.prefs['strip_series_from_author']:
+            return self.clear_series_text(author)
         return author or ''
 
     def author_from_path(self):
