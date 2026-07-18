@@ -247,7 +247,16 @@ class AlbumSearchTool(SearchTool):
             # title (+ author when we have it) and filters on relevance, so a
             # bare title is a valid query — unlike Audible's catalog search we
             # must never drop to a `keywords`-only param with no title.
-            query = 'title=' + urllib.quote(self.normalizedName)
+            #
+            # Send the title with its STRUCTURE intact (parens/colon/#/brackets)
+            # and let the API's validated normalizer strip the series suffix.
+            # normalize_name() deletes those markers but keeps the words
+            # ("Steel World (Undying Mercenaries #1)" -> "Steel World Undying
+            # Mercenaries 1"), which defeats the API's suffix stripping and
+            # mis-ranks a book-level record with the same messy title ABOVE the
+            # real audio edition. StripDiacritics keeps punctuation quote-safe.
+            raw_title = self.media.album or self.media.title or self.normalizedName
+            query = 'title=' + urllib.quote(String.StripDiacritics(raw_title))
             author = self.resolve_author()
             if author:
                 query += '&author=' + urllib.quote(author)
