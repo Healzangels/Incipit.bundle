@@ -9,6 +9,19 @@ import os
 # Setup logger
 log = Logging()
 
+# A subtitle that is really just a series/format descriptor rather than a genuine
+# subtitle. Providers (esp. Hardcover) stash the series in the subtitle field, so
+# appending it clutters the display title ("Night Watch: Discworld Novel 26") and
+# can even contradict the series position used for sorting. Matches "Book 29",
+# "Discworld Novel 26", "(Xanth #3)", or "...Novel" at the end ("A Discworld
+# Novel"); a real subtitle like "A Novel of the Cosmere" ends in a word, not
+# "Novel", so it is kept. (No leading-underscore name — the Plex sandbox forbids
+# it.)
+SERIES_SUBTITLE_RE = re.compile(
+    r'\b(?:book|novel|volume|vol|part|episode)\s+\d+\b|#\s*\d+|\bnovel\s*$',
+    re.IGNORECASE
+)
+
 
 class UpdateTool:
     def __init__(self, content_type, force, lang, media, metadata, prefs):
@@ -334,7 +347,9 @@ class AlbumUpdateTool(UpdateTool):
         # and remove extra endings on the title
         if self.prefs['simplify_title']:
             album_title = self.simplify_title()
-        elif self.subtitle:
+        elif self.subtitle and not SERIES_SUBTITLE_RE.search(self.subtitle):
+            # Append a genuine subtitle, but not a series descriptor like
+            # "Discworld Novel 26" / "A Discworld Novel" / "(Xanth #3)".
             album_title = self.title + ': ' + self.subtitle
         else:
             album_title = self.title
