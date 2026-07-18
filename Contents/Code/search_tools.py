@@ -603,6 +603,11 @@ class ArtistSearchTool(SearchTool):
         """
             Builds the search query for the API.
         """
+        # Reduce a multi-author artist ("Stephen King, Joe Hill") to its primary
+        # author before searching, mirroring the album path. Otherwise the whole
+        # comma-joined string is sent as one name and matches no author.
+        if self.media.artist:
+            self.handle_multi_artist()
         modified_artist_name = self.cleanup_author_name(self.media.artist)
         query = 'name=' + urllib.quote(modified_artist_name)
         # Set param
