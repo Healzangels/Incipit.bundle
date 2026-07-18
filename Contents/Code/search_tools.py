@@ -11,6 +11,29 @@ log = Logging()
 asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
 region_regex = re.compile(r'(?<=\[)[A-Za-z]{2}(?=\])')
 
+# Plex library section root paths, fetched once. Used to derive the author from
+# a file path (<root>/<Author>/...) when the ALBUMARTIST tag is missing or bad.
+_LIBRARY_ROOTS = None
+
+
+def get_library_roots():
+    """
+        The server's library section root paths, fetched once and cached.
+        Returns [] on any failure (callers degrade to the tag-derived author).
+    """
+    global _LIBRARY_ROOTS
+    if _LIBRARY_ROOTS is not None:
+        return _LIBRARY_ROOTS
+    roots = []
+    try:
+        xml = str(HTTP.Request(
+            'http://127.0.0.1:32400/library/sections', cacheTime=0, timeout=20))
+        roots = re.findall(r'<Location [^>]*path="([^"]+)"', xml)
+    except Exception as e:
+        log.error('incipit library roots fetch failed: %s', e)
+    _LIBRARY_ROOTS = roots
+    return roots
+
 
 class SearchTool:
     def __init__(self, content_type, lang, manual, media, prefs, results):
@@ -253,16 +276,49 @@ class AlbumSearchTool(SearchTool):
             returning every title collision (e.g. the many unrelated books
             named "Luck of the Draw").
         """
-        if self.media.artist:
-            return self.media.artist
+        author = self.media.artist
+        if not author:
+            try:
+                parent = self.media.parent_metadata
+                if parent and parent.title:
+                    author = parent.title
+                    log.debug('incipit author from parent: %s' % author)
+            except Exception as e:
+                log.error('incipit author resolve failed: %s', e)
+
+        # Fall back to the library folder when the tag-derived author is missing
+        # or clearly not a name (a bare number/year from a mis-scan, e.g. an
+        # album foldered "2025 - Title" scanned as artist "2025"). Under the
+        # <library-root>/<Author>/... convention the author is the first path
+        # segment after the root, regardless of any series subfolder depth.
+        if not author or re.match(r'^\d{1,4}$', author.strip()):
+            folder_author = self.author_from_path()
+            if folder_author:
+                log.debug('incipit author from folder: %s' % folder_author)
+                return folder_author
+
+        return author or ''
+
+    def author_from_path(self):
+        """
+            The first path segment under a Plex library root — the author, by
+            the <root>/<Author>/... audiobook convention. Returns None if the
+            file path or the library roots can't be resolved (safe: the caller
+            then keeps the tag-derived author).
+        """
         try:
-            parent = self.media.parent_metadata
-            if parent and parent.title:
-                log.debug('incipit author from parent: %s' % parent.title)
-                return parent.title
+            if not self.media.filename:
+                return None
+            path = urllib.unquote(self.media.filename).decode('utf8')
+            for root in get_library_roots():
+                prefix = root if root.endswith('/') else root + '/'
+                if path.startswith(prefix):
+                    segment = path[len(prefix):].split('/')[0].strip()
+                    if segment:
+                        return segment
         except Exception as e:
-            log.error('incipit author resolve failed: %s', e)
-        return ''
+            log.error('incipit author_from_path failed: %s', e)
+        return None
 
     def incipit_extra_args(self):
         """
