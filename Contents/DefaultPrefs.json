@@ -57,7 +57,7 @@
     },
     {
         "id": "prefer_local_cover",
-        "label": "Prefer local cover art (use a cover.jpg/folder.jpg in the book folder as the default poster when present; the matched cover stays as a fallback). Requires Local Media Assets enabled for the library.",
+        "label": "Prefer local or embedded cover art (use a cover.jpg/folder.jpg in the book folder, or the artwork embedded in the audio file, as the default poster when present; the matched cover stays as a fallback). Requires Local Media Assets enabled for the library.",
         "type": "bool",
         "default": "false"
     },
@@ -72,13 +72,6 @@
         "id": "dev_disable_http_cache",
         "label": "Development: don't cache incipit-api responses (fetch fresh on every refresh so API changes appear immediately; slower, leave off for normal use)",
         "type": "bool",
-        "default": "false"
-    },
-    {
-        "id": "debug_cover_probe",
-        "label": "Diagnostic: log embedded vs. provider cover-art details on album refresh (grep COVERPROBE). Temporary; leave off for normal use.",
-        "type": "bool",
-        "option": "hidden",
         "default": "false"
     }
 ]
