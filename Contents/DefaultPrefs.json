@@ -44,6 +44,12 @@
         "default": "true"
     },
     {
+        "id": "match_artist_from_folder",
+        "label": "Recover the real author from the library folder when the artist tag matches no author (e.g. a narrator mis-tagged as the artist). Only runs when the tag itself finds nothing.",
+        "type": "bool",
+        "default": "true"
+    },
+    {
         "id": "simplify_title",
         "label": "Simplify book titles (remove subtitle, series part, (un)abridged, etc.)",
         "type": "bool",

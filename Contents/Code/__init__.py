@@ -120,6 +120,38 @@ class AudiobookArtist(Agent.Artist):
             if result:
                 break
 
+        # Fallback: the tagged artist name matched no author. Most often it is a
+        # NARRATOR mis-tagged as the artist (e.g. "Lauren Fortgang"), where the
+        # real author only exists on disk as the library folder. Recover it from
+        # <library-root>/<Author>/... and try once more. Strictly additive: it
+        # runs ONLY on a genuine zero-result, so it can never change a match that
+        # already works. Opt out via the match_artist_from_folder pref.
+        if not result and search_helper.prefs['match_artist_from_folder']:
+            folder_author = search_helper.folder_author()
+            if folder_author:
+                already_tried = set(c.strip().lower() for c in candidates)
+                if folder_author.strip().lower() not in already_tried:
+                    log.info(
+                        'No author for tagged artist "%s"; recovering author '
+                        'from library folder: "%s"',
+                        ' / '.join(candidates), folder_author
+                    )
+                    search_helper.media.artist = String.StripDiacritics(
+                        folder_author
+                    )
+                    result = self.call_search_api(search_helper)
+                else:
+                    log.debug(
+                        'Folder author "%s" matches an already-tried name; '
+                        'nothing to recover', folder_author
+                    )
+            else:
+                log.debug(
+                    'No folder author to recover for tagged artist "%s" '
+                    '(no track path or no matching library root)',
+                    ' / '.join(candidates)
+                )
+
         # Write search result status to log
         if not result:
             log.warn(
