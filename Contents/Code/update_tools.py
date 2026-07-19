@@ -393,27 +393,25 @@ class AlbumUpdateTool(UpdateTool):
         # 1. Search media carries an encoded filename directly.
         try:
             if self.media.filename:
-                log.warn('incipit path probe: via media.filename')
                 return self.media.filename
-        except Exception as e:
-            log.warn('incipit path probe: media.filename unavailable (%s)', e)
-        # 2. Update media tree: walk (tracks | children) -> items -> parts -> file.
+        except Exception:
+            pass
+        # 2. Update media has no filename; walk (tracks | children) -> items ->
+        # parts -> file (confirmed live: the UPDATE media is a MediaTree exposing
+        # tracks[].items[].parts[].file).
         for source_name in ('tracks', 'children'):
             try:
-                if source_name == 'tracks':
-                    container = self.media.tracks
-                else:
-                    container = self.media.children
-            except Exception as e:
-                log.warn('incipit path probe: media.%s unavailable (%s)', source_name, e)
+                container = (
+                    self.media.tracks if source_name == 'tracks'
+                    else self.media.children
+                )
+            except Exception:
                 continue
             try:
                 node_iter = container.values()
             except Exception:
                 node_iter = container
-            node_count = 0
             for node in (node_iter or []):
-                node_count += 1
                 # A track node exposes .items -> .parts; some trees put .parts
                 # directly on the node. Try items first, then the node itself.
                 item_lists = []
@@ -432,18 +430,10 @@ class AlbumUpdateTool(UpdateTool):
                         for part in (parts or []):
                             try:
                                 if part.file:
-                                    log.warn(
-                                        'incipit path probe: via media.%s part.file',
-                                        source_name
-                                    )
                                     return part.file
-                            except Exception as e:
-                                log.warn('incipit path probe: part.file err (%s)', e)
-            log.warn(
-                'incipit path probe: media.%s had %s node(s), no file',
-                source_name, node_count
-            )
-        log.warn('incipit path probe: NO file path found in update media')
+                            except Exception:
+                                continue
+        log.debug('incipit series-from-path: no file path in update media')
         return None
 
     def derive_series_from_path(self):
@@ -457,11 +447,9 @@ class AlbumUpdateTool(UpdateTool):
             different layout, is left exactly as it was.
         """
         if self.series:
-            log.warn('incipit series-from-path: provider gave series "%s"; skip', self.series)
             return
         raw = self.album_file_path()
         if not raw:
-            log.warn('incipit series-from-path: no file path from update media; skip')
             return
         try:
             path = urllib.unquote(raw)
@@ -483,7 +471,7 @@ class AlbumUpdateTool(UpdateTool):
             path.split('/'), author_names
         )
         if not series_name:
-            log.warn(
+            log.debug(
                 'incipit series-from-path: path did not match layout; path="%s" '
                 'authors=%s', path, author_names
             )
