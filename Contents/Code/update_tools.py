@@ -51,6 +51,47 @@ def strip_trailing_series(title):
     return stripped or title
 
 
+# A book folder that leads with a track/series number: "27 - Cube Route",
+# "17 Harpy Thyme", "1. The Gunslinger", "03_Title". Capped at 3 digits and a
+# real separator required, so a year-shaped folder ("1984") is not mistaken for
+# a number and a number glued to a word ("27Cube") never matches.
+FOLDER_NUMBER_RE = re.compile(r'^\s*(\d{1,3})\s*[-._\s]\s*\S')
+
+
+def series_from_path_segments(segments, author_names):
+    """
+        Derive (series_name, number) for the common audiobook layout
+        <Author>/<Series>/<NN> - <Title>/<file> from a file's path segments, or
+        (None, None) when the layout doesn't clearly match.
+
+        Deliberately defensive: the GRANDPARENT of the file (the folder above
+        the numbered book folder's parent) must equal a credited author, which
+        anchors this exact layout. Anything else -- a flat "<Author>/<NN> -
+        Title>" tree, a numbered series folder, a book folder with no leading
+        number, or a shallow path -- yields (None, None) so libraries that use a
+        different convention are never mis-tagged.
+
+        `author_names` is a list of lowercased credited author names.
+    """
+    clean = [s.strip() for s in segments if s and s.strip()]
+    # Need <author>/<series>/<book folder>/<file>.
+    if len(clean) < 4:
+        return (None, None)
+    book_folder = clean[-2]
+    series_folder = clean[-3]
+    author_folder = clean[-4]
+    number = FOLDER_NUMBER_RE.match(book_folder)
+    if not number:
+        return (None, None)
+    # Anchor: the folder two levels above the file must be the author.
+    if not author_names or author_folder.lower() not in author_names:
+        return (None, None)
+    # The series folder must be a real name, not a number or the author again.
+    if re.match(r'^\d+$', series_folder) or series_folder.lower() in author_names:
+        return (None, None)
+    return (series_folder, number.group(1))
+
+
 class UpdateTool:
     def __init__(self, content_type, force, lang, media, metadata, prefs):
         self.content_type = content_type
@@ -340,6 +381,87 @@ class AlbumUpdateTool(UpdateTool):
         """
         if not self.metadata.studio or self.force:
             self.metadata.studio = self.studio
+
+    def album_file_path(self):
+        """
+            Best-effort absolute path of a file in this album, for folder-layout
+            parsing. The SEARCH media carries an (encoded) `filename`; the UPDATE
+            media instead exposes tracks -> items -> parts, each part carrying a
+            `file` path. Try both. Returns None if nothing is found; never raises.
+            (No getattr/hasattr -- the Plex sandbox forbids them.)
+        """
+        try:
+            if self.media.filename:
+                return self.media.filename
+        except Exception:
+            pass
+        try:
+            tracks = self.media.tracks
+            try:
+                track_iter = tracks.values()
+            except Exception:
+                track_iter = tracks
+            for track in (track_iter or []):
+                for item in (track.items or []):
+                    for part in (item.parts or []):
+                        try:
+                            if part.file:
+                                return part.file
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+        return None
+
+    def derive_series_from_path(self):
+        """
+            Fill a MISSING series (name + book number) from the on-disk folder
+            layout <Author>/<Series>/<NN> - <Title>/, and strip a bare trailing
+            "(<Series>)" a provider baked into the title (e.g. "Cube Route
+            (Xanth)" -> "Cube Route"). Only runs when the API returned no series
+            AND the folder layout clearly matches (see series_from_path_segments),
+            so a book that already has provider series data, or a library using a
+            different layout, is left exactly as it was.
+        """
+        if self.series:
+            return
+        raw = self.album_file_path()
+        if not raw:
+            return
+        try:
+            path = urllib.unquote(raw)
+        except Exception as e:
+            log.error('incipit series-from-path failed: %s', e)
+            return
+        # part.file is a real (unicode) path; media.filename is url-encoded str.
+        # Decode str->unicode where needed; ignore if already unicode/py3 str.
+        try:
+            path = path.decode('utf8')
+        except Exception:
+            pass
+        author_names = []
+        for person in (self.author or []):
+            name = person.get('name') if isinstance(person, dict) else None
+            if name:
+                author_names.append(name.strip().lower())
+        series_name, number = series_from_path_segments(
+            path.split('/'), author_names
+        )
+        if not series_name:
+            return
+        self.series = series_name
+        self.volume = self.volume_prefix(number)
+        # Now that the series name is known, strip a bare "(<Series>)" the
+        # provider left in the title so the display + sort titles are clean.
+        if self.title:
+            pattern = r'\s*\(\s*' + re.escape(series_name) + r'\s*\)\s*$'
+            stripped = re.sub(pattern, '', self.title, flags=re.IGNORECASE).strip()
+            if stripped:
+                self.title = stripped
+        log.warn(
+            'incipit album: no provider series; derived "%s, %s" from the '
+            'folder path for "%s"', series_name, self.volume, self.title
+        )
 
     def set_metadata_sort_title(self):
         """

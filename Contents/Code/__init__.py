@@ -619,6 +619,9 @@ class AudiobookAlbum(Agent.Album):
         """
             Compiles the metadata for the book.
         """
+        # Series: fill a missing series/number from the folder layout before any
+        # setter reads self.series / self.title (tags, title, sort title).
+        helper.derive_series_from_path()
         # Date.
         helper.set_metadata_date()
         # Tags.
