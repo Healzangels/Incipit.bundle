@@ -126,7 +126,13 @@ class AudiobookArtist(Agent.Artist):
         # author that is ALSO a folder in the file's path, so a wrong name can
         # never win. Runs ONLY on a genuine zero-result, so it can't change a
         # match that already works. Opt out via the match_artist_from_folder pref.
-        if not result and search_helper.prefs['match_artist_from_folder']:
+        # Genuine zero-result ONLY ([], not None): a None is a transport blip
+        # from the loop above, and firing a second (recovery) search on a blip
+        # is wasted work -- and contradicts this block's "genuine zero-result"
+        # contract. `result is not None` excludes the blip; `not result` keeps [].
+        if result is not None and not result and (
+            search_helper.prefs['match_artist_from_folder']
+        ):
             recovered_author = self.recover_author_from_book(
                 search_helper, candidates
             )
@@ -232,7 +238,10 @@ class AudiobookArtist(Agent.Artist):
             return None
         if author.strip().lower() in [c.strip().lower() for c in candidates]:
             return None
-        log.info(
+        # warn-level so the recovery is visible at the default log level (WARN):
+        # the tagged artist was a narrator/wrong name and the real author was
+        # recovered from the book match -- a rare, actionable correction.
+        log.warn(
             'No author for tagged artist "%s"; recovered "%s" from the book '
             'match (confirmed in the file path)',
             ' / '.join(candidates), author

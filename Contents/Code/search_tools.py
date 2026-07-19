@@ -309,7 +309,10 @@ class AlbumSearchTool(SearchTool):
         if self.prefs['match_artist_from_folder']:
             parent_author = self.parent_author_in_path(author)
             if parent_author:
-                log.info(
+                # warn-level so this correction is visible at the default log
+                # level (WARN): it means the ALBUMARTIST tag is wrong and was
+                # worked around -- a rare, actionable event, unlike routine info.
+                log.warn(
                     'incipit album: tag author "%s" is not the on-disk author; '
                     'using matched parent author "%s"', author, parent_author
                 )
@@ -438,9 +441,17 @@ class AlbumSearchTool(SearchTool):
             for track in (track_iter or []):
                 for item in (track.items or []):
                     for part in (item.parts or []):
-                        if part.duration:
-                            # Parts expose duration as a string in this model.
-                            total += int(part.duration)
+                        # Sum each part independently: one malformed duration
+                        # (a non-integer string) must skip only that part, not
+                        # abort the whole album sum -- which would drop the
+                        # duration (None) and silently lose the duration veto,
+                        # the main wrong-edition guard.
+                        try:
+                            if part.duration:
+                                # Parts expose duration as a string here.
+                                total += int(part.duration)
+                        except Exception:
+                            continue
             if total:
                 duration = total
         except Exception as e:

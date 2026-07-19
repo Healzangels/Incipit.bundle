@@ -320,9 +320,11 @@ class AlbumUpdateTool(UpdateTool):
         """
             Sets the rating.
         """
-        # We always want to refresh the rating
+        # We always want to refresh the rating. Providers rate on a 0-5 scale,
+        # doubled to Plex's 0-10; clamp to [0, 10] so a stray already-0-10 value
+        # from a provider can't produce an out-of-range rating.
         if self.rating:
-            self.metadata.rating = float(self.rating) * 2
+            self.metadata.rating = max(0.0, min(float(self.rating) * 2, 10.0))
 
     def set_metadata_summary(self):
         """
@@ -592,16 +594,22 @@ class ArtistUpdateTool(UpdateTool):
                     '^(.+?).([^\s,]+)(,?.(?:[JS]r\.?|III?|IV))?$',
                     self.name,
                 )
-                self.metadata.title_sort = ', '.join(
-                    filter(
-                        None,
-                        [
-                            (split_author_surname.group(2) + ', ' +
-                                split_author_surname.group(1)),
-                            split_author_surname.group(3)
-                        ]
+                if split_author_surname:
+                    self.metadata.title_sort = ', '.join(
+                        filter(
+                            None,
+                            [
+                                (split_author_surname.group(2) + ', ' +
+                                    split_author_surname.group(1)),
+                                split_author_surname.group(3)
+                            ]
+                        )
                     )
-                )
+                else:
+                    # The name didn't fit "First Last [suffix]" (e.g. empty or
+                    # an unusual form). Fall back to the plain name/title rather
+                    # than crash on .group() of a None match.
+                    self.metadata.title_sort = self.name or self.metadata.title
             else:
                 self.metadata.title_sort = self.metadata.title
 
