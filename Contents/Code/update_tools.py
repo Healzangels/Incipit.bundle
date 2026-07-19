@@ -22,6 +22,34 @@ SERIES_SUBTITLE_RE = re.compile(
     re.IGNORECASE
 )
 
+# A trailing series descriptor a provider baked into the TITLE itself, e.g.
+# "Changes: The Dresden Files, Book 12" -> "Changes". Each pattern requires an
+# explicit number marker ("Book N" / "#N"), so a plain subtitle ("Changes: A
+# Novel", "The Law: A Dresden Files Novel") has no number and is never stripped
+# -- only an unambiguous series+number tail. Mirrors the incipit-api
+# SERIES_SUFFIX so the DISPLAY title matches how the book was matched.
+SERIES_TITLE_SUFFIX_RE = [
+    re.compile(r'\s*[:\-–—]\s*[^:]*?\bbook\s+\d+\s*$', re.IGNORECASE),
+    re.compile(r'\s*\([^)]*#\s*\d+\s*\)\s*$'),
+    re.compile(r'\s*,\s*book\s+\d+\s*$', re.IGNORECASE),
+]
+
+
+def strip_trailing_series(title):
+    """
+        Strip a trailing "<Series>, Book N" / "(<Series> #N)" that a provider
+        baked into the book title, so display + sort titles show just the book
+        name. Number-marked only, so real subtitles are safe. Never empties the
+        title (guards a pathological all-series title).
+    """
+    if not title:
+        return title
+    stripped = title
+    for pat in SERIES_TITLE_SUFFIX_RE:
+        stripped = pat.sub('', stripped)
+    stripped = stripped.strip()
+    return stripped or title
+
 
 class UpdateTool:
     def __init__(self, content_type, force, lang, media, metadata, prefs):
@@ -244,7 +272,10 @@ class AlbumUpdateTool(UpdateTool):
         if 'subtitle' in response:
             self.subtitle = response['subtitle']
         if 'title' in response:
-            self.title = response['title']
+            # Strip a series descriptor a provider baked into the title
+            # ("Changes: The Dresden Files, Book 12" -> "Changes") so both the
+            # display and sort titles show just the book name.
+            self.title = strip_trailing_series(response['title'])
 
     def set_metadata_date(self):
         """
