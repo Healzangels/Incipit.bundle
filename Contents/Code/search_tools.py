@@ -677,8 +677,11 @@ class ArtistSearchTool(SearchTool):
             '|'.join(map(re.escape, str_to_remove))
         )
         name = str_to_remove_regex.sub('', name)
-        # Remove periods between double initials
-        initials_regex = "^((?:[A-Z]\.\s?)*[A-Z]\.(?!\S)).(\w+)"
+        # Remove periods between leading initials ("A. E." -> "A E"), keeping the
+        # FULL remaining surname. group(2) used to be a single \w+, which dropped
+        # every surname word after the first — "A. E. van Vogt" -> "A E van",
+        # "W. E. B. Du Bois" -> "W E B Du". Capture the whole remainder instead.
+        initials_regex = "^((?:[A-Z]\.\s?)*[A-Z]\.)(?!\S)\s*(.+)$"
         initials_matched = re.search(initials_regex, name)
         if initials_matched:
             log.debug('Found initials to clean')
@@ -687,7 +690,10 @@ class ArtistSearchTool(SearchTool):
                 .replace(' ', '')
                 .replace('.', ' ')
             )
-            name = cleaned_initials + ' ' + initials_matched.group(2)
+            name = re.sub(
+                r'\s+', ' ',
+                cleaned_initials + ' ' + initials_matched.group(2)
+            ).strip()
 
         log.debug('Artist name after cleanup: ' + name)
         return name
