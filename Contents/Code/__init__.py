@@ -129,7 +129,7 @@ class AudiobookArtist(Agent.Artist):
         if not result and search_helper.prefs['match_artist_from_folder']:
             folder_author = search_helper.folder_author()
             if folder_author:
-                already_tried = set(c.strip().lower() for c in candidates)
+                already_tried = [c.strip().lower() for c in candidates]
                 if folder_author.strip().lower() not in already_tried:
                     log.info(
                         'No author for tagged artist "%s"; recovering author '

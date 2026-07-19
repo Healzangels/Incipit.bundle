@@ -761,64 +761,30 @@ class ArtistSearchTool(SearchTool):
                 )
                 self.media.artist = series_cleaned
 
-    def first_track_path(self):
-        """
-            A file path from any of this artist's album tracks, or None.
-
-            The artist media object is a tree (albums -> tracks -> items ->
-            parts -> file), unlike the album media object which carries a flat
-            media.filename. Walk it defensively (each level may be a dict or a
-            list, and any link may be absent) since a missing path just means we
-            fall back to today's no-match behavior.
-        """
-        albums = getattr(self.media, 'albums', None)
-        if not albums:
-            return None
-        album_iter = albums.values() if hasattr(albums, 'values') else albums
-        for album in album_iter:
-            tracks = getattr(album, 'tracks', None)
-            if not tracks:
-                continue
-            track_iter = tracks.values() if hasattr(tracks, 'values') else tracks
-            for track in track_iter:
-                for item in (getattr(track, 'items', None) or []):
-                    for part in (getattr(item, 'parts', None) or []):
-                        part_file = getattr(part, 'file', None)
-                        if part_file:
-                            return part_file
-        return None
-
     def folder_author(self):
         """
             Recover the real author from the library folder when the tagged
             artist name matched no author -- typically a NARRATOR mis-tagged as
             the artist (e.g. "Lauren Fortgang"), whose real author only exists
-            on disk as the enclosing folder. Under the <library-root>/<Author>/
-            convention (the same one the album path relies on in resolve_author)
-            the author is the first path segment after a library root.
+            on disk as the enclosing folder. The artist search media carries the
+            same URL-encoded media.filename the album path uses, so map it to the
+            first path segment under a library root (the <root>/<Author>/
+            convention), mirroring AlbumSearchTool.author_from_path exactly.
 
-            Returns None on any failure, so the caller keeps today's behavior.
-            part.file is a raw filesystem path like the <Location> roots, but a
-            few servers hand back a URL-encoded path, so try both forms.
+            Returns None on any failure, so the caller keeps today's no-match
+            behavior. NB: the Plex sandbox has no getattr/hasattr, so this must
+            touch only attributes the media object is known to carry.
         """
         try:
-            path = self.first_track_path()
-            if not path:
+            if not self.media.filename:
                 return None
-            path_forms = [path]
-            try:
-                decoded = urllib.unquote(path).decode('utf8')
-                if decoded != path:
-                    path_forms.append(decoded)
-            except Exception:
-                pass
-            for candidate_path in path_forms:
-                for root in get_library_roots():
-                    prefix = root if root.endswith('/') else root + '/'
-                    if candidate_path.startswith(prefix):
-                        segment = candidate_path[len(prefix):].split('/')[0].strip()
-                        if segment:
-                            return segment
+            path = urllib.unquote(self.media.filename).decode('utf8')
+            for root in get_library_roots():
+                prefix = root if root.endswith('/') else root + '/'
+                if path.startswith(prefix):
+                    segment = path[len(prefix):].split('/')[0].strip()
+                    if segment:
+                        return segment
         except Exception as e:
             log.error('incipit artist folder_author failed: %s', e)
         return None
