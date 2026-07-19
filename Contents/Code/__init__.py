@@ -17,13 +17,29 @@ GOOD_SCORE = 98
 log = Logging()
 
 
+def apply_http_cache_time():
+    # API responses are cached for a week by default to spare incipit-api. That
+    # also means an API improvement stays invisible to already-scanned items for
+    # up to a week. The dev toggle disables caching so a metadata refresh always
+    # re-fetches — and clears the existing cache immediately so stale entries
+    # (like a pre-fix author image) don't keep replaying.
+    if Prefs['dev_disable_http_cache']:
+        HTTP.ClearCache()
+        HTTP.CacheTime = 0
+        log.info('HTTP response caching DISABLED (development mode)')
+    else:
+        HTTP.CacheTime = CACHE_1WEEK
+
+
 def ValidatePrefs():
     log.debug('ValidatePrefs function call')
+    # Re-apply on save so flipping the dev toggle takes effect without a restart.
+    apply_http_cache_time()
 
 
 def Start():
     HTTP.ClearCache()
-    HTTP.CacheTime = CACHE_1WEEK
+    apply_http_cache_time()
     HTTP.Headers['User-agent'] = (
         'Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.2; Trident/4.0;'
         'SLCC2; .NET CLR 2.0.50727; .NET CLR 3.5.30729; .NET CLR 3.0.30729;'

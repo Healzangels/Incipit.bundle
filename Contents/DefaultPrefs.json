@@ -61,5 +61,11 @@
         "type": "enum",
         "values": ["DEBUG", "INFO", "WARN", "ERROR"],
         "default": "WARN"
+    },
+    {
+        "id": "dev_disable_http_cache",
+        "label": "Development: don't cache incipit-api responses (fetch fresh on every refresh so API changes appear immediately; slower, leave off for normal use)",
+        "type": "bool",
+        "default": "false"
     }
 ]
