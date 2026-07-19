@@ -121,36 +121,20 @@ class AudiobookArtist(Agent.Artist):
                 break
 
         # Fallback: the tagged artist name matched no author. Most often it is a
-        # NARRATOR mis-tagged as the artist (e.g. "Lauren Fortgang"), where the
-        # real author only exists on disk as the library folder. Recover it from
-        # <library-root>/<Author>/... and try once more. Strictly additive: it
-        # runs ONLY on a genuine zero-result, so it can never change a match that
-        # already works. Opt out via the match_artist_from_folder pref.
+        # NARRATOR mis-tagged as the artist (e.g. "Lauren Fortgang"). Ask the book
+        # API what this album is and recover its author -- but only trust an
+        # author that is ALSO a folder in the file's path, so a wrong name can
+        # never win. Runs ONLY on a genuine zero-result, so it can't change a
+        # match that already works. Opt out via the match_artist_from_folder pref.
         if not result and search_helper.prefs['match_artist_from_folder']:
-            folder_author = search_helper.folder_author()
-            if folder_author:
-                already_tried = [c.strip().lower() for c in candidates]
-                if folder_author.strip().lower() not in already_tried:
-                    log.info(
-                        'No author for tagged artist "%s"; recovering author '
-                        'from library folder: "%s"',
-                        ' / '.join(candidates), folder_author
-                    )
-                    search_helper.media.artist = String.StripDiacritics(
-                        folder_author
-                    )
-                    result = self.call_search_api(search_helper)
-                else:
-                    log.debug(
-                        'Folder author "%s" matches an already-tried name; '
-                        'nothing to recover', folder_author
-                    )
-            else:
-                log.debug(
-                    'No folder author to recover for tagged artist "%s" '
-                    '(no track path or no matching library root)',
-                    ' / '.join(candidates)
+            recovered_author = self.recover_author_from_book(
+                search_helper, candidates
+            )
+            if recovered_author:
+                search_helper.media.artist = String.StripDiacritics(
+                    recovered_author
                 )
+                result = self.call_search_api(search_helper)
 
         # Write search result status to log
         if not result:
@@ -215,6 +199,45 @@ class AudiobookArtist(Agent.Artist):
             return
 
         self.compile_metadata(update_helper)
+
+    def recover_author_from_book(self, helper, candidates):
+        """
+            When a tagged artist matches no author (typically a NARRATOR
+            mis-tagged as the artist), ask the book API what this album is and
+            return its author -- but ONLY if that author is also a folder in the
+            file's path. That double gate (real book author for this title AND
+            present on disk) makes a wrong recovery impossible. Returns None when
+            nothing is confirmed. The library root can't be read at search time
+            (the sandbox blocks the media server's HTTP interface), so the path
+            is used for confirmation rather than to derive the author directly.
+        """
+        book_url = helper.book_search_url()
+        if not book_url:
+            log.debug('artist recovery: no book search url (no title or API base)')
+            return None
+        try:
+            request = str(make_request(book_url, cache_time=0))
+        except Exception as err:
+            log.error('artist recovery book search failed: %s', err)
+            return None
+        book_results = json_decode(request)
+        if not book_results:
+            return None
+        author = helper.author_confirmed_in_path(book_results)
+        if not author:
+            log.info(
+                'artist recovery: no book author for "%s" confirmed in the '
+                'file path', ' / '.join(candidates)
+            )
+            return None
+        if author.strip().lower() in [c.strip().lower() for c in candidates]:
+            return None
+        log.info(
+            'No author for tagged artist "%s"; recovered "%s" from the book '
+            'match (confirmed in the file path)',
+            ' / '.join(candidates), author
+        )
+        return author
 
     def call_search_api(self, helper):
         """

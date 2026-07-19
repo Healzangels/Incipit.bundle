@@ -761,75 +761,78 @@ class ArtistSearchTool(SearchTool):
                 )
                 self.media.artist = series_cleaned
 
-    def folder_author(self):
-        """
-            Recover the real author from the library folder when the tagged
-            artist name matched no author -- typically a NARRATOR mis-tagged as
-            the artist (e.g. "Lauren Fortgang"), whose real author only exists on
-            disk as the enclosing folder. Map a track file path to the first
-            segment under a /library/sections root (the <root>/<Author>/
-            convention, same one the album path relies on).
-
-            The ARTIST media does not carry a flat media.filename the way an
-            album does, so fall back to walking the album tree. Returns None on
-            any failure; an INFO probe logs filename + roots so a scan shows why
-            it did or didn't fire. NB: the Plex sandbox bans getattr/hasattr, so
-            use only direct attribute access.
-        """
+    def artist_path(self):
+        """The decoded file path for this artist's album, or None. The artist
+           search media carries media.filename (confirmed live)."""
         try:
-            filename = None
-            try:
-                filename = self.media.filename
-            except Exception:
-                filename = None
-            if not filename:
-                filename = self.first_album_track_path()
-            roots = get_library_roots()
-            log.info(
-                'incipit artist folder probe: filename=%r roots=%r',
-                filename, roots
-            )
-            if not filename:
-                return None
-            path = urllib.unquote(filename).decode('utf8')
-            for root in roots:
-                prefix = root if root.endswith('/') else root + '/'
-                if path.startswith(prefix):
-                    segment = path[len(prefix):].split('/')[0].strip()
-                    if segment:
-                        return segment
-            log.info('incipit artist folder probe: path=%r matched no root', path)
+            if self.media.filename:
+                return urllib.unquote(self.media.filename).decode('utf8')
         except Exception as e:
-            log.error('incipit artist folder_author failed: %s', e)
+            log.error('incipit artist_path failed: %s', e)
         return None
 
-    def first_album_track_path(self):
-        """
-            A track file path from this artist's album tree, or None. Walks
-            media.albums -> <album>.tracks -> <track>.items -> <part>.file using
-            the same dict-.values() pattern the album duration probe uses; any
-            missing link is swallowed (the sandbox has no getattr/hasattr).
-        """
-        try:
-            albums = self.media.albums
-        except Exception:
-            return None
-        try:
-            album_iter = albums.values()
-        except Exception:
-            album_iter = albums
-        for album in (album_iter or []):
+    def artist_album_title(self):
+        """The album/book title to search for. media.album / media.name carry it
+           on the artist search; fall back to the file's basename."""
+        for getter in (lambda: self.media.album, lambda: self.media.name):
             try:
-                tracks = album.tracks
-                try:
-                    track_iter = tracks.values()
-                except Exception:
-                    track_iter = tracks
-                for track in (track_iter or []):
-                    for item in (track.items or []):
-                        for part in (item.parts or []):
-                            if part.file:
-                                return part.file
+                val = getter()
+            except Exception:
+                val = None
+            if val:
+                return val
+        path = self.artist_path()
+        if path:
+            base = path.rsplit('/', 1)[-1]
+            base = re.sub(r'\.[^.]+$', '', base).strip()
+            if base:
+                return base
+        return None
+
+    def artist_duration(self):
+        """Album duration in ms, or None. Lets the book search pick the right
+           edition; optional -- path confirmation is what guards correctness."""
+        try:
+            d = self.media.duration
+            if d and int(d) > 0:
+                return int(d)
+        except Exception:
+            pass
+        return None
+
+    def book_search_url(self):
+        """The incipit-api /books URL for this artist's album (title [+ duration]).
+           None when there is no configured API base or no title to search."""
+        if not self.prefs['api_base_url']:
+            return None
+        title = self.artist_album_title()
+        if not title:
+            return None
+        region = self.region_override or self.prefs['region']
+        query = 'title=' + urllib.quote(title.encode('utf8'))
+        duration = self.artist_duration()
+        if duration:
+            query += '&duration=' + urllib.quote(str(duration))
+        return RegionTool(
+            content_type='books', query=query, region=region
+        ).get_search_url()
+
+    def author_confirmed_in_path(self, book_results):
+        """From book-search JSON, return the first author name that is ALSO a
+           folder in this file's path. The recovered author must be both a real
+           book author for this title AND present on disk as this book's folder,
+           so a wrong name (a same-title book by another author) can never win.
+           Returns None when nothing is confirmed."""
+        path = self.artist_path()
+        if not path:
+            return None
+        segments = [seg.strip().lower() for seg in path.split('/') if seg.strip()]
+        results = book_results if isinstance(book_results, list) else [book_results]
+        for candidate in (results or []):
+            try:
+                for author in (candidate.get('authors', []) or []):
+                    if author and author.strip().lower() in segments:
+                        return author
             except Exception:
                 continue
         return None
