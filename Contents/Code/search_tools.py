@@ -297,6 +297,24 @@ class AlbumSearchTool(SearchTool):
             named "Luck of the Draw").
         """
         author = self.media.artist
+
+        # When the ALBUMARTIST tag is a NARRATOR (differs from the matched parent
+        # artist) but the real author is confirmed on disk (a folder in the file
+        # path), prefer the parent author so a narrator-tagged book auto-matches
+        # instead of scoring low on the narrator name. Mirrors the artist-recovery
+        # path and shares its pref; only fires when the parent author actually
+        # appears in the file path, so it can NEVER override a correctly tagged
+        # album. get_library_roots is blocked at search time, so confirm against
+        # media.filename segments directly rather than deriving from the root.
+        if self.prefs['match_artist_from_folder']:
+            parent_author = self.parent_author_in_path(author)
+            if parent_author:
+                log.info(
+                    'incipit album: tag author "%s" is not the on-disk author; '
+                    'using matched parent author "%s"', author, parent_author
+                )
+                author = parent_author
+
         if not author:
             try:
                 parent = self.media.parent_metadata
@@ -318,6 +336,37 @@ class AlbumSearchTool(SearchTool):
                 return self.clean_search_author(folder_author)
 
         return self.clean_search_author(author or '')
+
+    def parent_author_in_path(self, tag_author):
+        """
+            The matched parent artist's name IF it differs from the ALBUMARTIST
+            tag AND is a folder in this file's path -- i.e. the tag is a narrator
+            (or other non-author) and the parent is the real author, confirmed on
+            disk. Returns None otherwise, so a correctly tagged album (tag ==
+            parent) is never changed and a wrong parent name that isn't in the
+            path is never used.
+        """
+        try:
+            parent = self.media.parent_metadata
+            if not parent or not parent.title:
+                return None
+            parent_title = parent.title
+            if (
+                tag_author
+                and parent_title.strip().lower() == tag_author.strip().lower()
+            ):
+                return None
+            if not self.media.filename:
+                return None
+            path = urllib.unquote(self.media.filename).decode('utf8')
+            segments = [
+                seg.strip().lower() for seg in path.split('/') if seg.strip()
+            ]
+            if parent_title.strip().lower() in segments:
+                return parent_title
+        except Exception as e:
+            log.error('incipit parent_author_in_path failed: %s', e)
+        return None
 
     def clean_search_author(self, author):
         """
