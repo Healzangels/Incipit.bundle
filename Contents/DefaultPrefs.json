@@ -73,5 +73,12 @@
         "label": "Development: don't cache incipit-api responses (fetch fresh on every refresh so API changes appear immediately; slower, leave off for normal use)",
         "type": "bool",
         "default": "false"
+    },
+    {
+        "id": "debug_cover_probe",
+        "label": "Diagnostic: log embedded vs. provider cover-art details on album refresh (grep COVERPROBE). Temporary; leave off for normal use.",
+        "type": "bool",
+        "option": "hidden",
+        "default": "false"
     }
 ]

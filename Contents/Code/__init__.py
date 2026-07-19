@@ -1,6 +1,7 @@
 # Incipit (fork of Audnexus Agent)
 # coding: utf-8
 import json
+import urllib
 # Import internal tools
 from _version import version
 from logging import Logging
@@ -672,6 +673,15 @@ class AudiobookAlbum(Agent.Album):
         # Log the resulting metadata
         helper.log_update_metadata()
 
+        # DIAGNOSTIC (opt-in): probe whether the embedded/local cover can be seen
+        # and measured in-sandbox, to decide if a "prefer higher-resolution cover"
+        # mode is buildable. Fully isolated -- never affects the update.
+        try:
+            if Prefs['debug_cover_probe']:
+                probe_embedded_cover(helper)
+        except Exception as probe_err:
+            log.error("COVERPROBE wrapper failed: %s" % probe_err)
+
     def getDateFromString(self, string):
         """
             Converts a string to a date object.
@@ -738,3 +748,157 @@ def make_request(url, cache_time=None):
                 sleep(sleep_time)
                 sleep_time *= 2
     return response
+
+
+def _img_dims(data):
+    """
+        Best-effort (width, height) parsed straight from raw JPEG/PNG bytes,
+        with no PIL (unavailable in the sandbox). Returns None on any failure and
+        never raises. py2 str/bytes in.
+    """
+    if not data:
+        return None
+    b = data
+    try:
+        n = len(b)
+        # PNG: 8-byte signature, then IHDR width/height (big-endian) at 16..24.
+        if n >= 24 and b[0:8] == '\x89PNG\r\n\x1a\n':
+            w = (ord(b[16]) << 24) | (ord(b[17]) << 16) | (ord(b[18]) << 8) | ord(b[19])
+            h = (ord(b[20]) << 24) | (ord(b[21]) << 16) | (ord(b[22]) << 8) | ord(b[23])
+            return (w, h)
+        # JPEG: walk segment markers to a Start-Of-Frame (SOFn) and read h,w.
+        if n >= 4 and ord(b[0]) == 0xFF and ord(b[1]) == 0xD8:
+            sof = (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                   0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF)
+            i = 2
+            while i + 9 < n:
+                if ord(b[i]) != 0xFF:
+                    i += 1
+                    continue
+                marker = ord(b[i + 1])
+                if marker in sof:
+                    h = (ord(b[i + 5]) << 8) | ord(b[i + 6])
+                    w = (ord(b[i + 7]) << 8) | ord(b[i + 8])
+                    return (w, h)
+                seg_len = (ord(b[i + 2]) << 8) | ord(b[i + 3])
+                if seg_len <= 0:
+                    break
+                i += 2 + seg_len
+    except Exception:
+        return None
+    return None
+
+
+def _find_upload_poster_keys(body):
+    """Pull every ratingKey="upload://..." value out of a /posters XML body
+    without a regex import. Returns a list (possibly empty)."""
+    keys = []
+    marker = 'ratingKey="'
+    i = 0
+    while True:
+        j = body.find(marker, i)
+        if j < 0:
+            break
+        j += len(marker)
+        k = body.find('"', j)
+        if k < 0:
+            break
+        val = body[j:k]
+        if val.startswith('upload://'):
+            keys.append(val)
+        i = k + 1
+    return keys
+
+
+def probe_embedded_cover(helper):
+    """
+        DIAGNOSTIC ONLY (opt-in via Prefs['debug_cover_probe']). Determines whether
+        the agent can, in-sandbox at UPDATE time, (a) see the localmedia/embedded
+        poster, (b) reach the Plex API, and (c) fetch + measure the embedded and
+        provider cover art -- the open questions behind a future "prefer the
+        higher-resolution cover" mode. Read-only; every step is isolated so it can
+        never disturb the update. All lines are tagged COVERPROBE for easy grep.
+    """
+    log.info("COVERPROBE ---------------- begin ----------------")
+    # 1) What does the agent's OWN posters proxy expose (does it include localmedia?)
+    try:
+        posters = helper.metadata.posters
+        keys = None
+        try:
+            keys = list(posters.keys())
+        except Exception:
+            try:
+                keys = [k for k in posters]
+            except Exception as e2:
+                log.info("COVERPROBE metadata.posters not iterable: %s" % e2)
+        if keys is not None:
+            log.info("COVERPROBE metadata.posters has %d key(s)" % len(keys))
+            for k in keys:
+                log.info("COVERPROBE   proxy key: %s" % k)
+    except Exception as e:
+        log.info("COVERPROBE metadata.posters access failed: %s" % e)
+    # 2) Discover the numeric album rating key (needed for /posters + /file URLs).
+    rating_key = None
+    probes = (
+        ("media.id", lambda: helper.media.id),
+        ("media.rating_key", lambda: helper.media.rating_key),
+        ("media.key", lambda: helper.media.key),
+        ("metadata.id", lambda: helper.metadata.id),
+        ("metadata.guid", lambda: helper.metadata.guid),
+    )
+    for label, getter in probes:
+        try:
+            val = getter()
+            log.info("COVERPROBE %s = %s" % (label, val))
+            if rating_key is None and val is not None and str(val).isdigit():
+                rating_key = str(val)
+        except Exception as e:
+            log.info("COVERPROBE %s unavailable (%s)" % (label, e))
+    log.info("COVERPROBE chosen rating_key = %s" % rating_key)
+    # 3) Can the agent reach the Plex API at UPDATE time? Try /posters two ways.
+    posters_body = None
+    if rating_key:
+        url = "http://127.0.0.1:32400/library/metadata/%s/posters" % rating_key
+        try:
+            posters_body = str(HTTP.Request(url, timeout=20).content)
+            log.info("COVERPROBE HTTP.Request /posters OK (%d bytes)" % len(posters_body))
+        except Exception as e:
+            log.info("COVERPROBE HTTP.Request /posters FAILED: %s" % e)
+        if not posters_body:
+            try:
+                posters_body = urllib.urlopen(url).read()
+                log.info("COVERPROBE urllib /posters OK (%d bytes)" % len(posters_body))
+            except Exception as e:
+                log.info("COVERPROBE urllib /posters FAILED: %s" % e)
+        if posters_body:
+            log.info("COVERPROBE /posters body[:1200]: %s" % posters_body[:1200])
+    # 4) Measure the PROVIDER art (bytes are already fetched during update -> free).
+    try:
+        tdata = make_request(helper.thumb)
+        log.info("COVERPROBE provider thumb bytes=%s dims=%s" % (
+            (len(tdata) if tdata else None), _img_dims(tdata)))
+    except Exception as e:
+        log.info("COVERPROBE provider thumb measure failed: %s" % e)
+    # 5) Pull each upload:// (embedded/local) poster, fetch its bytes, measure it.
+    if posters_body and rating_key:
+        try:
+            up_keys = _find_upload_poster_keys(posters_body)
+            log.info("COVERPROBE found %d upload:// poster(s): %s" % (len(up_keys), up_keys))
+            for pkey in up_keys:
+                furl = ("http://127.0.0.1:32400/library/metadata/%s/file?url=%s"
+                        % (rating_key, urllib.quote(pkey, safe='')))
+                edata = None
+                try:
+                    edata = str(HTTP.Request(furl, timeout=20).content)
+                except Exception as e:
+                    log.info("COVERPROBE HTTP.Request /file FAILED (%s): %s" % (pkey, e))
+                if not edata:
+                    try:
+                        edata = urllib.urlopen(furl).read()
+                    except Exception as e:
+                        log.info("COVERPROBE urllib /file FAILED (%s): %s" % (pkey, e))
+                log.info("COVERPROBE embedded %s -> bytes=%s dims=%s" % (
+                    pkey, (len(edata) if edata else None), _img_dims(edata)))
+        except Exception as e:
+            log.info("COVERPROBE embedded fetch/parse failed: %s" % e)
+    log.info("COVERPROBE ----------------- end -----------------")
