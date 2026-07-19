@@ -649,29 +649,23 @@ class AudiobookAlbum(Agent.Album):
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=primary_order
                     )
-            # Keep the original cover as a secondary poster when a square cover
-            # took the default slot, so it stays available to pick.
-            valid_posters = [helper.thumb]
+            # Contribute ONLY our (square) primary as the album poster. We used to
+            # also add thumb_secondary (the original portrait cover) as an alternate,
+            # but on a re-matched album Plex retained an EARLIER agent poster (a
+            # portrait secondary) as the selected default, and sort_order=0 can't
+            # evict an existing selection. Pruning our contribution to the single
+            # primary forces that stale agent poster out, so the square becomes the
+            # default even on re-matched albums.
+            #  - Only prune when the square is actually present: a failed fetch must
+            #    not leave us with zero posters.
+            #  - validate_keys only touches OUR (metadata://) posters; a user's own
+            #    manual pick lives in the upload:// namespace and is never evicted.
+            #  - Skipped when preferring local art, so the local cover keeps default.
             if (
-                helper.thumb_secondary
-                and helper.thumb_secondary != helper.thumb
+                not prefer_local
+                and helper.thumb in helper.metadata.posters
             ):
-                if (
-                    helper.thumb_secondary not in helper.metadata.posters
-                    or helper.force
-                ):
-                    secondary_data = make_request(helper.thumb_secondary)
-                    if secondary_data is not None:
-                        helper.metadata.posters[helper.thumb_secondary] = \
-                            Proxy.Media(
-                                secondary_data,
-                                sort_order=primary_order + 1
-                            )
-                valid_posters.append(helper.thumb_secondary)
-            # Re-prioritize so our (square) default poster is first — but not when
-            # preferring local art, so the local cover.jpg stays the default.
-            if not prefer_local:
-                helper.metadata.posters.validate_keys(valid_posters)
+                helper.metadata.posters.validate_keys([helper.thumb])
         # Rating.
         helper.set_metadata_rating()
 
