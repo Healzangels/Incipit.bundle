@@ -34,6 +34,32 @@ SERIES_TITLE_SUFFIX_RE = [
     re.compile(r'\s*,\s*book\s+\d+\s*$', re.IGNORECASE),
 ]
 
+# A "subtitle" that is really marketing/promo copy, not a genuine subtitle.
+# Hardcover in particular stashes blurb text in the subtitle field ("from the
+# Bestselling Series That Inspired BBC's the Watch", "A Fun-Filled Adventure in
+# the Magical Land of Xanth"), which bloats the album title. A real subtitle is
+# short ("A Novel", "A Jack Ryan Novel"); a long one, or one with promo phrasing,
+# is dropped so the display title stays the clean book name.
+MARKETING_SUBTITLE_RE = re.compile(
+    r'\bbestsell|\binspired\b|\bnow a\b|\bmajor (?:motion|tv|television)\b|'
+    r'#\s*1\b|\baward[- ]winning\b|\bnew york times\b|\bsunday times\b',
+    re.IGNORECASE
+)
+# A real subtitle is brief; beyond this it is almost always a descriptive blurb.
+MARKETING_SUBTITLE_MAX_WORDS = 6
+
+
+def is_marketing_subtitle(subtitle):
+    """
+        True when a provider "subtitle" is promotional/descriptive blurb rather
+        than a genuine subtitle, so it should NOT be appended to the title.
+    """
+    if not subtitle:
+        return False
+    if len(subtitle.split()) > MARKETING_SUBTITLE_MAX_WORDS:
+        return True
+    return bool(MARKETING_SUBTITLE_RE.search(subtitle))
+
 
 def strip_trailing_series(title):
     """
@@ -540,9 +566,15 @@ class AlbumUpdateTool(UpdateTool):
         # and remove extra endings on the title
         if self.prefs['simplify_title']:
             album_title = self.simplify_title()
-        elif self.subtitle and not SERIES_SUBTITLE_RE.search(self.subtitle):
+        elif (
+            self.subtitle
+            and not SERIES_SUBTITLE_RE.search(self.subtitle)
+            and not is_marketing_subtitle(self.subtitle)
+        ):
             # Append a genuine subtitle, but not a series descriptor like
-            # "Discworld Novel 26" / "A Discworld Novel" / "(Xanth #3)".
+            # "Discworld Novel 26" / "A Discworld Novel" / "(Xanth #3)", and not
+            # marketing blurb a provider stashed in the subtitle field ("from the
+            # Bestselling Series That Inspired BBC's the Watch").
             album_title = self.title + ': ' + self.subtitle
         else:
             album_title = self.title
