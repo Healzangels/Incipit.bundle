@@ -275,6 +275,7 @@ class AudiobookArtist(Agent.Artist):
                         thumb_data, sort_order=0
                     )
             # Offer the alternate (Audible) author image as a secondary option.
+            valid_posters = [helper.thumb]
             if (
                 helper.thumb_secondary
                 and helper.thumb_secondary != helper.thumb
@@ -287,6 +288,28 @@ class AudiobookArtist(Agent.Artist):
                     if secondary_data is not None:
                         helper.metadata.posters[helper.thumb_secondary] = \
                             Proxy.Media(secondary_data, sort_order=1)
+                valid_posters.append(helper.thumb_secondary)
+            # Re-prioritize so our chosen thumb (the Hardcover portrait, when we
+            # have one) becomes the SELECTED poster, keeping the Audible image as
+            # the pickable second. sort_order=0 alone does NOT override a poster
+            # Plex already selected on a prior scan -- e.g. the Audible book-cover
+            # that got picked before the Hardcover author-image fix existed -- so
+            # the real photo stayed present-but-not-default (the exact Craig
+            # Alanson symptom). validate_keys prunes the set to [thumb, secondary]
+            # and pins thumb first, which DOES move the selection. This mirrors the
+            # ALBUM path (see AudiobookAlbum below), closing an artist/album
+            # mirror-drift: books re-prioritized their square cover, authors never
+            # did.
+            #
+            # TRADE-OFF (documented so we can backtrack): validate_keys re-runs on
+            # every refresh, so a HAND-PICKED author poster is overridden on the
+            # next scan -- the same behavior the book path already has. It's a
+            # no-op for authors with no Hardcover match (thumb is just the Audible
+            # image, so pinning it front changes nothing). TO REVERT to
+            # "add-but-don't-re-prioritize": delete the single validate_keys line
+            # below; the posters are still offered, Plex just keeps its own
+            # existing selection.
+            helper.metadata.posters.validate_keys(valid_posters)
 
         helper.log_update_metadata()
 
