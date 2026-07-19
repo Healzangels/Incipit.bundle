@@ -750,7 +750,7 @@ def make_request(url, cache_time=None):
     return response
 
 
-def _img_dims(data):
+def img_dims(data):
     """
         Best-effort (width, height) parsed straight from raw JPEG/PNG bytes,
         with no PIL (unavailable in the sandbox). Returns None on any failure and
@@ -789,7 +789,7 @@ def _img_dims(data):
     return None
 
 
-def _find_upload_poster_keys(body):
+def find_upload_poster_keys(body):
     """Pull every ratingKey="upload://..." value out of a /posters XML body
     without a regex import. Returns a list (possibly empty)."""
     keys = []
@@ -860,7 +860,7 @@ def probe_embedded_cover(helper):
     if rating_key:
         url = "http://127.0.0.1:32400/library/metadata/%s/posters" % rating_key
         try:
-            posters_body = str(HTTP.Request(url, timeout=20).content)
+            posters_body = str(HTTP.Request(url, timeout=20))
             log.info("COVERPROBE HTTP.Request /posters OK (%d bytes)" % len(posters_body))
         except Exception as e:
             log.info("COVERPROBE HTTP.Request /posters FAILED: %s" % e)
@@ -876,20 +876,20 @@ def probe_embedded_cover(helper):
     try:
         tdata = make_request(helper.thumb)
         log.info("COVERPROBE provider thumb bytes=%s dims=%s" % (
-            (len(tdata) if tdata else None), _img_dims(tdata)))
+            (len(tdata) if tdata else None), img_dims(tdata)))
     except Exception as e:
         log.info("COVERPROBE provider thumb measure failed: %s" % e)
     # 5) Pull each upload:// (embedded/local) poster, fetch its bytes, measure it.
     if posters_body and rating_key:
         try:
-            up_keys = _find_upload_poster_keys(posters_body)
+            up_keys = find_upload_poster_keys(posters_body)
             log.info("COVERPROBE found %d upload:// poster(s): %s" % (len(up_keys), up_keys))
             for pkey in up_keys:
                 furl = ("http://127.0.0.1:32400/library/metadata/%s/file?url=%s"
                         % (rating_key, urllib.quote(pkey, safe='')))
                 edata = None
                 try:
-                    edata = str(HTTP.Request(furl, timeout=20).content)
+                    edata = str(HTTP.Request(furl, timeout=20))
                 except Exception as e:
                     log.info("COVERPROBE HTTP.Request /file FAILED (%s): %s" % (pkey, e))
                 if not edata:
@@ -898,7 +898,7 @@ def probe_embedded_cover(helper):
                     except Exception as e:
                         log.info("COVERPROBE urllib /file FAILED (%s): %s" % (pkey, e))
                 log.info("COVERPROBE embedded %s -> bytes=%s dims=%s" % (
-                    pkey, (len(edata) if edata else None), _img_dims(edata)))
+                    pkey, (len(edata) if edata else None), img_dims(edata)))
         except Exception as e:
             log.info("COVERPROBE embedded fetch/parse failed: %s" % e)
     log.info("COVERPROBE ----------------- end -----------------")
