@@ -765,28 +765,73 @@ class ArtistSearchTool(SearchTool):
         """
             Recover the real author from the library folder when the tagged
             artist name matched no author -- typically a NARRATOR mis-tagged as
-            the artist (e.g. "Lauren Fortgang"), whose real author only exists
-            on disk as the enclosing folder. The artist search media carries the
-            same URL-encoded media.filename the album path uses, so map it to the
-            first path segment under a library root (the <root>/<Author>/
-            convention), mirroring AlbumSearchTool.author_from_path exactly.
+            the artist (e.g. "Lauren Fortgang"), whose real author only exists on
+            disk as the enclosing folder. Map a track file path to the first
+            segment under a /library/sections root (the <root>/<Author>/
+            convention, same one the album path relies on).
 
-            Returns None on any failure, so the caller keeps today's no-match
-            behavior. NB: the Plex sandbox has no getattr/hasattr, so this must
-            touch only attributes the media object is known to carry.
+            The ARTIST media does not carry a flat media.filename the way an
+            album does, so fall back to walking the album tree. Returns None on
+            any failure; an INFO probe logs filename + roots so a scan shows why
+            it did or didn't fire. NB: the Plex sandbox bans getattr/hasattr, so
+            use only direct attribute access.
         """
         try:
-            if not self.media.filename:
+            filename = None
+            try:
+                filename = self.media.filename
+            except Exception:
+                filename = None
+            if not filename:
+                filename = self.first_album_track_path()
+            roots = get_library_roots()
+            log.info(
+                'incipit artist folder probe: filename=%r roots=%r',
+                filename, roots
+            )
+            if not filename:
                 return None
-            path = urllib.unquote(self.media.filename).decode('utf8')
-            for root in get_library_roots():
+            path = urllib.unquote(filename).decode('utf8')
+            for root in roots:
                 prefix = root if root.endswith('/') else root + '/'
                 if path.startswith(prefix):
                     segment = path[len(prefix):].split('/')[0].strip()
                     if segment:
                         return segment
+            log.info('incipit artist folder probe: path=%r matched no root', path)
         except Exception as e:
             log.error('incipit artist folder_author failed: %s', e)
+        return None
+
+    def first_album_track_path(self):
+        """
+            A track file path from this artist's album tree, or None. Walks
+            media.albums -> <album>.tracks -> <track>.items -> <part>.file using
+            the same dict-.values() pattern the album duration probe uses; any
+            missing link is swallowed (the sandbox has no getattr/hasattr).
+        """
+        try:
+            albums = self.media.albums
+        except Exception:
+            return None
+        try:
+            album_iter = albums.values()
+        except Exception:
+            album_iter = albums
+        for album in (album_iter or []):
+            try:
+                tracks = album.tracks
+                try:
+                    track_iter = tracks.values()
+                except Exception:
+                    track_iter = tracks
+                for track in (track_iter or []):
+                    for item in (track.items or []):
+                        for part in (item.parts or []):
+                            if part.file:
+                                return part.file
+            except Exception:
+                continue
         return None
 
     def get_primary_author(self):
