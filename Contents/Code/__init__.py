@@ -149,7 +149,18 @@ def poster_backup_probe(helper):
             return
         turl = thumb if thumb.startswith('http') else PMS + thumb
         tbytes = HTTP.Request(turl, timeout=8).content
-        log.warn('incipit pbprobe: downloaded SELECTED poster (%s bytes) from %s', len(tbytes), turl)
+        # CHANGE-DETECTION test: does Plex serve the ORIGINAL poster bytes at
+        # /thumb, or a re-encoded copy? If identical to the on-disk cover.jpg on
+        # an UNCHANGED book, a plain byte-compare is a safe "only write when
+        # changed" detector. If not, /thumb is re-encoded and we'd need version
+        # (/thumb/<ver>) based detection to avoid rewriting cover.jpg every refresh.
+        disk = local_cover_bytes(helper)
+        disk_len = len(disk) if disk else 0
+        identical = bool(disk) and disk_len == len(tbytes) and disk == tbytes
+        log.warn(
+            'incipit pbprobe: selected=%s bytes vs cover.jpg=%s bytes -> IDENTICAL=%s',
+            len(tbytes), disk_len, identical
+        )
     except Exception as e:
         log.error('incipit pbprobe: API read path FAILED (%s) -- likely needs a token', e)
 
