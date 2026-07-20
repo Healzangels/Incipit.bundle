@@ -68,6 +68,51 @@ def Start():
     )
 
 
+def local_cover_bytes(helper):
+    """
+        Raw bytes of the book folder's cover.jpg, or None.
+
+        BYTES specifically, because Proxy.Media(bytes) IS accepted by the posters
+        container while Proxy.LocalFile is rejected (proven 1.3.26/1.3.27).
+        Reading them needs open() or Core.storage, both blocked under the default
+        sandbox policy -- so this doubles as the live test of whether
+        PlexPluginCodePolicy=Elevated (Info.plist) unlocks either. Every failure
+        is caught (a blocked builtin raises NameError, a missing file raises IOError),
+        so a still-sealed sandbox simply returns None and the caller uses the online
+        cover unchanged.
+    """
+    try:
+        raw = helper.album_file_path()
+        if not raw:
+            return None
+        path = urllib.unquote(raw).decode('utf8') if '%' in raw else raw
+        if '/' not in path:
+            return None
+        candidate = path.rsplit('/', 1)[0] + '/cover.jpg'
+    except Exception as e:
+        log.error('incipit cover: path resolve failed (%s)', e)
+        return None
+    # Method 1: Core.storage.load (the framework's own file reader).
+    try:
+        data = Core.storage.load(candidate)
+        if data:
+            log.warn('incipit cover: Core.storage read %s (%s bytes)', candidate, len(data))
+            return data
+    except Exception as e:
+        log.warn('incipit cover: Core.storage unavailable/failed (%s)', e)
+    # Method 2: plain open() (Elevated policy may grant the builtin).
+    try:
+        handle = open(candidate, 'rb')
+        data = handle.read()
+        handle.close()
+        if data:
+            log.warn('incipit cover: open() read %s (%s bytes)', candidate, len(data))
+            return data
+    except Exception as e:
+        log.warn('incipit cover: open() unavailable/failed (%s)', e)
+    return None
+
+
 class AudiobookArtist(Agent.Artist):
     name = 'Incipit'
     languages = [
@@ -672,57 +717,49 @@ class AudiobookAlbum(Agent.Album):
             # For books with no local cover, ours is still the only option -> used.
             prefer_local = Prefs['prefer_local_cover']
             primary_order = 1 if prefer_local else 0
-            # DIAGNOSTIC (1.3.23), no behaviour change. Confirmed in the UI: the
-            # local cover IS offered but ours stays selected, so sort_order can't
-            # beat our position in the agent chain. Two unknowns decide the real
-            # fix, so measure both rather than guess:
-            #   1. which posters are already in the container when we run -- is
-            #      LMA's contribution visible to us, and under what key? If it is,
-            #      we can simply decline to contribute when a local one exists.
-            #   2. whether the sandbox lets us READ the cover.jpg next to the audio
-            #      file. If it does, we can serve it as OUR OWN poster and the
-            #      chain order stops mattering entirely -- the clean fix.
-            # WHY prefer_local_cover CANNOT make the local cover WIN here. All of
-            # the below was measured against a live server (1.3.23-1.3.27); do not
-            # re-litigate without new evidence:
-            #   - sort_order cannot beat our POSITION in the agent chain: the local
-            #     cover IS offered by Local Media Assets, yet ours stayed selected.
-            #   - we cannot defer to LMA: when we run, the poster container holds
-            #     only our own cover -- LMA's contribution is not there yet.
-            #   - Core is not defined in this sandbox -> no Core.storage.load().
-            #   - open() is not defined -> we cannot read the bytes ourselves.
-            #   - Proxy.LocalFile CONSTRUCTS, but assigning it to `posters` raises
-            #     "Proxy type 'LocalFile' is not accepted by this attribute" --
-            #     that container only takes Proxy.Media.
-            # So the agent can neither serve local art nor yield the default slot.
-            # All this pref can do is avoid PINNING ours first (sort_order below)
-            # and avoid pruning other agents' posters, which leaves the local cover
-            # PICKABLE but not selected. Making the curated cover actually win
-            # requires the out-of-band Plex API route (select_cover_poster.py),
-            # which writes into the upload:// namespace and survives refreshes.
-            if helper.thumb not in helper.metadata.posters or helper.force:
-                thumb_data = make_request(helper.thumb)
-                if thumb_data is not None:
-                    helper.metadata.posters[helper.thumb] = Proxy.Media(
-                        thumb_data, sort_order=primary_order
-                    )
-            # Contribute ONLY our (square) primary as the album poster. We used to
-            # also add thumb_secondary (the original portrait cover) as an alternate,
-            # but on a re-matched album Plex retained an EARLIER agent poster (a
-            # portrait secondary) as the selected default, and sort_order=0 can't
-            # evict an existing selection. Pruning our contribution to the single
-            # primary forces that stale agent poster out, so the square becomes the
-            # default even on re-matched albums.
-            #  - Only prune when the square is actually present: a failed fetch must
-            #    not leave us with zero posters.
-            #  - validate_keys only touches OUR (metadata://) posters; a user's own
-            #    manual pick lives in the upload:// namespace and is never evicted.
-            #  - Skipped when preferring local art, so the local cover keeps default.
-            if (
-                not prefer_local
-                and helper.thumb in helper.metadata.posters
-            ):
-                helper.metadata.posters.validate_keys([helper.thumb])
+
+            # LOCAL COVER (Elevated-policy attempt). Prior builds (1.3.23-1.3.27)
+            # proved Proxy.LocalFile is REJECTED by the posters container and the
+            # default sandbox blocks open()/Core -- so the agent couldn't read the
+            # sidecar. NEW lever (Info.plist PlexPluginCodePolicy=Elevated): it may
+            # unlock open()/Core.storage. And crucially Proxy.Media(BYTES) IS
+            # accepted here. So if we can READ cover.jpg we serve it as our own
+            # poster at sort_order=0 and prune to it -> the local cover becomes the
+            # sole default even with Incipit ABOVE Local Media Assets (titles stay
+            # clean). local_cover_bytes() swallows every failure, so a still-sealed
+            # sandbox just yields None and we fall through to the online cover
+            # exactly as before. If this works it replaces select_cover_poster.py
+            # for freshly-scanned items; if it doesn't, that script stays the fix.
+            local_set = False
+            if prefer_local:
+                cover_bytes = local_cover_bytes(helper)
+                if cover_bytes:
+                    try:
+                        helper.metadata.posters['incipit-local-cover'] = Proxy.Media(
+                            cover_bytes, sort_order=0
+                        )
+                        helper.metadata.posters.validate_keys(['incipit-local-cover'])
+                        log.warn('incipit cover: LOCAL cover set as the default poster')
+                        local_set = True
+                    except Exception as e:
+                        log.error('incipit cover: Proxy.Media(local) failed (%s)', e)
+
+            if not local_set:
+                if helper.thumb not in helper.metadata.posters or helper.force:
+                    thumb_data = make_request(helper.thumb)
+                    if thumb_data is not None:
+                        helper.metadata.posters[helper.thumb] = Proxy.Media(
+                            thumb_data, sort_order=primary_order
+                        )
+                # Prune to our single primary so a stale earlier poster can't stay
+                # the default -- but NOT when preferring local, so a not-yet-readable
+                # local cover keeps its pickable slot. (validate_keys only touches
+                # our metadata:// posters; a user's upload:// pick is never evicted.)
+                if (
+                    not prefer_local
+                    and helper.thumb in helper.metadata.posters
+                ):
+                    helper.metadata.posters.validate_keys([helper.thumb])
         # Rating.
         helper.set_metadata_rating()
 
