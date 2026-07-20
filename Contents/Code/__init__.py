@@ -115,9 +115,16 @@ def probe_local_cover(helper):
             log.warn('incipit cover probe: open() OK %s (%s bytes)', candidate, len(data))
         except Exception as e:
             log.warn('incipit cover probe: open() failed %s (%s)', candidate, e)
+        # NB: no type()/repr() here -- both are forbidden builtins in this
+        # sandbox, and calling type() is what made 1.3.24's probe report a false
+        # failure for Proxy.LocalFile (the exception came from the LOG line, not
+        # from the API under test).
         try:
             local = Proxy.LocalFile(candidate)
-            log.warn('incipit cover probe: Proxy.LocalFile OK %s (%s)', candidate, type(local))
+            if local:
+                log.warn('incipit cover probe: Proxy.LocalFile OK %s', candidate)
+            else:
+                log.warn('incipit cover probe: Proxy.LocalFile empty %s', candidate)
         except Exception as e:
             log.warn('incipit cover probe: Proxy.LocalFile failed %s (%s)', candidate, e)
 
