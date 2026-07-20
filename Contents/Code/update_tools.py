@@ -77,32 +77,6 @@ def strip_trailing_series(title):
     return stripped or title
 
 
-# The numeric part of a volume label ("Book 12", "Book 0.5", "Book 1-2"), used
-# to build a LEXICALLY sortable sort title. Plex sorts title_sort as a plain
-# string, so an unpadded "Book 10" falls between "Book 1" and "Book 2" and every
-# series past nine volumes shelves 1, 10, 11, 2, 3... Padding is applied to the
-# SORT key ONLY -- the display volume and the "Series: X" mood keep "Book 10".
-SORT_VOLUME_NUM_RE = re.compile(r'(\d+)(\.\d+)?')
-SORT_VOLUME_PAD = 4
-
-
-def pad_sort_volume(volume):
-    """
-        Zero-pad the first number in a volume label so the sort title orders
-        numerically under Plex's lexical sort ("Book 10" -> "Book 0010"). A
-        decimal suffix is preserved and its integer part padded ("Book 0.5" ->
-        "Book 0000.5"), so a novella still sorts between its neighbours. A
-        volume with no digits ("Book One") is returned unchanged.
-    """
-    if not volume:
-        return volume
-    match = SORT_VOLUME_NUM_RE.search(volume)
-    if not match:
-        return volume
-    padded = match.group(1).zfill(SORT_VOLUME_PAD) + (match.group(2) or '')
-    return volume[:match.start()] + padded + volume[match.end():]
-
-
 # A book folder that leads with a track/series number: "27 - Cube Route",
 # "17 Harpy Thyme", "1. The Gunslinger", "03_Title". Capped at 3 digits and a
 # real separator required, so a year-shaped folder ("1984") is not mistaken for
@@ -564,11 +538,13 @@ class AlbumUpdateTool(UpdateTool):
         # Add series/volume to sort title where possible.
         series_with_volume = ''
         if self.series and self.volume:
-            # Pad the volume for the SORT key only (see pad_sort_volume): Plex
-            # sorts title_sort lexically, so "Book 10" would otherwise shelve
-            # between "Book 1" and "Book 2". self.volume itself stays unpadded
-            # for display and for the "Series: X" mood.
-            series_with_volume = self.series + ', ' + pad_sort_volume(self.volume)
+            # NOTE: do NOT zero-pad the volume here. Plex orders these numerically
+            # on its own -- a 1.3.21 change padded to "Book 0010" on the theory
+            # that title_sort is a plain lexical sort, but the library was already
+            # shelving correctly and the padding only made the sort title look
+            # wrong. Reverted in 1.3.22; don't reintroduce it without first
+            # confirming a real mis-ordering in Plex.
+            series_with_volume = self.series + ', ' + self.volume
         # Only include subtitle in sort if not in a series
         if not self.volume:
             self.title = self.metadata.title
