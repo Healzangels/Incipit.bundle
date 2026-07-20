@@ -97,18 +97,29 @@ def probe_local_cover(helper):
         path = raw
     folder = path.rsplit('/', 1)[0] if '/' in path else path
     log.warn('incipit cover probe: folder = %s', folder)
+    # 1.3.23 established that `Core` is NOT exposed to this sandbox, so
+    # Core.storage.load() is unavailable. Two routes remain, both probed here:
+    #   open()            -- would let us read the bytes and reuse Proxy.Media,
+    #                        exactly as we already do for a fetched cover.
+    #   Proxy.LocalFile() -- framework-side file serving, so the FRAMEWORK reads
+    #                        the file rather than us; `Proxy` is definitely
+    #                        available (Proxy.Media is already in use).
+    # Either one is enough to serve local art as our own poster and make the
+    # agent-chain ordering irrelevant.
     for name in ('cover.jpg', 'folder.jpg', 'cover.png', 'poster.jpg'):
         candidate = folder + '/' + name
         try:
-            data = Core.storage.load(candidate)
-            if data:
-                log.warn(
-                    'incipit cover probe: READ OK %s (%s bytes)', candidate, len(data)
-                )
-                return
-            log.warn('incipit cover probe: empty file %s', candidate)
+            handle = open(candidate, 'rb')
+            data = handle.read()
+            handle.close()
+            log.warn('incipit cover probe: open() OK %s (%s bytes)', candidate, len(data))
         except Exception as e:
-            log.warn('incipit cover probe: cannot read %s (%s)', candidate, e)
+            log.warn('incipit cover probe: open() failed %s (%s)', candidate, e)
+        try:
+            local = Proxy.LocalFile(candidate)
+            log.warn('incipit cover probe: Proxy.LocalFile OK %s (%s)', candidate, type(local))
+        except Exception as e:
+            log.warn('incipit cover probe: Proxy.LocalFile failed %s (%s)', candidate, e)
 
 
 class AudiobookArtist(Agent.Artist):
