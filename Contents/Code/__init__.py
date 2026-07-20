@@ -1,6 +1,7 @@
 # Incipit (fork of Audnexus Agent)
 # coding: utf-8
 import json
+import urllib
 # Import internal tools
 from _version import version
 from logging import Logging
@@ -65,6 +66,49 @@ def Start():
         ),
         log_level="info"
     )
+
+
+def probe_local_cover(helper):
+    """
+        DIAGNOSTIC (1.3.23): can this sandbox READ a cover.jpg sitting next to the
+        audio file?
+
+        It matters because prefer_local_cover currently cannot work: the local
+        cover is offered by Local Media Assets but ours stays selected, i.e. our
+        position in the agent chain beats sort_order. If we can read the file
+        ourselves we can serve it as OUR poster, and chain order stops deciding
+        which cover wins -- letting Incipit stay above LMA (correct titles) while
+        still showing the curated local art. Log-only; changes nothing.
+    """
+    try:
+        raw = helper.album_file_path()
+    except Exception as e:
+        log.error('incipit cover probe: no file path (%s)', e)
+        return
+    if not raw:
+        log.warn('incipit cover probe: no file path available')
+        return
+    # SEARCH media gives a url-encoded str; UPDATE media a real path.
+    path = raw
+    try:
+        if '%' in raw:
+            path = urllib.unquote(raw).decode('utf8')
+    except Exception:
+        path = raw
+    folder = path.rsplit('/', 1)[0] if '/' in path else path
+    log.warn('incipit cover probe: folder = %s', folder)
+    for name in ('cover.jpg', 'folder.jpg', 'cover.png', 'poster.jpg'):
+        candidate = folder + '/' + name
+        try:
+            data = Core.storage.load(candidate)
+            if data:
+                log.warn(
+                    'incipit cover probe: READ OK %s (%s bytes)', candidate, len(data)
+                )
+                return
+            log.warn('incipit cover probe: empty file %s', candidate)
+        except Exception as e:
+            log.warn('incipit cover probe: cannot read %s (%s)', candidate, e)
 
 
 class AudiobookArtist(Agent.Artist):
@@ -671,6 +715,23 @@ class AudiobookAlbum(Agent.Album):
             # For books with no local cover, ours is still the only option -> used.
             prefer_local = Prefs['prefer_local_cover']
             primary_order = 1 if prefer_local else 0
+            # DIAGNOSTIC (1.3.23), no behaviour change. Confirmed in the UI: the
+            # local cover IS offered but ours stays selected, so sort_order can't
+            # beat our position in the agent chain. Two unknowns decide the real
+            # fix, so measure both rather than guess:
+            #   1. which posters are already in the container when we run -- is
+            #      LMA's contribution visible to us, and under what key? If it is,
+            #      we can simply decline to contribute when a local one exists.
+            #   2. whether the sandbox lets us READ the cover.jpg next to the audio
+            #      file. If it does, we can serve it as OUR OWN poster and the
+            #      chain order stops mattering entirely -- the clean fix.
+            if prefer_local:
+                try:
+                    existing_posters = [k for k in helper.metadata.posters]
+                    log.warn('incipit poster probe: existing keys = %s', existing_posters)
+                except Exception as e:
+                    log.error('incipit poster probe (keys) failed: %s', e)
+                probe_local_cover(helper)
             if helper.thumb not in helper.metadata.posters or helper.force:
                 thumb_data = make_request(helper.thumb)
                 if thumb_data is not None:
