@@ -68,35 +68,6 @@ def Start():
     )
 
 
-def local_cover_path(helper):
-    """
-        Absolute path of the book folder's cover.jpg, or None when the file path
-        can't be resolved.
-
-        NOTE: this does NOT verify the file exists -- it cannot. Core.storage and
-        open() are both blocked in this sandbox (verified 1.3.23/1.3.24), and
-        Proxy.LocalFile is lazy: it returns a proxy for a non-existent path just
-        as happily as a real one. So callers MUST keep a real fallback poster.
-    """
-    try:
-        raw = helper.album_file_path()
-    except Exception as e:
-        log.error('incipit local cover: no file path (%s)', e)
-        return None
-    if not raw:
-        return None
-    # SEARCH media gives a url-encoded str; UPDATE media a real path.
-    path = raw
-    try:
-        if '%' in raw:
-            path = urllib.unquote(raw).decode('utf8')
-    except Exception:
-        path = raw
-    if '/' not in path:
-        return None
-    return path.rsplit('/', 1)[0] + '/cover.jpg'
-
-
 class AudiobookArtist(Agent.Artist):
     name = 'Incipit'
     languages = [
@@ -711,32 +682,24 @@ class AudiobookAlbum(Agent.Album):
             #   2. whether the sandbox lets us READ the cover.jpg next to the audio
             #      file. If it does, we can serve it as OUR OWN poster and the
             #      chain order stops mattering entirely -- the clean fix.
-            # Serve the book folder's cover.jpg as OUR OWN poster.
-            #
-            # This is the only approach that can work. sort_order cannot beat our
-            # position in the agent chain (the local cover IS offered by Local
-            # Media Assets, yet ours stayed selected), and we cannot defer to LMA
-            # either -- its contribution is not in the poster container when we
-            # run. By serving the local file ourselves, winning the default slot
-            # becomes CORRECT, so Incipit can stay ABOVE LMA (which keeps clean
-            # titles -- LMA on top hands it the title field and rip tags win) and
-            # the curated cover still shows.
-            #
-            # Core.storage and open() are both blocked here; Proxy.LocalFile is
-            # the only available route (all verified by probe, 1.3.23-1.3.25). It
-            # is LAZY -- it returns a proxy for a path that doesn't exist just as
-            # readily as one that does -- so we can't check existence, and our
-            # fetched cover below is ALWAYS contributed as the fallback.
-            if prefer_local:
-                local_cover = local_cover_path(helper)
-                if local_cover:
-                    try:
-                        helper.metadata.posters[local_cover] = Proxy.LocalFile(local_cover)
-                        log.warn('incipit cover: offered local %s', local_cover)
-                    except Exception as e:
-                        log.error(
-                            'incipit cover: could not offer local %s (%s)', local_cover, e
-                        )
+            # WHY prefer_local_cover CANNOT make the local cover WIN here. All of
+            # the below was measured against a live server (1.3.23-1.3.27); do not
+            # re-litigate without new evidence:
+            #   - sort_order cannot beat our POSITION in the agent chain: the local
+            #     cover IS offered by Local Media Assets, yet ours stayed selected.
+            #   - we cannot defer to LMA: when we run, the poster container holds
+            #     only our own cover -- LMA's contribution is not there yet.
+            #   - Core is not defined in this sandbox -> no Core.storage.load().
+            #   - open() is not defined -> we cannot read the bytes ourselves.
+            #   - Proxy.LocalFile CONSTRUCTS, but assigning it to `posters` raises
+            #     "Proxy type 'LocalFile' is not accepted by this attribute" --
+            #     that container only takes Proxy.Media.
+            # So the agent can neither serve local art nor yield the default slot.
+            # All this pref can do is avoid PINNING ours first (sort_order below)
+            # and avoid pruning other agents' posters, which leaves the local cover
+            # PICKABLE but not selected. Making the curated cover actually win
+            # requires the out-of-band Plex API route (select_cover_poster.py),
+            # which writes into the upload:// namespace and survives refreshes.
             if helper.thumb not in helper.metadata.posters or helper.force:
                 thumb_data = make_request(helper.thumb)
                 if thumb_data is not None:
