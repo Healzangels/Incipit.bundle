@@ -732,17 +732,26 @@ class AudiobookAlbum(Agent.Album):
             # for freshly-scanned items; if it doesn't, that script stays the fix.
             local_set = False
             if prefer_local:
-                cover_bytes = local_cover_bytes(helper)
-                if cover_bytes:
-                    try:
-                        helper.metadata.posters['incipit-local-cover'] = Proxy.Media(
-                            cover_bytes, sort_order=0
-                        )
-                        helper.metadata.posters.validate_keys(['incipit-local-cover'])
-                        log.warn('incipit cover: LOCAL cover set as the default poster')
-                        local_set = True
-                    except Exception as e:
-                        log.error('incipit cover: Proxy.Media(local) failed (%s)', e)
+                local_key = 'incipit-local-cover'
+                # Per-track guard: Plex calls update() once PER TRACK, so a
+                # multi-part book would re-read the (up to ~1MB) cover.jpg on every
+                # track. Skip the re-read once our poster is already in this pass's
+                # container -- UNLESS force, so a real "Refresh Metadata" (force=1)
+                # always re-reads and picks up a NEWLY dropped/replaced cover.jpg.
+                if local_key in helper.metadata.posters and not helper.force:
+                    local_set = True
+                else:
+                    cover_bytes = local_cover_bytes(helper)
+                    if cover_bytes:
+                        try:
+                            helper.metadata.posters[local_key] = Proxy.Media(
+                                cover_bytes, sort_order=0
+                            )
+                            helper.metadata.posters.validate_keys([local_key])
+                            log.warn('incipit cover: LOCAL cover set as the default poster')
+                            local_set = True
+                        except Exception as e:
+                            log.error('incipit cover: Proxy.Media(local) failed (%s)', e)
 
             if not local_set:
                 if helper.thumb not in helper.metadata.posters or helper.force:
