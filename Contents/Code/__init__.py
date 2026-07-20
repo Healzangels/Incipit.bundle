@@ -114,55 +114,64 @@ def local_cover_bytes(helper):
     return None
 
 
-def poster_backup_probe(helper):
+def backup_selected_poster(helper):
     """
-        DIAGNOSTIC round 2 (1.3.35): the full READ path for in-agent poster
-        backup. Round 1 established: Plex HTTP API IS reachable under Elevated
-        (/identity ok) and metadata.thumb is NOT on the model, so we must resolve
-        the item via the API. This probes: GUID -> /library/all?guid= -> the
-        item's ratingKey + selected `thumb` -> download the thumb bytes.
+        Back up the currently-selected Plex poster to cover.jpg next to the book,
+        writing only when it differs -- so a cover you set manually in Plex
+        persists to disk and survives a library rebuild (the fresh scan then
+        re-serves it via prefer_local_cover).
 
-        Key open question: /identity needs no token, but /library/all is
-        AUTHENTICATED. Does the plugin's own HTTP.Request carry trust, or do we
-        need a token pref? Log-only.
+        Mechanism (the Lambda.bundle pattern, every step verified live under the
+        Elevated code policy): resolve this item through Plex's own HTTP API
+        (reachable, and the plugin's request is trusted -- no token needed), read
+        its selected `thumb`, download those bytes, and Core.storage.save to
+        cover.jpg. Byte-compare is a safe change-detector: /thumb serves the
+        ORIGINAL bytes (verified identical to cover.jpg on an unchanged book).
     """
     PMS = 'http://127.0.0.1:32400'
+    # Where cover.jpg lives for this book.
     try:
-        guid = helper.metadata.guid
-    except Exception as e:
-        log.error('incipit pbprobe: no guid (%s)', e)
-        return
-    try:
-        url = PMS + '/library/all?guid=' + urllib.quote(guid)
-        body = HTTP.Request(url, timeout=8).content
-        text = str(body)
-        m_rk = re.search(r'ratingKey="([0-9]+)"', text)
-        m_thumb = re.search(r'thumb="([^"]*)"', text)
-        rk = m_rk.group(1) if m_rk else None
-        thumb = m_thumb.group(1) if m_thumb else None
-        log.warn(
-            'incipit pbprobe: /library/all?guid OK (%s bytes) -> ratingKey=%s thumb=%s',
-            len(body), rk, thumb
-        )
-        if not thumb:
-            log.warn('incipit pbprobe: no thumb in response -- first 300 chars: %s', text[:300])
+        raw = helper.album_file_path()
+        if not raw:
             return
+        path = urllib.unquote(raw).decode('utf8') if '%' in raw else raw
+        if '/' not in path:
+            return
+        cover_path = path.rsplit('/', 1)[0] + '/cover.jpg'
+    except Exception as e:
+        log.error('incipit poster-backup: path resolve failed (%s)', e)
+        return
+    # The currently-selected poster, via the Plex API (guid -> thumb -> bytes).
+    try:
+        url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
+        text = str(HTTP.Request(url, timeout=8).content)
+        m = re.search(r'thumb="([^"]*)"', text)
+        if not m:
+            return
+        thumb = m.group(1)
         turl = thumb if thumb.startswith('http') else PMS + thumb
-        tbytes = HTTP.Request(turl, timeout=8).content
-        # CHANGE-DETECTION test: does Plex serve the ORIGINAL poster bytes at
-        # /thumb, or a re-encoded copy? If identical to the on-disk cover.jpg on
-        # an UNCHANGED book, a plain byte-compare is a safe "only write when
-        # changed" detector. If not, /thumb is re-encoded and we'd need version
-        # (/thumb/<ver>) based detection to avoid rewriting cover.jpg every refresh.
-        disk = local_cover_bytes(helper)
-        disk_len = len(disk) if disk else 0
-        identical = bool(disk) and disk_len == len(tbytes) and disk == tbytes
+        selected = HTTP.Request(turl, timeout=8).content
+    except Exception as e:
+        log.error('incipit poster-backup: could not read selected poster (%s)', e)
+        return
+    if not selected:
+        return
+    # Change detection: skip when the on-disk cover.jpg already matches.
+    try:
+        existing = Core.storage.load(cover_path)
+    except Exception:
+        existing = None
+    if existing and len(existing) == len(selected) and existing == selected:
+        return
+    # Write it.
+    try:
+        Core.storage.save(cover_path, selected)
         log.warn(
-            'incipit pbprobe: selected=%s bytes vs cover.jpg=%s bytes -> IDENTICAL=%s',
-            len(tbytes), disk_len, identical
+            'incipit poster-backup: saved selected poster -> %s (%s bytes)',
+            cover_path, len(selected)
         )
     except Exception as e:
-        log.error('incipit pbprobe: API read path FAILED (%s) -- likely needs a token', e)
+        log.error('incipit poster-backup: save FAILED %s (%s)', cover_path, e)
 
 
 class AudiobookArtist(Agent.Artist):
@@ -760,11 +769,12 @@ class AudiobookAlbum(Agent.Album):
         helper.set_metadata_studio()
         # Summary.
         helper.set_metadata_summary()
-        # DIAGNOSTIC (1.3.34): groundwork for in-agent poster-backup -> cover.jpg,
-        # gated on the same pref so it only runs while testing. Removed once the
-        # real feature is built.
-        if Prefs['prefer_local_cover']:
-            poster_backup_probe(helper)
+        # Back up the currently-selected poster to cover.jpg (opt-in). Runs BEFORE
+        # the poster block so a freshly-captured cover.jpg is what prefer_local
+        # then serves -- closing the loop in one pass. Force-only, so it fires on
+        # an explicit/scheduled Refresh Metadata, not on every incremental scan.
+        if Prefs['backup_poster_to_cover'] and helper.force:
+            backup_selected_poster(helper)
         # Thumb.
         # Kept here because of Proxy
         if helper.thumb:

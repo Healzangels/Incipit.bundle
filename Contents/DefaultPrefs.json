@@ -68,6 +68,12 @@
         "default": "false"
     },
     {
+        "id": "backup_poster_to_cover",
+        "label": "On a metadata refresh, save the current poster to cover.jpg next to the book (only when it changed), so a manually-set cover persists to disk and survives a rebuild.",
+        "type": "bool",
+        "default": "false"
+    },
+    {
         "id": "logging_level",
         "label": "Logging level:",
         "type": "enum",
