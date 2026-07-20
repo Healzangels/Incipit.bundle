@@ -579,7 +579,20 @@ class AlbumUpdateTool(UpdateTool):
         else:
             album_title = self.title
         album_title = self.strip_trailing_by_contributor(album_title)
-        if not self.metadata.title or self.force:
+        # On a first match Plex seeds metadata.title with the raw ALBUM tag, so
+        # an "only set when empty" guard leaves rip junk ("15 Triss", "Origin
+        # (Unabridged)") as the displayed title forever while sort title,
+        # summary, etc. (unseeded, so empty) all update. Overwrite when the
+        # current title is empty, still that scanner seed (== the tagged album),
+        # or on force — but leave a title the user changed to something else
+        # alone (Plex's own edit-lock protects those server-side too).
+        current_title = self.metadata.title
+        tagged_title = self.media.title if self.media else None
+        if (
+            not current_title
+            or self.force
+            or (tagged_title and current_title == tagged_title)
+        ):
             self.metadata.title = album_title
 
     def strip_trailing_by_contributor(self, title):
