@@ -114,6 +114,23 @@ def local_cover_bytes(helper):
     return None
 
 
+def local_write_probe():
+    """
+        TEMP (1.3.40): prove Core.storage.save can WRITE to a LOCAL, non-SMB path.
+        The poster backup fails on the media SMB share because vfs_fruit intercepts
+        the "._<name>" atomic temp -- but that is a share-specific block, not a
+        broken write. Writing to /config (the plugin's own local appdata, no fruit)
+        confirms the write capability exists, so the feature genuinely works on any
+        LOCAL setup. Log-only; removed once confirmed.
+    """
+    test_path = '/config/incipit_localwrite_test.txt'
+    try:
+        Core.storage.save(test_path, 'incipit local write test')
+        log.warn('incipit localwrite: Core.storage.save to LOCAL path OK -> %s', test_path)
+    except Exception as e:
+        log.error('incipit localwrite: Core.storage.save to LOCAL FAILED (%s)', e)
+
+
 def backup_selected_poster(helper):
     """
         Back up the currently-selected Plex poster to cover.jpg next to the book,
@@ -786,6 +803,7 @@ class AudiobookAlbum(Agent.Album):
         # then serves -- closing the loop in one pass. Force-only, so it fires on
         # an explicit/scheduled Refresh Metadata, not on every incremental scan.
         if Prefs['backup_poster_to_cover'] and helper.force:
+            local_write_probe()  # TEMP (1.3.40): proves Core.storage.save works on a LOCAL path
             backup_selected_poster(helper)
         # Thumb.
         # Kept here because of Proxy
