@@ -32,15 +32,12 @@ class Logging:
 
     def error(self, message, *args):
         """
-            Prints passed message with ERROR TYPE,
-            when DEBUG, INFO, WARN or ERROR pref enabled.
+            Prints passed message with ERROR TYPE — unconditionally. Errors must
+            never be silenceable: the old exact-string gate meant an unexpected
+            logging_level pref value turned OFF error logging plugin-wide, the
+            worst failure mode for a diagnostics knob.
         """
-        if Prefs['logging_level'] == "DEBUG" or (
-            Prefs['logging_level'] == "INFO") or (
-                Prefs['logging_level'] == "WARN") or (
-                    Prefs['logging_level'] == "ERROR"
-        ):
-            return Log.Error(message, *args)
+        return Log.Error(message, *args)
 
     def log_output(self, key, val, log_level):
         """

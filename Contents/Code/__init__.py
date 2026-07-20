@@ -326,9 +326,31 @@ class AudiobookArtist(Agent.Artist):
             return False
         response = json_decode(request)
         if response is None:
+            # A 200 with a garbage body may be CACHED (a week for data lookups),
+            # so the retry loop inside make_request never touches the network
+            # again — one explicit uncached follow-up heals it.
+            response = self.retry_uncached(update_url)
+        if response is None:
+            # Mirrors the album path: without this line an author whose update
+            # silently no-ops leaves nothing to grep.
+            log.error(
+                'incipit author fetch returned no usable data for %s; '
+                'keeping existing metadata', update_url
+            )
             return False
         helper.parse_api_response(response)
         return True
+
+    def retry_uncached(self, update_url):
+        """
+            One cache-bypassing retry for a decode failure (see call_item_api).
+            Returns the decoded response or None.
+        """
+        try:
+            return json_decode(str(make_request(update_url, cache_time=0)))
+        except Exception as err:
+            log.error('uncached retry failed for %s: %s', update_url, err)
+            return None
 
     def compile_metadata(self, helper):
         """
@@ -617,6 +639,15 @@ class AudiobookAlbum(Agent.Album):
             return False
         response = json_decode(request)
         if response is None:
+            # A 200 with a garbage body may be CACHED (a week for data lookups),
+            # so make_request's own retries never touch the network again — one
+            # explicit uncached follow-up heals it.
+            try:
+                response = json_decode(str(make_request(update_url, cache_time=0)))
+            except Exception as e:
+                log.error('uncached retry failed for %s: %s', update_url, e)
+                response = None
+        if response is None:
             log.error(
                 'incipit book fetch returned no usable data for %s; '
                 'keeping existing metadata', update_url
@@ -739,9 +770,13 @@ def make_request(url, cache_time=None):
     response = None
     for attempt in range(0, num_retries):
         try:
+            # sleep=0: the framework's `sleep` pauses after every REAL (uncached)
+            # fetch — a built-in +1s on each cache-miss search/lookup/thumb, the
+            # largest fixed cost of a cold scan. Our API is local and allowlisted;
+            # retry pacing is handled by the explicit backoff sleep below.
             response = HTTP.Request(
                 url, headers=headers, cacheTime=cache_time,
-                timeout=90, sleep=sleep_time)
+                timeout=90, sleep=0)
             break
         except Exception as err:
             log.error(

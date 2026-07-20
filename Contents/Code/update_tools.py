@@ -3,8 +3,8 @@ from logging import Logging
 from region_tools import RegionTool
 import re
 import struct
+import StringIO
 import urllib
-import os
 
 # Setup logger
 log = Logging()
@@ -227,8 +227,10 @@ class UpdateTool:
             {'Styles (Narrators)': self.metadata.styles},
         ]
 
-        # Determine which metadata to log
-        if self.content_type == 'book':
+        # Determine which metadata to log ('books' — the album helper's actual
+        # content_type; the old 'book' comparison was never true, so moods and
+        # styles never appeared in any log).
+        if self.content_type == 'books':
             multi_arr.extend(book_multi_arr)
 
         return multi_arr
@@ -282,13 +284,17 @@ class UpdateTool:
             log_level="info"
         )
 
-        # Collect metadata to log
+        # Full field dump at DEBUG: it includes the entire book summary, and
+        # update fires once per TRACK — at info a multi-part book logged its
+        # summary dozens of times, tens of MB per scan, rotating real
+        # WARN/ERROR lines out of Plex's fixed-size plugin logs. The FINALIZED
+        # separator above stays the one-line INFO outcome.
         data_to_log = self.collect_metadata_to_log()
-        log.metadata(data_to_log, log_level="info")
+        log.metadata(data_to_log, log_level="debug")
 
         # Collect metadata arrays to log
         multi_arr = self.collect_metadata_arrs_to_log()
-        log.metadata_arrs(multi_arr, log_level="info")
+        log.metadata_arrs(multi_arr, log_level="debug")
 
         log.separator(log_level="info")
 
@@ -389,15 +395,23 @@ class AlbumUpdateTool(UpdateTool):
         """
         # We always want to refresh the rating. Providers rate on a 0-5 scale,
         # doubled to Plex's 0-10; clamp to [0, 10] so a stray already-0-10 value
-        # from a provider can't produce an out-of-range rating.
+        # from a provider can't produce an out-of-range rating. Rating is set
+        # LAST in compile_metadata, so a malformed value crashing here used to
+        # leave a half-applied update — skip it instead.
         if self.rating:
-            self.metadata.rating = max(0.0, min(float(self.rating) * 2, 10.0))
+            try:
+                self.metadata.rating = max(0.0, min(float(self.rating) * 2, 10.0))
+            except (TypeError, ValueError):
+                log.warn('Skipping unparseable rating: %r' % (self.rating,))
 
     def set_metadata_summary(self):
         """
             Sets the summary.
         """
-        if not self.metadata.summary or self.force:
+        # self.synopsis gate: a sparse Hardcover/OpenLibrary record (no summary)
+        # must not BLANK an existing summary on a force refresh — "the API
+        # answered" is not "the API answered completely".
+        if self.synopsis and (not self.metadata.summary or self.force):
             self.cleanup_html()
             self.metadata.summary = self.synopsis
 
@@ -405,7 +419,8 @@ class AlbumUpdateTool(UpdateTool):
         """
             Sets the studio.
         """
-        if not self.metadata.studio or self.force:
+        # self.studio gate: same sparse-record wipe protection as the summary.
+        if self.studio and (not self.metadata.studio or self.force):
             self.metadata.studio = self.studio
 
     def album_file_path(self):
@@ -541,10 +556,14 @@ class AlbumUpdateTool(UpdateTool):
         # Create tagger.
         tagger = TagTool(self, self.prefs)
 
-        # Clears moods if force (refresh) is true.
+        # Clears moods/styles on force (refresh) — but ONLY when replacement
+        # data exists, or a sparse record (no narrators/authors, common for
+        # Hardcover/OpenLibrary) would wipe them with nothing to repopulate.
         if self.force:
-            tagger.clear_moods()
-            tagger.clear_styles()
+            if (self.prefs['store_author_as_mood'] and self.author) or self.series or self.series2:
+                tagger.clear_moods()
+            if self.narrator:
+                tagger.clear_styles()
 
         # Genres.
         tagger.add_genres()
@@ -588,7 +607,8 @@ class AlbumUpdateTool(UpdateTool):
         # alone (Plex's own edit-lock protects those server-side too).
         current_title = self.metadata.title
         tagged_title = self.media.title if self.media else None
-        if (
+        # album_title gate: a record with no title must never blank the field.
+        if album_title and (
             not current_title
             or self.force
             or (tagged_title and current_title == tagged_title)
@@ -663,13 +683,13 @@ class ArtistUpdateTool(UpdateTool):
             failure (non-JPEG, unreachable, truncated).
         """
         try:
-            image_file_dl = urllib.urlopen(image_url)
-            image_file_dl_contents = image_file_dl.read()
-            image_file_dl.close()
+            # HTTP.Request (framework fetcher): bounded timeout — Python 2's
+            # urllib.urlopen has NONE, and one stalled Amazon connection hung an
+            # update worker forever — and it participates in the plugin HTTP
+            # cache, so the image isn't re-downloaded on every artist refresh.
+            image_file_dl_contents = str(HTTP.Request(image_url, timeout=45))
 
-            image_file = os.tmpfile()
-            image_file.write(image_file_dl_contents)
-            image_file.seek(0)
+            image_file = StringIO.StringIO(image_file_dl_contents)
 
             head = image_file.read(24)
             if len(head) != 24:
@@ -758,7 +778,9 @@ class ArtistUpdateTool(UpdateTool):
         """
             Set description of artist
         """
-        if not self.metadata.summary or self.force:
+        # self.description gate: an author record with no bio (common) must not
+        # blank an existing bio on a force refresh.
+        if self.description and (not self.metadata.summary or self.force):
             self.cleanup_html()
             self.metadata.summary = self.description
 
@@ -822,7 +844,8 @@ class ArtistUpdateTool(UpdateTool):
         """
             Set title of artist
         """
-        if not self.metadata.title or self.force:
+        # self.name gate: a record with no name must never blank the artist.
+        if self.name and (not self.metadata.title or self.force):
             self.metadata.title = self.name
 
 

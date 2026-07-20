@@ -32,15 +32,15 @@ def get_library_roots():
     global LIBRARY_ROOTS_CACHE
     if LIBRARY_ROOTS_CACHE is not None:
         return LIBRARY_ROOTS_CACHE
-    roots = []
-    try:
-        xml = str(HTTP.Request(
-            'http://127.0.0.1:32400/library/sections', cacheTime=0, timeout=20))
-        roots = re.findall(r'<Location [^>]*path="([^"]+)"', xml)
-    except Exception as e:
-        log.error('incipit library roots fetch failed: %s', e)
-    LIBRARY_ROOTS_CACHE = roots
-    return roots
+    # Short-circuited: the sandbox blocks the server's HTTP interface at search
+    # AND update time ("not permitted", proven live), so this fetch can never
+    # succeed — it only cost a one-time 20s stall per plugin process before
+    # caching [] anyway. Callers already degrade to the tag-derived author.
+    # (A root-free reimplementation of author_from_path — confirming candidates
+    # against path segments like parent_author_in_path does — is the way to
+    # revive the feature if ever wanted.)
+    LIBRARY_ROOTS_CACHE = []
+    return LIBRARY_ROOTS_CACHE
 
 
 class SearchTool:
@@ -88,6 +88,11 @@ class SearchTool:
         """
         # Check filename for ASIN if content type is books
         if self.media.filename and self.content_type == 'books':
+            # Pre-assign: if the decode below raises (non-UTF-8 filename), the
+            # except logs and execution continues to the `if` — an unassigned
+            # local there was a NameError that killed the whole search.
+            filename_unquoted = None
+            filename_search_asin = None
             try:
                 # Provide a plain filename for ASIN search
                 filename_unquoted = urllib.unquote(
@@ -1072,7 +1077,9 @@ class ScoreTool:
         # candidate carries no parseable date (many provider records don't).
         plex_score_dict['year'] = self.year or ''
 
-        log.metadata(data_to_log, log_level="info")
+        # DEBUG: candidate dumps fire per candidate per TRACK — the dominant
+        # search-side log volume during a scan.
+        log.metadata(data_to_log, log_level="debug")
         return plex_score_dict
 
     def score_result(self):
@@ -1089,7 +1096,7 @@ class ScoreTool:
         if incipit_conf is not None:
             # Keep the API's best-first order; index nudges ties downward.
             score = int(round(incipit_conf * 100)) - self.index
-            log.info("Result #" + str(self.index + 1))
+            log.debug("Result #" + str(self.index + 1))
             plex_score_dict = self.score_create_result(score)
             if score >= self.IGNORE_SCORE:
                 self.info.append(plex_score_dict)
@@ -1123,7 +1130,7 @@ class ScoreTool:
         # Subtract index to use Audible relevance as weight
         score = self.INITIAL_SCORE - self.sum_scores(all_scores) - self.index
 
-        log.info("Result #" + str(self.index + 1))
+        log.debug("Result #" + str(self.index + 1))
 
         # Create result dict
         plex_score_dict = self.score_create_result(score)
