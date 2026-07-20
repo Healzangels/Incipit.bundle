@@ -23,6 +23,30 @@ MULTI_AUTHOR_RE = re.compile(
     r'\s*,\s*|\s+&\s+|\s+and\s+|\s*;\s*|\s*/\s*', re.IGNORECASE
 )
 
+# Trailing part-index tokens a ripper appends to each file, in the many
+# conventions seen in the wild: "Title (264)", "Title [7]", "Title - 12",
+# "Title 01", "Title - pt03", "Title Ch01", "Disk 5 - Track 01". Stripped from
+# the resolved TRACK title so every part of a multi-part book collapses to ONE
+# search URL (a cache hit) instead of one network round-trip per part — the
+# dominant cost of a cold scan over a multi-part-heavy collection. Only a
+# trailing number that is bracketed, dash/underscore-separated, marker-prefixed
+# (pt/ch/track/disc/cd), or a leading-zero index is removed, so a real numeric
+# title tail ("Xanth 24", "Fahrenheit 451", "1984") is left intact.
+PART_INDEX_RES = [
+    re.compile(r'\s*[\(\[]\s*\d{1,4}\s*[\)\]]\s*$'),
+    re.compile(r'\s*[-_]\s*(?:pt|part|ch|chapter|track|trk|disc|disk|cd)\s*\.?\s*\d{1,4}\s*$', re.IGNORECASE),
+    re.compile(r'\s+(?:pt|part|ch|chapter|track|trk|disc|disk|cd)\s*\.?\s*\d{1,4}\s*$', re.IGNORECASE),
+    re.compile(r'\s*[-_]\s*\d{1,4}\s*$'),
+    re.compile(r'\s+0\d{1,2}\s*$'),
+]
+
+
+def strip_part_index(title):
+    """Remove a trailing per-file part index (see PART_INDEX_RES)."""
+    for pat in PART_INDEX_RES:
+        title = pat.sub('', title)
+    return title.strip()
+
 
 def get_library_roots():
     """
@@ -490,17 +514,7 @@ class AlbumSearchTool(SearchTool):
             except Exception:
                 continue
         if track_title:
-            # Strip a trailing part index the ripper baked into each file's
-            # title ("Last Argument of Kings (264)" -> "Last Argument of Kings").
-            # Left in, every track of a multi-part book produces a UNIQUE search
-            # URL, defeating the plugin HTTP cache — one network round-trip per
-            # part (200+ on a big book, the dominant cold-scan cost). Stripping
-            # it makes the trackTitle constant across parts, so all but the first
-            # per-track search is a free cache hit.
-            track_title = re.sub(
-                r'\s*[\(\[]\s*\d{1,4}\s*[\)\]]\s*$', '', track_title)
-            track_title = re.sub(
-                r'\s*[-_]\s*\d{1,4}\s*$', '', track_title).strip()
+            track_title = strip_part_index(track_title)
         log.debug('incipit track title resolved: %s' % str(track_title))
         if track_title and track_title != self.normalizedName:
             extra += '&trackTitle=' + urllib.quote(track_title)
