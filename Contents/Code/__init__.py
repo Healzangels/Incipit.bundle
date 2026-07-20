@@ -133,10 +133,10 @@ def backup_selected_poster(helper):
     try:
         raw = helper.album_file_path()
         if not raw:
-            return
+            log.warn('incipit poster-backup: no file path'); return
         path = urllib.unquote(raw).decode('utf8') if '%' in raw else raw
         if '/' not in path:
-            return
+            log.warn('incipit poster-backup: unusable path %s', path); return
         cover_path = path.rsplit('/', 1)[0] + '/cover.jpg'
     except Exception as e:
         log.error('incipit poster-backup: path resolve failed (%s)', e)
@@ -147,7 +147,7 @@ def backup_selected_poster(helper):
         text = str(HTTP.Request(url, timeout=8).content)
         m = re.search(r'thumb="([^"]*)"', text)
         if not m:
-            return
+            log.warn('incipit poster-backup: no thumb in API response (first 200: %s)', text[:200]); return
         thumb = m.group(1)
         turl = thumb if thumb.startswith('http') else PMS + thumb
         selected = HTTP.Request(turl, timeout=8).content
@@ -155,14 +155,14 @@ def backup_selected_poster(helper):
         log.error('incipit poster-backup: could not read selected poster (%s)', e)
         return
     if not selected:
-        return
+        log.warn('incipit poster-backup: empty selected bytes'); return
     # Change detection: skip when the on-disk cover.jpg already matches.
     try:
         existing = Core.storage.load(cover_path)
     except Exception:
         existing = None
     if existing and len(existing) == len(selected) and existing == selected:
-        return
+        log.warn('incipit poster-backup: unchanged (%s bytes) -- skip', len(selected)); return
     # Write it.
     try:
         Core.storage.save(cover_path, selected)
@@ -773,6 +773,9 @@ class AudiobookAlbum(Agent.Album):
         # the poster block so a freshly-captured cover.jpg is what prefer_local
         # then serves -- closing the loop in one pass. Force-only, so it fires on
         # an explicit/scheduled Refresh Metadata, not on every incremental scan.
+        # TEMP DIAG (1.3.38): log the gate so a no-op is explainable.
+        log.warn('incipit poster-backup gate: pref=%s force=%s',
+                 Prefs['backup_poster_to_cover'], helper.force)
         if Prefs['backup_poster_to_cover'] and helper.force:
             backup_selected_poster(helper)
         # Thumb.
