@@ -68,26 +68,23 @@ def Start():
     )
 
 
-def probe_local_cover(helper):
+def local_cover_path(helper):
     """
-        DIAGNOSTIC (1.3.23): can this sandbox READ a cover.jpg sitting next to the
-        audio file?
+        Absolute path of the book folder's cover.jpg, or None when the file path
+        can't be resolved.
 
-        It matters because prefer_local_cover currently cannot work: the local
-        cover is offered by Local Media Assets but ours stays selected, i.e. our
-        position in the agent chain beats sort_order. If we can read the file
-        ourselves we can serve it as OUR poster, and chain order stops deciding
-        which cover wins -- letting Incipit stay above LMA (correct titles) while
-        still showing the curated local art. Log-only; changes nothing.
+        NOTE: this does NOT verify the file exists -- it cannot. Core.storage and
+        open() are both blocked in this sandbox (verified 1.3.23/1.3.24), and
+        Proxy.LocalFile is lazy: it returns a proxy for a non-existent path just
+        as happily as a real one. So callers MUST keep a real fallback poster.
     """
     try:
         raw = helper.album_file_path()
     except Exception as e:
-        log.error('incipit cover probe: no file path (%s)', e)
-        return
+        log.error('incipit local cover: no file path (%s)', e)
+        return None
     if not raw:
-        log.warn('incipit cover probe: no file path available')
-        return
+        return None
     # SEARCH media gives a url-encoded str; UPDATE media a real path.
     path = raw
     try:
@@ -95,38 +92,9 @@ def probe_local_cover(helper):
             path = urllib.unquote(raw).decode('utf8')
     except Exception:
         path = raw
-    folder = path.rsplit('/', 1)[0] if '/' in path else path
-    log.warn('incipit cover probe: folder = %s', folder)
-    # 1.3.23 established that `Core` is NOT exposed to this sandbox, so
-    # Core.storage.load() is unavailable. Two routes remain, both probed here:
-    #   open()            -- would let us read the bytes and reuse Proxy.Media,
-    #                        exactly as we already do for a fetched cover.
-    #   Proxy.LocalFile() -- framework-side file serving, so the FRAMEWORK reads
-    #                        the file rather than us; `Proxy` is definitely
-    #                        available (Proxy.Media is already in use).
-    # Either one is enough to serve local art as our own poster and make the
-    # agent-chain ordering irrelevant.
-    for name in ('cover.jpg', 'folder.jpg', 'cover.png', 'poster.jpg'):
-        candidate = folder + '/' + name
-        try:
-            handle = open(candidate, 'rb')
-            data = handle.read()
-            handle.close()
-            log.warn('incipit cover probe: open() OK %s (%s bytes)', candidate, len(data))
-        except Exception as e:
-            log.warn('incipit cover probe: open() failed %s (%s)', candidate, e)
-        # NB: no type()/repr() here -- both are forbidden builtins in this
-        # sandbox, and calling type() is what made 1.3.24's probe report a false
-        # failure for Proxy.LocalFile (the exception came from the LOG line, not
-        # from the API under test).
-        try:
-            local = Proxy.LocalFile(candidate)
-            if local:
-                log.warn('incipit cover probe: Proxy.LocalFile OK %s', candidate)
-            else:
-                log.warn('incipit cover probe: Proxy.LocalFile empty %s', candidate)
-        except Exception as e:
-            log.warn('incipit cover probe: Proxy.LocalFile failed %s (%s)', candidate, e)
+    if '/' not in path:
+        return None
+    return path.rsplit('/', 1)[0] + '/cover.jpg'
 
 
 class AudiobookArtist(Agent.Artist):
@@ -743,13 +711,32 @@ class AudiobookAlbum(Agent.Album):
             #   2. whether the sandbox lets us READ the cover.jpg next to the audio
             #      file. If it does, we can serve it as OUR OWN poster and the
             #      chain order stops mattering entirely -- the clean fix.
+            # Serve the book folder's cover.jpg as OUR OWN poster.
+            #
+            # This is the only approach that can work. sort_order cannot beat our
+            # position in the agent chain (the local cover IS offered by Local
+            # Media Assets, yet ours stayed selected), and we cannot defer to LMA
+            # either -- its contribution is not in the poster container when we
+            # run. By serving the local file ourselves, winning the default slot
+            # becomes CORRECT, so Incipit can stay ABOVE LMA (which keeps clean
+            # titles -- LMA on top hands it the title field and rip tags win) and
+            # the curated cover still shows.
+            #
+            # Core.storage and open() are both blocked here; Proxy.LocalFile is
+            # the only available route (all verified by probe, 1.3.23-1.3.25). It
+            # is LAZY -- it returns a proxy for a path that doesn't exist just as
+            # readily as one that does -- so we can't check existence, and our
+            # fetched cover below is ALWAYS contributed as the fallback.
             if prefer_local:
-                try:
-                    existing_posters = [k for k in helper.metadata.posters]
-                    log.warn('incipit poster probe: existing keys = %s', existing_posters)
-                except Exception as e:
-                    log.error('incipit poster probe (keys) failed: %s', e)
-                probe_local_cover(helper)
+                local_cover = local_cover_path(helper)
+                if local_cover:
+                    try:
+                        helper.metadata.posters[local_cover] = Proxy.LocalFile(local_cover)
+                        log.info('incipit cover: offered local %s', local_cover)
+                    except Exception as e:
+                        log.error(
+                            'incipit cover: could not offer local %s (%s)', local_cover, e
+                        )
             if helper.thumb not in helper.metadata.posters or helper.force:
                 thumb_data = make_request(helper.thumb)
                 if thumb_data is not None:
