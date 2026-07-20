@@ -325,11 +325,11 @@ class AudiobookArtist(Agent.Artist):
             log.error("Author update request failed: %s", err)
             return False
         response = json_decode(request)
-        if response is None:
-            # A 200 with a garbage body may be CACHED (a week for data lookups),
-            # so the retry loop inside make_request never touches the network
-            # again — one explicit uncached follow-up heals it.
-            response = self.retry_uncached(update_url)
+        # request == 'None' means make_request already exhausted its retries
+        # (transport failure) — don't fire a second ladder; only a decodable-
+        # but-garbage cached body (request has content) is worth the uncached heal.
+        if response is None and request != 'None':
+            response = retry_uncached(update_url)
         if response is None:
             # Mirrors the album path: without this line an author whose update
             # silently no-ops leaves nothing to grep.
@@ -340,17 +340,6 @@ class AudiobookArtist(Agent.Artist):
             return False
         helper.parse_api_response(response)
         return True
-
-    def retry_uncached(self, update_url):
-        """
-            One cache-bypassing retry for a decode failure (see call_item_api).
-            Returns the decoded response or None.
-        """
-        try:
-            return json_decode(str(make_request(update_url, cache_time=0)))
-        except Exception as err:
-            log.error('uncached retry failed for %s: %s', update_url, err)
-            return None
 
     def compile_metadata(self, helper):
         """
@@ -638,15 +627,10 @@ class AudiobookAlbum(Agent.Album):
             )
             return False
         response = json_decode(request)
-        if response is None:
-            # A 200 with a garbage body may be CACHED (a week for data lookups),
-            # so make_request's own retries never touch the network again — one
-            # explicit uncached follow-up heals it.
-            try:
-                response = json_decode(str(make_request(update_url, cache_time=0)))
-            except Exception as e:
-                log.error('uncached retry failed for %s: %s', update_url, e)
-                response = None
+        # 'None' == make_request exhausted its retries (transport failure); skip
+        # the second ladder and only heal a garbage-but-present cached body.
+        if response is None and request != 'None':
+            response = retry_uncached(update_url)
         if response is None:
             log.error(
                 'incipit book fetch returned no usable data for %s; '
@@ -742,17 +726,41 @@ def json_decode(output):
         return None
 
 
+def is_api_host(url):
+    """
+        True when url targets the configured incipit-api host (our own local,
+        allowlisted service) rather than a third party (Audible/audnexus in
+        stock mode, or an Amazon image CDN).
+    """
+    base = Prefs['api_base_url']
+    return bool(base and url.startswith(base.rstrip('/')))
+
+
 def incipit_headers(url):
     """
         Attaches the user's own Hardcover token, but ONLY on requests to the
         configured incipit-api host — never to Audible or any other host, so the
         token can't leak to a third party.
     """
-    base = Prefs['api_base_url']
     token = Prefs['hardcover_token']
-    if base and token and url.startswith(base.rstrip('/')):
+    if token and is_api_host(url):
         return {'x-hardcover-token': token}
     return {}
+
+
+def retry_uncached(update_url):
+    """
+        One cache-bypassing retry for a decode failure, to heal a poisoned
+        cached 200. Call ONLY when the first request actually returned a body
+        (its str() was not 'None') — a full transport failure was already
+        retried 4x inside make_request and a second ladder just doubles an
+        outage's cost. Returns the decoded response or None.
+    """
+    try:
+        return json_decode(str(make_request(update_url, cache_time=0)))
+    except Exception as err:
+        log.error('uncached retry failed for %s: %s', update_url, err)
+        return None
 
 
 def make_request(url, cache_time=None):
@@ -765,18 +773,19 @@ def make_request(url, cache_time=None):
         week-long cache, since those records are stable.
     """
     headers = incipit_headers(url)
+    # sleep=0 ONLY for our own local, allowlisted API — the framework's per-fetch
+    # 1s pause is the largest fixed cost of a cold scan there. Third-party hosts
+    # (Audible/audnexus in stock mode, Amazon image CDNs) KEEP the pacing so an
+    # unpaced cold scan can't hammer or get throttled by them.
+    fetch_sleep = 0 if is_api_host(url) else 1
     sleep_time = 1
     num_retries = 4
     response = None
     for attempt in range(0, num_retries):
         try:
-            # sleep=0: the framework's `sleep` pauses after every REAL (uncached)
-            # fetch — a built-in +1s on each cache-miss search/lookup/thumb, the
-            # largest fixed cost of a cold scan. Our API is local and allowlisted;
-            # retry pacing is handled by the explicit backoff sleep below.
             response = HTTP.Request(
                 url, headers=headers, cacheTime=cache_time,
-                timeout=90, sleep=0)
+                timeout=90, sleep=fetch_sleep)
             break
         except Exception as err:
             log.error(

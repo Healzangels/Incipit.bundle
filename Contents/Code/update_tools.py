@@ -542,12 +542,15 @@ class AlbumUpdateTool(UpdateTool):
         # Only include subtitle in sort if not in a series
         if not self.volume:
             self.title = self.metadata.title
-        if not self.metadata.title_sort or self.force:
-            self.metadata.title_sort = ' - '.join(
-                filter(
-                    None, [(series_with_volume), self.title]
-                )
-            )
+        # Fall back to the existing display title when the record carried none,
+        # so a sparse record with series/volume but no title doesn't rebuild the
+        # sort title as bare "Series, Book N" with the book name dropped.
+        if not self.title:
+            self.title = self.metadata.title
+        new_sort = ' - '.join(filter(None, [series_with_volume, self.title]))
+        # Never blank an existing sort title with an empty rebuild.
+        if new_sort and (not self.metadata.title_sort or self.force):
+            self.metadata.title_sort = new_sort
 
     def set_metadata_tags(self):
         """
@@ -556,14 +559,12 @@ class AlbumUpdateTool(UpdateTool):
         # Create tagger.
         tagger = TagTool(self, self.prefs)
 
-        # Clears moods/styles on force (refresh) — but ONLY when replacement
-        # data exists, or a sparse record (no narrators/authors, common for
-        # Hardcover/OpenLibrary) would wipe them with nothing to repopulate.
-        if self.force:
-            if (self.prefs['store_author_as_mood'] and self.author) or self.series or self.series2:
-                tagger.clear_moods()
-            if self.narrator:
-                tagger.clear_styles()
+        # NOTE: no wholesale clear here. clear-on-force wiped moods/styles a
+        # sparse Hardcover/OpenLibrary record couldn't repopulate (moods is a
+        # FLAT field mixing author + "Series:" entries, so clearing it for one
+        # category destroyed the other). Each add_* below now owns its own
+        # clear, gated on having replacement data (the add_genres pattern), so a
+        # missing category can never wipe a present one.
 
         # Genres.
         tagger.add_genres()
@@ -683,11 +684,19 @@ class ArtistUpdateTool(UpdateTool):
             failure (non-JPEG, unreachable, truncated).
         """
         try:
-            # HTTP.Request (framework fetcher): bounded timeout — Python 2's
-            # urllib.urlopen has NONE, and one stalled Amazon connection hung an
-            # update worker forever — and it participates in the plugin HTTP
-            # cache, so the image isn't re-downloaded on every artist refresh.
-            image_file_dl_contents = str(HTTP.Request(image_url, timeout=45))
+            # HTTP.Request (framework fetcher) for a bounded timeout — Python 2's
+            # urllib.urlopen has none, so one stalled Amazon connection used to
+            # hang an update worker forever. cacheTime=0: do NOT cache the image
+            # bytes — a transient CDN error page returned with status 200 would
+            # otherwise be cached for the default week and keep measurement
+            # failing (shipping an uncropped portrait) until it expired.
+            image_file_dl_contents = str(
+                HTTP.Request(image_url, timeout=45, cacheTime=0))
+
+            # Only trust an actual JPEG: a text/HTML error body would otherwise be
+            # walked by the SOFn scanner below and mis-measured.
+            if image_file_dl_contents[:2] != '\xff\xd8':
+                return None
 
             image_file = StringIO.StringIO(image_file_dl_contents)
 
@@ -869,21 +878,29 @@ class TagTool:
         """
             Adds narrators to styles.
         """
+        # Gate the clear on HAVING narrators (the add_genres pattern): a force
+        # refresh against a narrator-less record must not wipe existing styles
+        # with nothing to put back.
+        if not self.helper.narrator:
+            return
         if not self.helper.metadata.styles or self.helper.force:
             self.helper.metadata.styles.clear()
-            for narrator in (self.helper.narrator or []):
+            for narrator in self.helper.narrator:
                 self.helper.metadata.styles.add(narrator['name'].strip())
 
     def add_authors_to_moods(self):
         """
             Adds authors to moods, except for cases in contibutors list.
+
+            Additive (dedup via the moods set): moods is a flat field shared
+            with "Series:" entries, so it is never cleared here — a sparse
+            record can't wipe author moods, and a re-match's stale author mood
+            lingering is the same accepted trade-off as the summary/studio guards.
         """
         contributor_regex = '.+?(?= -)'
-        if not self.helper.metadata.moods or self.helper.force:
-            # Loop through authors to check if it has contributor wording
-            for author in (self.helper.author or []):
-                if not re.match(contributor_regex, author['name']):
-                    self.helper.metadata.moods.add(author['name'].strip())
+        for author in (self.helper.author or []):
+            if not re.match(contributor_regex, author['name']):
+                self.helper.metadata.moods.add(author['name'].strip())
 
     def add_series_to_moods(self):
         """
@@ -902,14 +919,3 @@ class TagTool:
             for item in self.helper.similar:
                 self.helper.metadata.similar.add(item['name'])
 
-    def clear_moods(self):
-        """
-            Clears moods.
-        """
-        self.helper.metadata.moods.clear()
-
-    def clear_styles(self):
-        """
-            Clears styles.
-        """
-        self.helper.metadata.styles.clear()
