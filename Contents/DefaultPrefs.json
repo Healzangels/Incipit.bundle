@@ -63,7 +63,7 @@
     },
     {
         "id": "prefer_local_cover",
-        "label": "Keep local cover art selectable instead of replacing it with the matched cover. Does not make it the default poster.",
+        "label": "Use the book folder's cover.jpg as the poster when present. Unchecked: use the matched online cover.",
         "type": "bool",
         "default": "false"
     },
