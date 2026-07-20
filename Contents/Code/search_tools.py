@@ -489,6 +489,18 @@ class AlbumSearchTool(SearchTool):
                     break
             except Exception:
                 continue
+        if track_title:
+            # Strip a trailing part index the ripper baked into each file's
+            # title ("Last Argument of Kings (264)" -> "Last Argument of Kings").
+            # Left in, every track of a multi-part book produces a UNIQUE search
+            # URL, defeating the plugin HTTP cache — one network round-trip per
+            # part (200+ on a big book, the dominant cold-scan cost). Stripping
+            # it makes the trackTitle constant across parts, so all but the first
+            # per-track search is a free cache hit.
+            track_title = re.sub(
+                r'\s*[\(\[]\s*\d{1,4}\s*[\)\]]\s*$', '', track_title)
+            track_title = re.sub(
+                r'\s*[-_]\s*\d{1,4}\s*$', '', track_title).strip()
         log.debug('incipit track title resolved: %s' % str(track_title))
         if track_title and track_title != self.normalizedName:
             extra += '&trackTitle=' + urllib.quote(track_title)
