@@ -570,11 +570,19 @@ class AlbumUpdateTool(UpdateTool):
         tagger.add_genres()
         # Narrators.
         tagger.add_narrators_to_styles()
-        # Authors.
-        if self.prefs['store_author_as_mood']:
-            tagger.add_authors_to_moods()
-        # Series.
-        tagger.add_series_to_moods()
+        # Moods (authors + series). Decide ONCE, before any add, whether to
+        # populate: only on force or when the field is empty. A multi-part book
+        # is update()'d once per track; without this gate the agent re-added
+        # moods on every part, and Plex logged each as "something changed" ->
+        # an expensive per-track tags write, piling up SQLite transaction
+        # contention (a contributor to the refresh lockup on 200+ part books).
+        # Never CLEARS, so a sparse record still can't wipe existing moods and
+        # force still refreshes them additively.
+        populate_moods = self.force or not self.metadata.moods
+        if populate_moods:
+            if self.prefs['store_author_as_mood']:
+                tagger.add_authors_to_moods()
+            tagger.add_series_to_moods()
         # Similar.
         tagger.add_similar()
 
