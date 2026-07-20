@@ -163,12 +163,24 @@ def backup_selected_poster(helper):
         existing = None
     if existing and len(existing) == len(selected) and existing == selected:
         log.warn('incipit poster-backup: unchanged (%s bytes) -- skip', len(selected)); return
-    # Write it.
+    # Write it. Core.storage.save uses a "._<name>" atomic temp, which this SMB
+    # share VETOES (AppleDouble filenames) -> ENOENT (proven live). So write
+    # cover.jpg DIRECTLY via open() -- no temp to veto. Core.storage.save is the
+    # fallback for a share/policy where open() for writing is blocked instead.
+    try:
+        handle = open(cover_path, 'wb')
+        handle.write(selected)
+        handle.close()
+        log.warn(
+            'incipit poster-backup: saved (open) -> %s (%s bytes)', cover_path, len(selected)
+        )
+        return
+    except Exception as e:
+        log.warn('incipit poster-backup: open() write failed (%s); trying Core.storage', e)
     try:
         Core.storage.save(cover_path, selected)
         log.warn(
-            'incipit poster-backup: saved selected poster -> %s (%s bytes)',
-            cover_path, len(selected)
+            'incipit poster-backup: saved (Core.storage) -> %s (%s bytes)', cover_path, len(selected)
         )
     except Exception as e:
         log.error('incipit poster-backup: save FAILED %s (%s)', cover_path, e)
@@ -773,9 +785,6 @@ class AudiobookAlbum(Agent.Album):
         # the poster block so a freshly-captured cover.jpg is what prefer_local
         # then serves -- closing the loop in one pass. Force-only, so it fires on
         # an explicit/scheduled Refresh Metadata, not on every incremental scan.
-        # TEMP DIAG (1.3.38): log the gate so a no-op is explainable.
-        log.warn('incipit poster-backup gate: pref=%s force=%s',
-                 Prefs['backup_poster_to_cover'], helper.force)
         if Prefs['backup_poster_to_cover'] and helper.force:
             backup_selected_poster(helper)
         # Thumb.
