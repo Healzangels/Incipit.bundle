@@ -48,6 +48,48 @@ def strip_part_index(title):
     return title.strip()
 
 
+# A "YYYY - " release-year prefix and trailing "[Series N]"/"(2013)"/"[ ]"
+# groups on a book-folder name, stripped to recover a clean TITLE from the
+# folder when the album tag is missing. Mid-string parens/brackets are kept
+# (only a run of trailing groups is removed).
+FOLDER_TITLE_YEAR_PREFIX_RE = re.compile(r'^\s*(?:19|20)\d{2}\s*[-_.]\s*')
+FOLDER_TITLE_TRAILING_RE = re.compile(r'(?:\s*[\[\(][^\]\)]*[\]\)]\s*)+$')
+
+
+def is_missing_album(album):
+    """True when the album tag is absent or Plex's "[Unknown Album]" placeholder."""
+    if not album:
+        return True
+    return album.strip().strip('[]').strip().lower() == 'unknown album'
+
+
+def folder_title_from_path(path):
+    """
+        Recover a book title from the *book folder* -- the immediate parent
+        directory of an audio file -- for use when the album tag is missing.
+        The audiobook convention folders each book as
+        "<...>/YYYY - Title [Series N]/<part files>", so the parent segment,
+        with its release-year prefix and trailing [series]/(year) groups
+        stripped, is the title. Returns None when a title can't be recovered
+        (caller then keeps whatever tag it has).
+    """
+    try:
+        segments = [seg for seg in path.split('/') if seg.strip()]
+        # Need at least <book folder>/<file>: the last segment is the file, its
+        # parent is the book folder.
+        if len(segments) < 2:
+            return None
+        folder = segments[-2]
+        folder = FOLDER_TITLE_YEAR_PREFIX_RE.sub('', folder)
+        folder = FOLDER_TITLE_TRAILING_RE.sub('', folder)
+        folder = folder.strip(' -_.\t')
+        if len(folder) >= 2:
+            return folder
+    except Exception:
+        pass
+    return None
+
+
 def get_library_roots():
     """
         The server's library section root paths, fetched once and cached.
@@ -78,6 +120,9 @@ class SearchTool:
         # The full (pre-collapse) multi-author artist string, preserved by
         # get_primary_author so author_candidates() can try each author in turn.
         self.multi_author_source = None
+        # Memoized book title for the search (see resolve_search_title). None
+        # until first resolved; a recovered-from-folder title logs once.
+        self.resolved_title = None
 
     def build_url(self, query):
         """
@@ -274,6 +319,49 @@ class SearchTool:
 
 
 class AlbumSearchTool(SearchTool):
+    def resolve_search_title(self):
+        """
+            The book title to search on. Normally the album tag, but when that
+            tag is absent or Plex's "[Unknown Album]" placeholder, recover the
+            title from the book folder (see folder_title_from_path) so a book
+            with no album tag still matches instead of searching for the literal
+            "[Unknown Album]". Gated on the title_from_folder_when_missing pref.
+            Memoized so the recovery logs once. Falls back to the track-title
+            tag, then whatever album value we have.
+        """
+        if self.resolved_title is not None:
+            return self.resolved_title
+
+        album = self.media.album
+        if not is_missing_album(album):
+            self.resolved_title = album
+            return album
+
+        # Album tag missing/"[Unknown Album]": try to recover a title from the
+        # book folder, else fall back to the track-title tag (never the literal
+        # placeholder -- searching "[Unknown Album]" matches nothing).
+        recovered = None
+        if self.prefs['title_from_folder_when_missing'] and self.media.filename:
+            try:
+                path = urllib.unquote(self.media.filename).decode('utf8')
+                recovered = folder_title_from_path(path)
+            except Exception as e:
+                log.error('incipit resolve_search_title failed: %s', e)
+        if recovered:
+            # warn-level so this recovery is visible at the default log level:
+            # it means the album tag is missing and was worked around -- a rare,
+            # actionable tagging problem worth surfacing.
+            log.warn(
+                'incipit title: album tag is missing/"%s"; recovered title '
+                '"%s" from the book folder', album, recovered
+            )
+            title = recovered
+        else:
+            title = self.media.title or album or ''
+
+        self.resolved_title = title
+        return title
+
     def build_search_args(self):
         """
             Builds the search arguments for the API call.
@@ -294,7 +382,7 @@ class AlbumSearchTool(SearchTool):
             # Mercenaries 1"), which defeats the API's suffix stripping and
             # mis-ranks a book-level record with the same messy title ABOVE the
             # real audio edition. StripDiacritics keeps punctuation quote-safe.
-            raw_title = self.media.album or self.media.title or self.normalizedName
+            raw_title = self.resolve_search_title() or self.normalizedName
             query = 'title=' + urllib.quote(String.StripDiacritics(raw_title))
             author = self.resolve_author()
             if author:
@@ -571,8 +659,10 @@ class AlbumSearchTool(SearchTool):
             Normalizes the album name by removing
             unwanted characters and words.
         """
-        # Get name from either album or title
-        input_name = self.media.album if self.media.album else self.media.title
+        # Get name from either album or title. resolve_search_title() recovers a
+        # title from the book folder when the album tag is missing/"[Unknown
+        # Album]", so a book with no album tag still normalizes to a real title.
+        input_name = self.resolve_search_title() or self.media.title
         log.debug('Input Name: %s', input_name)
 
         # Remove Diacritics

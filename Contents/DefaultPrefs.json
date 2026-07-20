@@ -50,6 +50,12 @@
         "default": "true"
     },
     {
+        "id": "title_from_folder_when_missing",
+        "label": "Recover the book title from the library folder when the album tag is missing or \"[Unknown Album]\" (strips a \"YYYY - \" prefix and a trailing \"[Series]\"). Only runs when there is no usable album tag, so it can never override a real title.",
+        "type": "bool",
+        "default": "true"
+    },
+    {
         "id": "simplify_title",
         "label": "Simplify book titles (remove subtitle, series part, (un)abridged, etc.)",
         "type": "bool",
