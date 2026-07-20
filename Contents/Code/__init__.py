@@ -1,6 +1,7 @@
 # Incipit (fork of Audnexus Agent)
 # coding: utf-8
 import json
+import re
 import urllib
 # Import internal tools
 from _version import version
@@ -115,45 +116,42 @@ def local_cover_bytes(helper):
 
 def poster_backup_probe(helper):
     """
-        DIAGNOSTIC (1.3.34): groundwork for an in-agent "back up the selected
-        poster to cover.jpg" feature (the Lambda.bundle pattern:
-        HTTP.Request(PMS + thumb).content -> Core.storage.save).
+        DIAGNOSTIC round 2 (1.3.35): the full READ path for in-agent poster
+        backup. Round 1 established: Plex HTTP API IS reachable under Elevated
+        (/identity ok) and metadata.thumb is NOT on the model, so we must resolve
+        the item via the API. This probes: GUID -> /library/all?guid= -> the
+        item's ratingKey + selected `thumb` -> download the thumb bytes.
 
-        Two unknowns to settle before building it, both measured here (log-only):
-          1. Can we reach Plex's own HTTP API from the sandbox? Our bundle earlier
-             found it "not permitted" (get_library_roots is dead for that reason),
-             but that was under the default policy -- Elevated may change it.
-          2. How do we read the CURRENTLY-SELECTED poster? Either metadata.thumb is
-             already populated on a refresh (simplest), or we need the HTTP API.
-        Core.storage.LOAD already works under Elevated (1.3.31), so the WRITE half
-        (Core.storage.save) is expected to work too; Lambda confirms it does.
+        Key open question: /identity needs no token, but /library/all is
+        AUTHENTICATED. Does the plugin's own HTTP.Request carry trust, or do we
+        need a token pref? Log-only.
     """
-    md = helper.metadata
-    # 1. Raw reachability of Plex's HTTP API (token-less /identity endpoint).
+    PMS = 'http://127.0.0.1:32400'
     try:
-        body = HTTP.Request('http://127.0.0.1:32400/identity', timeout=5).content
-        log.warn('incipit pbprobe: /identity OK (%s bytes) %s', len(body), str(body)[:120])
+        guid = helper.metadata.guid
     except Exception as e:
-        log.error('incipit pbprobe: /identity FAILED (%s)', e)
-    # 2. Identity we hold for locating this item (agent id vs Plex ratingKey).
+        log.error('incipit pbprobe: no guid (%s)', e)
+        return
     try:
-        log.warn('incipit pbprobe: metadata.id=%s', md.id)
+        url = PMS + '/library/all?guid=' + urllib.quote(guid)
+        body = HTTP.Request(url, timeout=8).content
+        text = str(body)
+        m_rk = re.search(r'ratingKey="([0-9]+)"', text)
+        m_thumb = re.search(r'thumb="([^"]*)"', text)
+        rk = m_rk.group(1) if m_rk else None
+        thumb = m_thumb.group(1) if m_thumb else None
+        log.warn(
+            'incipit pbprobe: /library/all?guid OK (%s bytes) -> ratingKey=%s thumb=%s',
+            len(body), rk, thumb
+        )
+        if not thumb:
+            log.warn('incipit pbprobe: no thumb in response -- first 300 chars: %s', text[:300])
+            return
+        turl = thumb if thumb.startswith('http') else PMS + thumb
+        tbytes = HTTP.Request(turl, timeout=8).content
+        log.warn('incipit pbprobe: downloaded SELECTED poster (%s bytes) from %s', len(tbytes), turl)
     except Exception as e:
-        log.warn('incipit pbprobe: metadata.id n/a (%s)', e)
-    try:
-        log.warn('incipit pbprobe: metadata.guid=%s', md.guid)
-    except Exception as e:
-        log.warn('incipit pbprobe: metadata.guid n/a (%s)', e)
-    # 3. Is the currently-selected poster already exposed on the model?
-    try:
-        log.warn('incipit pbprobe: metadata.thumb=%s', md.thumb)
-    except Exception as e:
-        log.warn('incipit pbprobe: metadata.thumb n/a (%s)', e)
-    try:
-        keys = [k for k in md.posters]
-        log.warn('incipit pbprobe: posters keys=%s', keys)
-    except Exception as e:
-        log.warn('incipit pbprobe: posters read failed (%s)', e)
+        log.error('incipit pbprobe: API read path FAILED (%s) -- likely needs a token', e)
 
 
 class AudiobookArtist(Agent.Artist):
