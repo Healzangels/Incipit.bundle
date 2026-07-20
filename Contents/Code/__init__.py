@@ -732,7 +732,7 @@ class AudiobookAlbum(Agent.Album):
                 if local_cover:
                     try:
                         helper.metadata.posters[local_cover] = Proxy.LocalFile(local_cover)
-                        log.info('incipit cover: offered local %s', local_cover)
+                        log.warn('incipit cover: offered local %s', local_cover)
                     except Exception as e:
                         log.error(
                             'incipit cover: could not offer local %s (%s)', local_cover, e
