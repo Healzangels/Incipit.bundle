@@ -114,23 +114,6 @@ def local_cover_bytes(helper):
     return None
 
 
-def local_write_probe():
-    """
-        TEMP (1.3.40): prove Core.storage.save can WRITE to a LOCAL, non-SMB path.
-        The poster backup fails on the media SMB share because vfs_fruit intercepts
-        the "._<name>" atomic temp -- but that is a share-specific block, not a
-        broken write. Writing to /config (the plugin's own local appdata, no fruit)
-        confirms the write capability exists, so the feature genuinely works on any
-        LOCAL setup. Log-only; removed once confirmed.
-    """
-    test_path = '/config/incipit_localwrite_test.txt'
-    try:
-        Core.storage.save(test_path, 'incipit local write test')
-        log.warn('incipit localwrite: Core.storage.save to LOCAL path OK -> %s', test_path)
-    except Exception as e:
-        log.error('incipit localwrite: Core.storage.save to LOCAL FAILED (%s)', e)
-
-
 def backup_selected_poster(helper):
     """
         Back up the currently-selected Plex poster to cover.jpg next to the book,
@@ -150,10 +133,10 @@ def backup_selected_poster(helper):
     try:
         raw = helper.album_file_path()
         if not raw:
-            log.warn('incipit poster-backup: no file path'); return
+            return
         path = urllib.unquote(raw).decode('utf8') if '%' in raw else raw
         if '/' not in path:
-            log.warn('incipit poster-backup: unusable path %s', path); return
+            return
         cover_path = path.rsplit('/', 1)[0] + '/cover.jpg'
     except Exception as e:
         log.error('incipit poster-backup: path resolve failed (%s)', e)
@@ -172,33 +155,24 @@ def backup_selected_poster(helper):
         log.error('incipit poster-backup: could not read selected poster (%s)', e)
         return
     if not selected:
-        log.warn('incipit poster-backup: empty selected bytes'); return
+        return
     # Change detection: skip when the on-disk cover.jpg already matches.
     try:
         existing = Core.storage.load(cover_path)
     except Exception:
         existing = None
     if existing and len(existing) == len(selected) and existing == selected:
-        log.warn('incipit poster-backup: unchanged (%s bytes) -- skip', len(selected)); return
-    # Write it. Core.storage.save uses a "._<name>" atomic temp, which this SMB
-    # share VETOES (AppleDouble filenames) -> ENOENT (proven live). So write
-    # cover.jpg DIRECTLY via open() -- no temp to veto. Core.storage.save is the
-    # fallback for a share/policy where open() for writing is blocked instead.
-    try:
-        handle = open(cover_path, 'wb')
-        handle.write(selected)
-        handle.close()
-        log.warn(
-            'incipit poster-backup: saved (open) -> %s (%s bytes)', cover_path, len(selected)
-        )
-        return
-    except Exception as e:
-        log.warn('incipit poster-backup: open() write failed (%s); trying Core.storage', e)
+        log.info('incipit poster-backup: unchanged, skip'); return
+    # Write via the framework's Core.storage.save (open() is blocked in this
+    # sandbox even under Elevated -- verified). CAVEAT: Core.storage.save writes a
+    # "._<name>" atomic temp, which vfs_fruit on an SMB share intercepts as an
+    # AppleDouble resource fork -> ENOENT. So this works on a LOCAL library but
+    # FAILS on a fruit-enabled SMB media share (both verified live). For that
+    # split topology the write must be done server-side by a companion script on
+    # the box that holds the media.
     try:
         Core.storage.save(cover_path, selected)
-        log.warn(
-            'incipit poster-backup: saved (Core.storage) -> %s (%s bytes)', cover_path, len(selected)
-        )
+        log.warn('incipit poster-backup: saved -> %s (%s bytes)', cover_path, len(selected))
     except Exception as e:
         log.error('incipit poster-backup: save FAILED %s (%s)', cover_path, e)
 
@@ -803,7 +777,6 @@ class AudiobookAlbum(Agent.Album):
         # then serves -- closing the loop in one pass. Force-only, so it fires on
         # an explicit/scheduled Refresh Metadata, not on every incremental scan.
         if Prefs['backup_poster_to_cover'] and helper.force:
-            local_write_probe()  # TEMP (1.3.40): proves Core.storage.save works on a LOCAL path
             backup_selected_poster(helper)
         # Thumb.
         # Kept here because of Proxy
