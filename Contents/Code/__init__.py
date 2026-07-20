@@ -31,6 +31,19 @@ def apply_http_cache_time():
         HTTP.CacheTime = CACHE_1WEEK
 
 
+def search_cache_time():
+    # Search responses cache for an hour, unlike ASIN data lookups (a week).
+    # Plex fires the SAME album search once per track during a scan — a
+    # multi-part book means dozens of identical searches, and with no caching
+    # each one is a full network round-trip (~1s), which is what made large
+    # initial scans crawl. An hour makes every repeat free within a scan while
+    # still surfacing API-side matching improvements the same day. The dev
+    # toggle keeps forcing fully fresh searches.
+    if Prefs['dev_disable_http_cache']:
+        return 0
+    return CACHE_1HOUR
+
+
 def ValidatePrefs():
     log.debug('ValidatePrefs function call')
     # Re-apply on save so flipping the dev toggle takes effect without a restart.
@@ -222,7 +235,7 @@ class AudiobookArtist(Agent.Artist):
             log.debug('artist recovery: no book search url (no title or API base)')
             return None
         try:
-            request = str(make_request(book_url, cache_time=0))
+            request = str(make_request(book_url, cache_time=search_cache_time()))
         except Exception as err:
             log.error('artist recovery book search failed: %s', err)
             return None
@@ -258,7 +271,7 @@ class AudiobookArtist(Agent.Artist):
         # retry loop can tell "this request errored" from "this author genuinely
         # had no results" and not fall through to the wrong author on a blip.
         try:
-            request = str(make_request(search_url, cache_time=0))
+            request = str(make_request(search_url, cache_time=search_cache_time()))
         except Exception as err:
             log.error("Author search request failed: %s", err)
             return None
@@ -540,7 +553,7 @@ class AudiobookAlbum(Agent.Album):
         query = helper.build_search_args()
         search_url = helper.build_url(query)
         try:
-            request = str(make_request(search_url, cache_time=0))
+            request = str(make_request(search_url, cache_time=search_cache_time()))
         except Exception as err:
             log.error("Book search request failed: %s", err)
             return None
@@ -715,9 +728,10 @@ def make_request(url, cache_time=None):
     """
         Makes and returns an HTTP request.
         Retries 4 times, increasing  time between each retry.
-        cache_time=0 bypasses the plugin HTTP cache — used for SEARCH calls so
-        an improved API result isn't masked by a stale cached response (data
-        lookups by ASIN stay cached, since those records are stable).
+        cache_time controls the plugin HTTP cache: SEARCH calls pass
+        search_cache_time() (1h, or 0 with the dev toggle) so per-track
+        re-searches during a scan are free; ASIN data lookups use the default
+        week-long cache, since those records are stable.
     """
     headers = incipit_headers(url)
     sleep_time = 1
