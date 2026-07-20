@@ -113,6 +113,49 @@ def local_cover_bytes(helper):
     return None
 
 
+def poster_backup_probe(helper):
+    """
+        DIAGNOSTIC (1.3.34): groundwork for an in-agent "back up the selected
+        poster to cover.jpg" feature (the Lambda.bundle pattern:
+        HTTP.Request(PMS + thumb).content -> Core.storage.save).
+
+        Two unknowns to settle before building it, both measured here (log-only):
+          1. Can we reach Plex's own HTTP API from the sandbox? Our bundle earlier
+             found it "not permitted" (get_library_roots is dead for that reason),
+             but that was under the default policy -- Elevated may change it.
+          2. How do we read the CURRENTLY-SELECTED poster? Either metadata.thumb is
+             already populated on a refresh (simplest), or we need the HTTP API.
+        Core.storage.LOAD already works under Elevated (1.3.31), so the WRITE half
+        (Core.storage.save) is expected to work too; Lambda confirms it does.
+    """
+    md = helper.metadata
+    # 1. Raw reachability of Plex's HTTP API (token-less /identity endpoint).
+    try:
+        body = HTTP.Request('http://127.0.0.1:32400/identity', timeout=5).content
+        log.warn('incipit pbprobe: /identity OK (%s bytes) %s', len(body), str(body)[:120])
+    except Exception as e:
+        log.error('incipit pbprobe: /identity FAILED (%s)', e)
+    # 2. Identity we hold for locating this item (agent id vs Plex ratingKey).
+    try:
+        log.warn('incipit pbprobe: metadata.id=%s', md.id)
+    except Exception as e:
+        log.warn('incipit pbprobe: metadata.id n/a (%s)', e)
+    try:
+        log.warn('incipit pbprobe: metadata.guid=%s', md.guid)
+    except Exception as e:
+        log.warn('incipit pbprobe: metadata.guid n/a (%s)', e)
+    # 3. Is the currently-selected poster already exposed on the model?
+    try:
+        log.warn('incipit pbprobe: metadata.thumb=%s', md.thumb)
+    except Exception as e:
+        log.warn('incipit pbprobe: metadata.thumb n/a (%s)', e)
+    try:
+        keys = [k for k in md.posters]
+        log.warn('incipit pbprobe: posters keys=%s', keys)
+    except Exception as e:
+        log.warn('incipit pbprobe: posters read failed (%s)', e)
+
+
 class AudiobookArtist(Agent.Artist):
     name = 'Incipit'
     languages = [
@@ -708,6 +751,11 @@ class AudiobookAlbum(Agent.Album):
         helper.set_metadata_studio()
         # Summary.
         helper.set_metadata_summary()
+        # DIAGNOSTIC (1.3.34): groundwork for in-agent poster-backup -> cover.jpg,
+        # gated on the same pref so it only runs while testing. Removed once the
+        # real feature is built.
+        if Prefs['prefer_local_cover']:
+            poster_backup_probe(helper)
         # Thumb.
         # Kept here because of Proxy
         if helper.thumb:
