@@ -63,7 +63,7 @@
     },
     {
         "id": "prefer_local_cover",
-        "label": "Prefer local or embedded cover art (use a cover.jpg/folder.jpg in the book folder, or the artwork embedded in the audio file, as the default poster when present; the matched cover stays as a fallback). Requires Local Media Assets enabled for the library.",
+        "label": "Keep local cover art selectable instead of replacing it with the matched cover. Note: this does NOT make it the default poster - agent chain order decides that.",
         "type": "bool",
         "default": "false"
     },
