@@ -547,42 +547,22 @@ class AudiobookArtist(Agent.Artist):
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=0
                     )
-            # Offer the alternate (Audible) author image as a secondary option.
-            valid_posters = [helper.thumb]
-            if (
-                helper.thumb_secondary
-                and helper.thumb_secondary != helper.thumb
-            ):
-                if (
-                    helper.thumb_secondary not in helper.metadata.posters
-                    or helper.force
-                ):
-                    secondary_data = make_request(helper.thumb_secondary)
-                    if secondary_data is not None:
-                        helper.metadata.posters[helper.thumb_secondary] = \
-                            Proxy.Media(secondary_data, sort_order=1)
-                valid_posters.append(helper.thumb_secondary)
-            # Re-prioritize so our chosen thumb (the Hardcover portrait, when we
-            # have one) becomes the SELECTED poster, keeping the Audible image as
-            # the pickable second. sort_order=0 alone does NOT override a poster
-            # Plex already selected on a prior scan -- e.g. the Audible book-cover
-            # that got picked before the Hardcover author-image fix existed -- so
-            # the real photo stayed present-but-not-default (the exact Craig
-            # Alanson symptom). validate_keys prunes the set to [thumb, secondary]
-            # and pins thumb first, which DOES move the selection. This mirrors the
-            # ALBUM path (see AudiobookAlbum below), closing an artist/album
-            # mirror-drift: books re-prioritized their square cover, authors never
-            # did.
-            #
-            # TRADE-OFF (documented so we can backtrack): validate_keys re-runs on
-            # every refresh, so a HAND-PICKED author poster is overridden on the
-            # next scan -- the same behavior the book path already has. It's a
-            # no-op for authors with no Hardcover match (thumb is just the Audible
-            # image, so pinning it front changes nothing). TO REVERT to
-            # "add-but-don't-re-prioritize": delete the single validate_keys line
-            # below; the posters are still offered, Plex just keeps its own
-            # existing selection.
-            helper.metadata.posters.validate_keys(valid_posters)
+            # Offer ONLY the API's chosen author image (the Hardcover portrait when
+            # present, else the Audible image) and PRUNE to it, so it becomes the
+            # SELECTED poster on a fresh scan. We used to ALSO offer the Audible
+            # imageAlt as a secondary and validate_keys([thumb, secondary]), on the
+            # belief that it pinned thumb first -- but measured live it did NOT:
+            # Plex selected the SECONDARY, which for authors WITH a Hardcover
+            # portrait is the wrong image (a book cover for indie authors like Craig
+            # Alanson: image 518x754 photo vs imageAlt 734x1080 cover; or the
+            # rectangular Audible photo over a square Hardcover one for Robert
+            # Jordan: image 330x330 vs imageAlt 185x315). Both authors want `thumb`.
+            # validate_keys([single]) DOES select that one on a fresh scan (same as
+            # the album local-cover path), so drop the secondary; the API already
+            # picked the right image and the user can still add one manually.
+            # (validate_keys still can't override a poster Plex persisted on a PRIOR
+            # scan, so already-scanned authors need a fresh re-scan or a manual pick.)
+            helper.metadata.posters.validate_keys([helper.thumb])
 
         helper.log_update_metadata()
 
