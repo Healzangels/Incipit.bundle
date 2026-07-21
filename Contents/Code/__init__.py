@@ -176,6 +176,117 @@ def backup_selected_poster(helper):
         log.error('incipit poster-backup: save FAILED %s (%s)', cover_path, e)
 
 
+def upload_and_select_poster(guid, image_bytes, tag):
+    """
+        Make `image_bytes` the SELECTED Plex poster for the item with `guid`, via
+        the trusted local Plex API (Elevated policy -> the plugin's request to
+        127.0.0.1:32400 needs no token).
+
+        WHY this exists: the posters CONTAINER (Proxy.Media + sort_order=0 +
+        validate_keys) only wins on a FRESH scan -- it cannot move Plex's
+        PERSISTED selection, so anything changed on an already-scanned item never
+        took effect on Refresh Metadata. An upload/select through the API DOES
+        override the persisted pick, and it writes into Plex's OWN metadata store
+        (NOT the media folder), so the SMB vfs_fruit veto that blocked writing
+        cover.jpg back does not apply here.
+
+        Live findings that shape the logic: POST /posters selects only NEW
+        content -- re-posting an upload Plex already holds is a no-op for
+        selection. GET /poster?url= is also a no-op. Only PUT /poster?url= moves
+        an existing selection, and the framework downgrades the agent's PUT to a
+        GET. So: POST new content (which selects it), and report the one case the
+        agent genuinely cannot handle.
+
+        `tag` prefixes every log line so each caller is identifiable. Returns True
+        when the image ends up selected. Every failure is caught, so a fresh-scan
+        item with no ratingKey yet, or a sealed sandbox, just falls back to the
+        container behavior.
+    """
+    PMS = 'http://127.0.0.1:32400'
+    if not image_bytes:
+        return False
+    try:
+        sha = hashlib.sha1(image_bytes).hexdigest()
+    except Exception as e:
+        log.error('%s: sha1 failed (%s)', tag, e)
+        return False
+    # Resolve this item's ratingKey from its guid (trusted local API).
+    try:
+        url = PMS + '/library/all?guid=' + urllib.quote(guid)
+        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
+        m = re.search(r'ratingKey="([0-9]+)"', text)
+        if not m:
+            log.warn('%s: no ratingKey for this item yet (fresh scan?)', tag)
+            return False
+        rk = m.group(1)
+    except Exception as e:
+        log.error('%s: ratingKey resolve failed (%s)', tag, e)
+        return False
+    # Read the poster set: what's selected, and do we already hold this content?
+    # (an upload:// ratingKey embeds the sha1 of the bytes.)
+    selected_key = None
+    have_upload = False
+    try:
+        purl = PMS + '/library/metadata/' + rk + '/posters'
+        data = json.loads(HTTP.Request(
+            purl, headers={'Accept': 'application/json'}, timeout=8, cacheTime=0
+        ).content)
+        for p in (data.get('MediaContainer', {}).get('Metadata', []) or []):
+            pk = p.get('ratingKey', '') or ''
+            if p.get('selected'):
+                selected_key = pk
+            if sha in pk:
+                have_upload = True
+    except Exception as e:
+        log.error('%s: posters list failed (%s)', tag, e)
+        return False
+    if selected_key and sha in selected_key:
+        log.info('%s: already the selected poster, skip', tag)
+        return True
+    if have_upload:
+        log.warn(
+            '%s: image is uploaded but de-selected on rk %s; the agent cannot '
+            're-select an existing poster (its PUT is downgraded) -- pick it in '
+            'the UI, or use select_cover_poster.py', tag, rk
+        )
+        return False
+    # New content: POST creates the upload AND selects it (verified live).
+    content_type = 'image/png' if image_bytes[:4] == '\x89PNG' else 'image/jpeg'
+    try:
+        up = PMS + '/library/metadata/' + rk + '/posters'
+        HTTP.Request(up, data=image_bytes,
+                     headers={'Content-Type': content_type}, timeout=8)
+        log.warn('%s: uploaded + selected (rk %s, %s bytes, %s)',
+                 tag, rk, len(image_bytes), content_type)
+        return True
+    except Exception as e:
+        log.error('%s: upload failed (%s)', tag, e)
+        return False
+
+
+def select_hardcover_author_art(helper):
+    """
+        Make the Hardcover portrait the SELECTED poster for an author pinned via
+        the `authors_prefer_hardcover` pref.
+
+        The posters container only wins on a FRESH scan, so adding a name to that
+        pref did nothing for an author Plex had already scanned -- the picture
+        stayed on whatever won at first match, which is exactly the complaint
+        this closes. Routing through the same upload/select path as the local
+        cover makes "add the name, hit Refresh Metadata" actually move it.
+    """
+    if not helper.thumb:
+        return
+    try:
+        art = make_request(helper.thumb)
+    except Exception as e:
+        log.error('incipit author-art-select: fetch failed (%s)', e)
+        return
+    upload_and_select_poster(
+        helper.metadata.guid, art, 'incipit author-art-select'
+    )
+
+
 def select_local_cover(helper):
     """
         Force the book folder's cover.jpg to become the SELECTED Plex poster, via
@@ -196,71 +307,9 @@ def select_local_cover(helper):
         it). Every failure is caught, so a fresh-scan item with no ratingKey yet,
         or a sealed sandbox, simply falls back to the container behavior.
     """
-    PMS = 'http://127.0.0.1:32400'
-    cover_bytes = local_cover_bytes(helper)
-    if not cover_bytes:
-        return
-    try:
-        sha = hashlib.sha1(cover_bytes).hexdigest()
-    except Exception as e:
-        log.error('incipit local-select: sha1 failed (%s)', e)
-        return
-    # Resolve this item's ratingKey from its guid (trusted local API).
-    try:
-        url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
-        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
-        m = re.search(r'ratingKey="([0-9]+)"', text)
-        if not m:
-            log.warn('incipit local-select: no ratingKey for this item yet (fresh scan?)'); return
-        rk = m.group(1)
-    except Exception as e:
-        log.error('incipit local-select: ratingKey resolve failed (%s)', e)
-        return
-    # Read the poster set: what's selected, and is our cover already uploaded?
-    # (an upload:// ratingKey embeds the sha1 of the bytes.) Live findings:
-    # POST /posters selects only NEW content -- re-posting an existing upload is a
-    # no-op for selection. GET /poster?url= is also a no-op. Only PUT /poster?url=
-    # actually moves the selection. So: POST new content, PUT to re-select an
-    # existing upload -- then VERIFY, because the framework may downgrade the PUT.
-    def poster_state():
-        sel = None
-        have = False
-        try:
-            purl = PMS + '/library/metadata/' + rk + '/posters'
-            data = json.loads(HTTP.Request(purl, headers={'Accept': 'application/json'}, timeout=8, cacheTime=0).content)
-            for p in (data.get('MediaContainer', {}).get('Metadata', []) or []):
-                pk = p.get('ratingKey', '') or ''
-                if p.get('selected'):
-                    sel = pk
-                if sha in pk:
-                    have = True
-        except Exception as e:
-            log.error('incipit local-select: posters list failed (%s)', e)
-        return sel, have
-
-    selected_key, have_upload = poster_state()
-    if selected_key and sha in selected_key:
-        log.info('incipit local-select: cover.jpg already selected, skip')
-        return
-    if have_upload:
-        # cover.jpg is already an upload poster on this item but is NOT selected.
-        # The agent can only GET/POST (the framework downgrades PUT/DELETE to
-        # no-ops -- verified live), and re-POSTing content Plex already has does
-        # NOT re-select it. So the agent genuinely cannot re-select a de-selected
-        # existing poster: the rare "revert to a byte-identical prior cover" case.
-        # select_cover_poster.py (which PUTs with a token) is the tool for it.
-        log.warn(
-            'incipit local-select: cover.jpg is uploaded but de-selected on rk %s; the '
-            'agent cannot re-select an existing poster -- use select_cover_poster.py', rk
-        )
-        return
-    # New content: POST creates the upload AND selects it (verified live).
-    try:
-        up = PMS + '/library/metadata/' + rk + '/posters'
-        HTTP.Request(up, data=cover_bytes, headers={'Content-Type': 'image/jpeg'}, timeout=8)
-        log.warn('incipit local-select: uploaded + selected cover.jpg (rk %s, %s bytes)', rk, len(cover_bytes))
-    except Exception as e:
-        log.error('incipit local-select: upload failed (%s)', e)
+    upload_and_select_poster(
+        helper.metadata.guid, local_cover_bytes(helper), 'incipit local-select'
+    )
 
 
 class AudiobookArtist(Agent.Artist):
@@ -604,6 +653,13 @@ class AudiobookArtist(Agent.Artist):
             )
             if prefer_hardcover:
                 helper.metadata.posters.validate_keys([helper.thumb])
+                # validate_keys only wins at FIRST match, so on an author Plex has
+                # already scanned the pref would otherwise do nothing. On a forced
+                # Refresh, push the portrait through the upload/select API instead
+                # -- that DOES move a persisted selection. Same route as the local
+                # cover; no-ops harmlessly on a fresh scan (no ratingKey yet).
+                if helper.force:
+                    select_hardcover_author_art(helper)
             else:
                 valid_posters = [helper.thumb]
                 if (
