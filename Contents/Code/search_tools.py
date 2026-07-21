@@ -261,6 +261,25 @@ class SearchTool:
         self.log_search_url(search_url)
         return search_url
 
+    def is_typed_search(self):
+        """
+            True only for a query the user actually TYPED into Fix Match's
+            Search Options. Both Fix Match flows arrive with manual=True;
+            measured live (the 1.3.60 probe): the instant candidate list on
+            dialog OPEN carries the item's own metadata (artist set,
+            media.name=None), while a typed query puts the typed text in
+            media.name (and clears artist). The typed text is the WHOLE query
+            -- no sidecar, no injected author, no duration/ASIN/trackTitle.
+            The auto-fired list is a re-run of the automatic match and keeps
+            full context, so it scores like a scan.
+        """
+        try:
+            return bool(self.manual and self.media.name)
+        except Exception:
+            # If media.name is ever unreadable, treat any manual search as
+            # typed -- honoring user input is the safer failure mode.
+            return bool(self.manual)
+
     def sidecar(self):
         """
             The Audiobookshelf-style metadata.json next to the book, as a dict, or
@@ -369,12 +388,14 @@ class AlbumSearchTool(SearchTool):
         # Sidecar metadata.json title is authoritative over the (often scrambled)
         # album tag. Kept WITH any "[Series N]" suffix -- the API normalizer strips
         # it, and the structure helps the API rank the audio edition correctly.
-        # NOT on a manual search: a Fix Match query is the USER typing a
+        # NOT on a TYPED search: a Search Options query is the USER typing a
         # correction, and the sidecar overriding it made Fix Match silently
-        # ignore whatever was typed whenever a metadata.json existed.
+        # ignore whatever was typed whenever a metadata.json existed. The
+        # dialog's auto-fired list (is_typed_search False) keeps sidecar-first,
+        # like the automatic scan it re-runs.
         # isinstance guard: a malformed sidecar with a non-string title (a list,
         # a number) must fall through to the tags, not crash the search.
-        if not self.manual:
+        if not self.is_typed_search():
             sc = self.sidecar()
             if sc:
                 sc_title = sc.get('title')
@@ -417,15 +438,14 @@ class AlbumSearchTool(SearchTool):
         """
             Builds the search arguments for the API call.
         """
-        # PROBE (warn so it shows at the default level): what Plex actually sends
-        # in each search flow. The Fix Match dialog fires TWO kinds of manual
-        # search -- the instant list on open (current metadata, manual=1) and a
-        # typed Search Options query (manual=1 too) -- and the plan is to give
-        # the first full automatic context while keeping the second pure. That
-        # needs a field that differs between them (candidate: media.artist).
-        # Measure, don't assume.
+        # Probe (debug): what Plex sent for this search. Measured 1.3.60: the
+        # Fix Match dialog's instant list arrives manual=True with the item's
+        # metadata (artist set, name=None); a typed Search Options query puts
+        # the TYPED TEXT in media.name and clears artist. is_typed_search()
+        # builds on exactly this -- re-measure here if a Plex update ever
+        # changes the shape.
         try:
-            log.warn(
+            log.debug(
                 'incipit search context: manual=%r artist=%r album=%r '
                 'title=%r name=%r',
                 self.manual, self.media.artist, self.media.album,
@@ -488,43 +508,42 @@ class AlbumSearchTool(SearchTool):
             returning every title collision (e.g. the many unrelated books
             named "Luck of the Draw").
         """
-        # Manual Fix Match: send NO author at all. Plex's manual-search dialog
-        # has no author field, so any author here would be INJECTED context (the
-        # parent artist / the folder) -- and an injected author caps a
-        # cross-author rescue below the acceptance floor, which is the exact
-        # search Fix Match exists for (observed live: a typed "Project Hail
-        # Mary" under the Brian Jacques artist could not surface Andy Weir's
-        # book). Authorless title scoring has its own ceiling and is the
-        # correct manual behavior.
-        if self.manual:
+        # TYPED Fix Match search: send NO author at all. The Search Options
+        # dialog has no author field, so any author here would be INJECTED
+        # context (the parent artist / the folder) -- and an injected author
+        # caps a cross-author rescue below the acceptance floor, which is the
+        # exact search Fix Match exists for (observed live: a typed "Project
+        # Hail Mary" under the Brian Jacques artist could not surface Andy
+        # Weir's book). Authorless title scoring has its own ceiling and is
+        # the correct typed behavior. The dialog's auto-fired list keeps the
+        # full author context below, so it scores like the scan it re-runs.
+        if self.is_typed_search():
             return None
 
         # Sidecar metadata.json author(s) are authoritative over a scrambled or
         # narrator-as-artist ALBUMARTIST tag. Joined so the API's multi-author
-        # split can match any of them. NOT on a manual search -- same reason as
-        # the title: Fix Match input must win (see resolve_search_title).
-        if not self.manual:
-            sc = self.sidecar()
-            if sc:
-                # Tolerate the format variants seen in the wild instead of
-                # assuming a list of plain strings: Audiobookshelf/OPF exports
-                # can store authors as [{"name": ...}] (a dict per author) or as
-                # one bare string -- the bare string would otherwise be iterated
-                # CHARACTER BY CHARACTER into "J, o, h, n" garbage, and a dict
-                # entry would crash the join.
-                sc_authors = sc.get('authors')
-                if isinstance(sc_authors, (str, unicode)):
-                    sc_authors = [sc_authors]
-                names = []
-                for a in (sc_authors or []):
-                    if isinstance(a, dict):
-                        a = a.get('name')
-                    if a and isinstance(a, (str, unicode)):
-                        names.append(a)
-                if names:
-                    joined = ', '.join(names)
-                    log.info('incipit author: using metadata.json author(s) "%s"', joined)
-                    return self.clean_search_author(joined)
+        # split can match any of them. (Typed searches never reach here.)
+        sc = self.sidecar()
+        if sc:
+            # Tolerate the format variants seen in the wild instead of
+            # assuming a list of plain strings: Audiobookshelf/OPF exports
+            # can store authors as [{"name": ...}] (a dict per author) or as
+            # one bare string -- the bare string would otherwise be iterated
+            # CHARACTER BY CHARACTER into "J, o, h, n" garbage, and a dict
+            # entry would crash the join.
+            sc_authors = sc.get('authors')
+            if isinstance(sc_authors, (str, unicode)):
+                sc_authors = [sc_authors]
+            names = []
+            for a in (sc_authors or []):
+                if isinstance(a, dict):
+                    a = a.get('name')
+                if a and isinstance(a, (str, unicode)):
+                    names.append(a)
+            if names:
+                joined = ', '.join(names)
+                log.info('incipit author: using metadata.json author(s) "%s"', joined)
+                return self.clean_search_author(joined)
 
         author = self.media.artist
 
@@ -639,15 +658,18 @@ class AlbumSearchTool(SearchTool):
             Builds the extra query params for the incipit-api search, and logs
             the media object so we can confirm how duration/tracks are exposed.
         """
-        # Manual Fix Match: the typed title is the WHOLE query. Every extra this
-        # function adds is automatic-scan context describing the CURRENT file --
-        # i.e. the identity the user is trying to ESCAPE. The damage is concrete:
-        # the file's DURATION vetoes every edition of a different-length book
-        # below the floor (the rescue returns nothing), the filename/sidecar
-        # ASIN re-pins the match being corrected, and the TRACK TITLE leak was
-        # observed live -- a typed "Project Hail Mary" returned "Pearls of
-        # Lutra" because the widening pass searched the track title.
-        if self.manual:
+        # TYPED Fix Match search: the typed title is the WHOLE query. Every
+        # extra this function adds is automatic-scan context describing the
+        # CURRENT file -- i.e. the identity the user is trying to ESCAPE. The
+        # damage is concrete: the file's DURATION vetoes every edition of a
+        # different-length book below the floor (the rescue returns nothing),
+        # the filename/sidecar ASIN re-pins the match being corrected, and the
+        # TRACK TITLE leak was observed live -- a typed "Project Hail Mary"
+        # returned "Pearls of Lutra" because the widening pass searched the
+        # track title. The dialog's auto-fired list (is_typed_search False)
+        # keeps all of it: it re-runs the automatic match, so duration
+        # corroboration and the ASIN pin score it like a scan (100, not 85).
+        if self.is_typed_search():
             return ''
         extra = ''
         # Probe: log the media attributes we can reach. getattr() and dir() are
@@ -707,27 +729,26 @@ class AlbumSearchTool(SearchTool):
         # title/author scoring when it isn't -- unlike a hard ASIN override, which
         # short-circuits and fails outright when the ASIN lookup is empty (proven
         # live: a brand-new Podium ASIN returned no Audible-catalog results).
-        # NOT on a manual search: the hint carries the identity that produced the
-        # match the user is CORRECTING -- pinned to full confidence it would beat
-        # whatever they typed, the same silent-discard as the sidecar title/author.
+        # (Typed searches never reach this function -- see the early return --
+        # so the hint only ever rides automatic scans and the dialog's
+        # auto-fired list, where pinning the known identity is exactly right.)
         asin_hint = None
-        if not self.manual:
-            try:
-                if self.media.filename:
-                    fn = urllib.unquote(self.media.filename).decode('utf8')
-                    asin_match = self.search_asin(fn)
-                    if asin_match:
-                        asin_hint = asin_match.group(0)
-            except Exception as e:
-                log.error('incipit asin probe failed: %s', e)
-            if not asin_hint:
-                sc = self.sidecar()
-                if sc:
-                    sc_asin = sc.get('asin')
-                    if isinstance(sc_asin, (str, unicode)):
-                        sc_match = self.search_asin(sc_asin.upper())
-                        if sc_match:
-                            asin_hint = sc_match.group(0)
+        try:
+            if self.media.filename:
+                fn = urllib.unquote(self.media.filename).decode('utf8')
+                asin_match = self.search_asin(fn)
+                if asin_match:
+                    asin_hint = asin_match.group(0)
+        except Exception as e:
+            log.error('incipit asin probe failed: %s', e)
+        if not asin_hint:
+            sc = self.sidecar()
+            if sc:
+                sc_asin = sc.get('asin')
+                if isinstance(sc_asin, (str, unicode)):
+                    sc_match = self.search_asin(sc_asin.upper())
+                    if sc_match:
+                        asin_hint = sc_match.group(0)
         if asin_hint:
             extra += '&asin=' + urllib.quote(asin_hint)
             log.info('incipit asin hint: %s', asin_hint)
