@@ -89,19 +89,19 @@ def Start():
 # sha1), so CHANGED input always re-runs and only true repeats are skipped. The
 # TTL bounds staleness: entries expire in seconds-to-minutes, so a deliberate
 # later re-Refresh does the work again while one pass's track-fanout collapses.
-_recent_work = {}
+recent_work_memo = {}
 
 
 def should_run(tag, guid, token, ttl):
     """True unless the same (tag, guid, token) completed within ttl seconds."""
-    entry = _recent_work.get((tag, guid))
+    entry = recent_work_memo.get((tag, guid))
     if entry and entry[0] == token and (time() - entry[1]) < ttl:
         return False
     return True
 
 
 def mark_done(tag, guid, token):
-    _recent_work[(tag, guid)] = (token, time())
+    recent_work_memo[(tag, guid)] = (token, time())
 
 
 def local_cover_bytes(helper):
@@ -151,7 +151,7 @@ def backup_selected_poster(helper):
         ORIGINAL bytes (verified identical to cover.jpg on an unchanged book).
     """
     PMS = 'http://127.0.0.1:32400'
-    # Per-track collapse (see _recent_work): the input here is Plex's current
+    # Per-track collapse (see recent_work_memo): the input here is Plex's current
     # selection, unknowable without the HTTP round-trips this guard exists to
     # avoid -- so the token is fixed and the short TTL alone bounds the work to
     # once per pass. Marked optimistically: a failed backup simply retries on
@@ -254,7 +254,7 @@ def upload_and_select_poster(guid, image_bytes, tag, only_if_selected_sha=None):
     except Exception as e:
         log.error('%s: sha1 failed (%s)', tag, e)
         return False
-    # Per-track collapse (see _recent_work): identical bytes for this item were
+    # Per-track collapse (see recent_work_memo): identical bytes for this item were
     # already handled seconds ago -- this is track N of the same refresh pass.
     if not should_run(tag, guid, sha, 90):
         return True
