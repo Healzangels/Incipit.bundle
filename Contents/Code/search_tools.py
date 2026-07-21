@@ -496,6 +496,13 @@ class AlbumSearchTool(SearchTool):
             # ASIN, and the first track title (a fallback when the ALBUM tag is
             # a bare series+number).
             query += self.incipit_extra_args()
+            if self.is_typed_search():
+                # Telemetry only, never scoring: a typed query is authorless by
+                # design, and unmarked it lands in the API's riskyAuthorless
+                # bucket -- the counter that watches the AUTOMATIC
+                # false-positive class -- making a manual-correction session
+                # read as a quality regression.
+                query += '&manual=1'
             return query
 
         # Audible catalog path.
@@ -971,14 +978,14 @@ class AlbumSearchTool(SearchTool):
             )
             return None
 
-        if self.manual:
-            # If this is a custom search,
-            # use the user-entered name instead of the scanner hint.
-            if self.media.name:
-                log.info(
-                    'Custom album search for: ' + self.media.name
-                )
-                self.media.album = self.media.name
+        if self.is_typed_search():
+            # A typed Search Options query: use the user-entered name instead of
+            # the scanner hint. Same predicate as the sidecar/author/extra-args
+            # gates, so "what counts as typed" has exactly one definition.
+            log.info(
+                'Custom album search for: ' + self.media.name
+            )
+            self.media.album = self.media.name
         return True
 
 
