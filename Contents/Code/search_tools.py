@@ -472,6 +472,17 @@ class AlbumSearchTool(SearchTool):
             returning every title collision (e.g. the many unrelated books
             named "Luck of the Draw").
         """
+        # Manual Fix Match: send NO author at all. Plex's manual-search dialog
+        # has no author field, so any author here would be INJECTED context (the
+        # parent artist / the folder) -- and an injected author caps a
+        # cross-author rescue below the acceptance floor, which is the exact
+        # search Fix Match exists for (observed live: a typed "Project Hail
+        # Mary" under the Brian Jacques artist could not surface Andy Weir's
+        # book). Authorless title scoring has its own ceiling and is the
+        # correct manual behavior.
+        if self.manual:
+            return None
+
         # Sidecar metadata.json author(s) are authoritative over a scrambled or
         # narrator-as-artist ALBUMARTIST tag. Joined so the API's multi-author
         # split can match any of them. NOT on a manual search -- same reason as
@@ -612,6 +623,16 @@ class AlbumSearchTool(SearchTool):
             Builds the extra query params for the incipit-api search, and logs
             the media object so we can confirm how duration/tracks are exposed.
         """
+        # Manual Fix Match: the typed title is the WHOLE query. Every extra this
+        # function adds is automatic-scan context describing the CURRENT file --
+        # i.e. the identity the user is trying to ESCAPE. The damage is concrete:
+        # the file's DURATION vetoes every edition of a different-length book
+        # below the floor (the rescue returns nothing), the filename/sidecar
+        # ASIN re-pins the match being corrected, and the TRACK TITLE leak was
+        # observed live -- a typed "Project Hail Mary" returned "Pearls of
+        # Lutra" because the widening pass searched the track title.
+        if self.manual:
+            return ''
         extra = ''
         # Probe: log the media attributes we can reach. getattr() and dir() are
         # BOTH blocked in the Plex plugin sandbox, so read attrs directly (these
