@@ -417,6 +417,22 @@ class AlbumSearchTool(SearchTool):
         """
             Builds the search arguments for the API call.
         """
+        # PROBE (warn so it shows at the default level): what Plex actually sends
+        # in each search flow. The Fix Match dialog fires TWO kinds of manual
+        # search -- the instant list on open (current metadata, manual=1) and a
+        # typed Search Options query (manual=1 too) -- and the plan is to give
+        # the first full automatic context while keeping the second pure. That
+        # needs a field that differs between them (candidate: media.artist).
+        # Measure, don't assume.
+        try:
+            log.warn(
+                'incipit search context: manual=%r artist=%r album=%r '
+                'title=%r name=%r',
+                self.manual, self.media.artist, self.media.album,
+                self.media.title, self.media.name
+            )
+        except Exception as e:
+            log.error('incipit search context probe failed: %s', e)
         # First, normalize the name
         self.normalize_name()
 
