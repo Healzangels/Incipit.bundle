@@ -408,6 +408,17 @@ def converge_author_art(helper, target_url, other_url, tag):
     if not target_url:
         return
     guid = helper.metadata.guid
+    # Running in ONE direction invalidates the OPPOSITE direction's memo entry:
+    # its cached "done" describes a selection this direction is about to (or
+    # just did) change. Observed live within the TTL: pin at 16:47 marked the
+    # select memo; unpin at 16:50 flipped the poster to Audible; re-pin at
+    # 16:51 hit the four-minute-old select entry and silently skipped.
+    opposite = {
+        'incipit author-art-select': 'incipit author-art-unpin',
+        'incipit author-art-unpin': 'incipit author-art-select',
+    }.get(tag)
+    if opposite and (opposite, guid) in recent_work_memo:
+        del recent_work_memo[(opposite, guid)]
     if not should_run(tag, guid, target_url, 600):
         return
     state = read_poster_state(guid, tag)
