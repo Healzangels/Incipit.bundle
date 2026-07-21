@@ -547,22 +547,32 @@ class AudiobookArtist(Agent.Artist):
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=0
                     )
-            # Offer ONLY the API's chosen author image (the Hardcover portrait when
-            # present, else the Audible image) and PRUNE to it, so it becomes the
-            # SELECTED poster on a fresh scan. We used to ALSO offer the Audible
-            # imageAlt as a secondary and validate_keys([thumb, secondary]), on the
-            # belief that it pinned thumb first -- but measured live it did NOT:
-            # Plex selected the SECONDARY, which for authors WITH a Hardcover
-            # portrait is the wrong image (a book cover for indie authors like Craig
-            # Alanson: image 518x754 photo vs imageAlt 734x1080 cover; or the
-            # rectangular Audible photo over a square Hardcover one for Robert
-            # Jordan: image 330x330 vs imageAlt 185x315). Both authors want `thumb`.
-            # validate_keys([single]) DOES select that one on a fresh scan (same as
-            # the album local-cover path), so drop the secondary; the API already
-            # picked the right image and the user can still add one manually.
-            # (validate_keys still can't override a poster Plex persisted on a PRIOR
-            # scan, so already-scanned authors need a fresh re-scan or a manual pick.)
-            helper.metadata.posters.validate_keys([helper.thumb])
+            # Offer BOTH author images -- the API's `image` (Hardcover portrait) AND
+            # the Audible `imageAlt` -- and validate_keys([thumb, secondary]), which
+            # in practice SELECTS the secondary (Audible).
+            #
+            # DO NOT drop the secondary to "force the Hardcover portrait" (tried in
+            # 1.3.49, reverted here): the Audible imageAlt is the BETTER author photo
+            # for MOST authors (Brian Jacques, Octavia Butler, Margaret Atwood, Leigh
+            # Bardugo, Piers Anthony ...), and dropping it removed those images as an
+            # option entirely. Hardcover is only better for a FEW (Craig Alanson,
+            # whose Audible image is his book cover; Robert Jordan, square vs rect) --
+            # those are hand-picked. Keeping both offered means no image is ever lost.
+            valid_posters = [helper.thumb]
+            if (
+                helper.thumb_secondary
+                and helper.thumb_secondary != helper.thumb
+            ):
+                if (
+                    helper.thumb_secondary not in helper.metadata.posters
+                    or helper.force
+                ):
+                    secondary_data = make_request(helper.thumb_secondary)
+                    if secondary_data is not None:
+                        helper.metadata.posters[helper.thumb_secondary] = \
+                            Proxy.Media(secondary_data, sort_order=1)
+                valid_posters.append(helper.thumb_secondary)
+            helper.metadata.posters.validate_keys(valid_posters)
 
         helper.log_update_metadata()
 
