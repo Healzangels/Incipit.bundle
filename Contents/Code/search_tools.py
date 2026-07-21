@@ -156,8 +156,18 @@ class SearchTool:
         """
             Checks filename (for books) and/or search query for ASIN to quick match.
         """
-        # Check filename for ASIN if content type is books
-        if self.media.filename and self.content_type == 'books':
+        # Check filename for ASIN if content type is books.
+        # NOT on a TYPED Fix Match search: this quick match runs BEFORE
+        # build_search_args, so an ungated filename ASIN re-pinned exactly the
+        # identity the user is correcting and the typed query never executed --
+        # the one context leak the is_typed_search gates missed. The TYPED-text
+        # ASIN branch below stays: typing an ASIN into Search Options is the
+        # most explicit identity a user can give.
+        if (
+            self.media.filename
+            and self.content_type == 'books'
+            and not self.is_typed_search()
+        ):
             # Pre-assign: if the decode below raises (non-UTF-8 filename), the
             # except logs and execution continues to the `if` — an unassigned
             # local there was a NameError that killed the whole search.
@@ -770,6 +780,12 @@ class AlbumSearchTool(SearchTool):
             track_title = strip_part_index(track_title)
         log.debug('incipit track title resolved: %s' % str(track_title))
         if track_title and track_title != self.normalizedName:
+            # Same utf8 guard as raw_title/author in build_search_args: track
+            # titles come from the framework as unicode, and Py2 urllib.quote
+            # raises on codepoints > 127 -- a single non-ASCII track title
+            # ("Teil 1 - Die Zwerge" with an en-dash) crashed the WHOLE search.
+            if not isinstance(track_title, str):
+                track_title = track_title.encode('utf8')
             extra += '&trackTitle=' + urllib.quote(track_title)
 
         return extra
