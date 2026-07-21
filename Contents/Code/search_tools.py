@@ -425,10 +425,18 @@ class AlbumSearchTool(SearchTool):
             # Mercenaries 1"), which defeats the API's suffix stripping and
             # mis-ranks a book-level record with the same messy title ABOVE the
             # real audio edition. StripDiacritics keeps punctuation quote-safe.
-            raw_title = self.resolve_search_title() or self.normalizedName
-            query = 'title=' + urllib.quote(String.StripDiacritics(raw_title))
+            raw_title = String.StripDiacritics(self.resolve_search_title() or self.normalizedName)
+            # Sidecar values arrive as unicode (json); Py2 urllib.quote raises on a
+            # unicode with codepoints > 127, so encode to utf8 bytes first (a byte
+            # str -- the tag path -- is left as-is). A native-script metadata.json
+            # title/author would otherwise crash the whole search.
+            if not isinstance(raw_title, str):
+                raw_title = raw_title.encode('utf8')
+            query = 'title=' + urllib.quote(raw_title)
             author = self.resolve_author()
             if author:
+                if not isinstance(author, str):
+                    author = author.encode('utf8')
                 query += '&author=' + urllib.quote(author)
             # Extra signals the API can use: duration (the veto), a filename
             # ASIN, and the first track title (a fallback when the ALBUM tag is

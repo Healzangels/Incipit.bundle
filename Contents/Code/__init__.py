@@ -132,13 +132,13 @@ def backup_selected_poster(helper):
     # The currently-selected poster, via the Plex API (guid -> thumb -> bytes).
     try:
         url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
-        text = str(HTTP.Request(url, timeout=8).content)
+        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
         m = re.search(r'thumb="([^"]*)"', text)
         if not m:
             log.warn('incipit poster-backup: no thumb in API response (first 200: %s)', text[:200]); return
         thumb = m.group(1)
         turl = thumb if thumb.startswith('http') else PMS + thumb
-        selected = HTTP.Request(turl, timeout=8).content
+        selected = HTTP.Request(turl, timeout=8, cacheTime=0).content
     except Exception as e:
         log.error('incipit poster-backup: could not read selected poster (%s)', e)
         return
@@ -197,7 +197,7 @@ def select_local_cover(helper):
     # Resolve this item's ratingKey from its guid (trusted local API).
     try:
         url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
-        text = str(HTTP.Request(url, timeout=8).content)
+        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
         m = re.search(r'ratingKey="([0-9]+)"', text)
         if not m:
             log.warn('incipit local-select: no ratingKey for this item yet (fresh scan?)'); return
@@ -216,7 +216,7 @@ def select_local_cover(helper):
         have = False
         try:
             purl = PMS + '/library/metadata/' + rk + '/posters'
-            data = json.loads(HTTP.Request(purl, headers={'Accept': 'application/json'}, timeout=8).content)
+            data = json.loads(HTTP.Request(purl, headers={'Accept': 'application/json'}, timeout=8, cacheTime=0).content)
             for p in (data.get('MediaContainer', {}).get('Metadata', []) or []):
                 pk = p.get('ratingKey', '') or ''
                 if p.get('selected'):
