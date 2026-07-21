@@ -363,8 +363,17 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
         log.info('%s: already the selected poster, skip', tag)
         mark_done(tag, guid, memo_token)
         return True
-    have_plain = any(sha in k for k in keys)
-    have_padded = any(sha_padded in k for k in keys)
+    # Explicit loop, not any(): the sandbox does not provide any()/all()/sum()
+    # (proven live -- `NameError: global name 'any' is not defined` aborted the
+    # whole artist update). set() IS available; the blocklist is irregular, so
+    # find in-repo precedent before using any builtin here.
+    have_plain = False
+    have_padded = False
+    for k in keys:
+        if sha in k:
+            have_plain = True
+        if sha_padded in k:
+            have_padded = True
     if have_plain and have_padded:
         # Both variants exist and neither is selected: the one-extra-level pad
         # budget is spent. Stable state -- mark it so the pass collapses.
