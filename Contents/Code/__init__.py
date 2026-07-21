@@ -23,12 +23,23 @@ log = Logging()
 def author_pref_key(value):
     """
         Normalize an author name for `authors_prefer_hardcover` matching:
-        case-, whitespace- and punctuation-insensitive, so "J. R. R. Tolkien",
-        "J.R.R. Tolkien" and "j r r  tolkien" all resolve to the same key.
+        case-, whitespace-, punctuation- AND diacritic-insensitive, so
+        "J. R. R. Tolkien"/"j r r tolkien" and "José Saramago"/"Jose Saramago"
+        each resolve to one key. The old [^a-z0-9] strip DELETED accented
+        letters ('José' -> 'jos' vs 'Jose' -> 'jose' -- keys never matched, the
+        pin silently never fired for any non-ASCII author) and collapsed fully
+        non-Latin names to ''. StripDiacritics folds instead of deleting, and
+        the \\W strip keeps unicode word characters (CJK/Cyrillic names work).
     """
     if not value:
         return ''
-    return re.sub(r'[^a-z0-9]+', '', value.lower())
+    try:
+        folded = String.StripDiacritics(value)
+        if folded:
+            value = folded
+    except Exception:
+        pass
+    return re.sub(r'[\W_]+', '', value.lower(), flags=re.UNICODE)
 
 
 def apply_http_cache_time():
@@ -171,23 +182,16 @@ def backup_selected_poster(helper):
     except Exception as e:
         log.error('incipit poster-backup: path resolve failed (%s)', e)
         return
-    # Read the on-disk cover FIRST: with prefer_local_cover on, an existing
-    # cover.jpg is the AUTHORITATIVE art (that is what the pref means), and this
-    # backup used to run before the prefer_local read and OVERWRITE a freshly
-    # user-dropped cover.jpg with the OLD selected poster -- destroying the new
-    # file before it was ever served. So under prefer_local, backup only ever
-    # CREATES a missing cover.jpg, never replaces one. (Reading first also skips
-    # the poster download entirely on that path.)
+    # Read the on-disk cover first for the unchanged-skip below. Overwriting an
+    # existing cover.jpg is safe again: this runs AFTER select_local_cover in
+    # compile_metadata, so by now either the dropped cover IS the selection
+    # (bytes identical -> skip) or a user's custom pick survived the
+    # ownership-guarded select and deserves capturing. The 1.3.57 never-replace
+    # rule fixed the clobber but silently stopped persisting hand-picks.
     try:
         existing = Core.storage.load(cover_path)
     except Exception:
         existing = None
-    if existing and Prefs['prefer_local_cover']:
-        log.info(
-            'incipit poster-backup: cover.jpg exists and prefer_local_cover is '
-            'authoritative -- not overwriting'
-        )
-        return
     # The currently-selected poster, via the Plex API (guid -> thumb -> bytes).
     try:
         url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
@@ -220,131 +224,227 @@ def backup_selected_poster(helper):
         log.error('incipit poster-backup: save FAILED %s (%s)', cover_path, e)
 
 
-def upload_and_select_poster(guid, image_bytes, tag, only_if_selected_sha=None):
-    """
-        Make `image_bytes` the SELECTED Plex poster for the item with `guid`, via
-        the trusted local Plex API (Elevated policy -> the plugin's request to
-        127.0.0.1:32400 needs no token).
+PMS = 'http://127.0.0.1:32400'
 
-        WHY this exists: the posters CONTAINER (Proxy.Media + sort_order=0 +
-        validate_keys) only wins on a FRESH scan -- it cannot move Plex's
-        PERSISTED selection, so anything changed on an already-scanned item never
-        took effect on Refresh Metadata. An upload/select through the API DOES
-        override the persisted pick, and it writes into Plex's OWN metadata store
-        (NOT the media folder), so the SMB vfs_fruit veto that blocked writing
-        cover.jpg back does not apply here.
+# Deterministic suffix for the padded re-upload trick (see
+# upload_and_select_poster). Decoders ignore trailing bytes after a JPEG EOI /
+# PNG IEND, so original + suffix renders identically but is NEW content to
+# Plex's content-addressed store -- and POSTing NEW content both uploads and
+# selects, the agent's only re-select lever (its PUT is downgraded to GET).
+# DETERMINISTIC on purpose: sha(padded) is then predictable, so later passes
+# recognize the padded upload as ours/selected instead of padding again and
+# accumulating a new upload per refresh. One pad level = exactly one extra
+# re-select per image; a further flip hits the old boundary and logs.
+RESELECT_PAD = '\nincipit-reselect-v1'
 
-        Live findings that shape the logic: POST /posters selects only NEW
-        content -- re-posting an upload Plex already holds is a no-op for
-        selection. GET /poster?url= is also a no-op. Only PUT /poster?url= moves
-        an existing selection, and the framework downgrades the agent's PUT to a
-        GET. So: POST new content (which selects it), and report the one case the
-        agent genuinely cannot handle.
 
-        `tag` prefixes every log line so each caller is identifiable. Returns True
-        when the image ends up selected. Every failure is caught, so a fresh-scan
-        item with no ratingKey yet, or a sealed sandbox, just falls back to the
-        container behavior.
-    """
-    PMS = 'http://127.0.0.1:32400'
-    if not image_bytes:
-        return False
+def padded_variants(image_bytes):
+    """(sha_original, sha_padded, padded_bytes) for ownership/skip checks."""
+    sha = hashlib.sha1(image_bytes).hexdigest()
+    padded = image_bytes + RESELECT_PAD
+    return sha, hashlib.sha1(padded).hexdigest(), padded
+
+
+def fetch_url_bytes(url):
+    """Bytes of `url` via make_request (lazy HTTPRequest -> .content), or None."""
+    if not url:
+        return None
     try:
-        sha = hashlib.sha1(image_bytes).hexdigest()
+        response = make_request(url)
+        return response.content if response else None
     except Exception as e:
-        log.error('%s: sha1 failed (%s)', tag, e)
-        return False
-    # Per-track collapse (see recent_work_memo): identical bytes for this item were
-    # already handled seconds ago -- this is track N of the same refresh pass.
-    if not should_run(tag, guid, sha, 90):
-        return True
-    # Resolve this item's ratingKey from its guid (trusted local API).
+        log.error('incipit fetch_url_bytes failed for %s (%s)', url, e)
+        return None
+
+
+def read_poster_state(guid, tag):
+    """
+        (ratingKey, selected_key, all_poster_keys) for the item with `guid`, via
+        the trusted local Plex API -- the CHEAP pre-flight every selection path
+        runs BEFORE any image download, so foreign selections cost two localhost
+        round-trips instead of CDN fetches. None on any failure (fresh-scan item
+        with no ratingKey yet, sealed sandbox), which callers treat as transient.
+    """
     try:
         url = PMS + '/library/all?guid=' + urllib.quote(guid)
         text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
         m = re.search(r'ratingKey="([0-9]+)"', text)
         if not m:
-            log.warn('%s: no ratingKey for this item yet (fresh scan?)', tag)
-            return False
+            log.info('%s: no ratingKey for this item yet (fresh scan?)', tag)
+            return None
         rk = m.group(1)
-    except Exception as e:
-        log.error('%s: ratingKey resolve failed (%s)', tag, e)
-        return False
-    # Read the poster set: what's selected, and do we already hold this content?
-    # (an upload:// ratingKey embeds the sha1 of the bytes.)
-    selected_key = None
-    have_upload = False
-    try:
         purl = PMS + '/library/metadata/' + rk + '/posters'
         data = json.loads(HTTP.Request(
             purl, headers={'Accept': 'application/json'}, timeout=8, cacheTime=0
         ).content)
+        selected_key = None
+        keys = []
         for p in (data.get('MediaContainer', {}).get('Metadata', []) or []):
             pk = p.get('ratingKey', '') or ''
+            keys.append(pk)
             if p.get('selected'):
                 selected_key = pk
-            if sha in pk:
-                have_upload = True
+        return (rk, selected_key, keys)
     except Exception as e:
-        log.error('%s: posters list failed (%s)', tag, e)
-        return False
-    # Guard for the revert path: only touch a selection THIS agent placed. If the
-    # selected poster isn't the one named by only_if_selected_sha, a human picked
-    # it (or Plex did) -- leave it alone, so manual choices survive refreshes.
-    if only_if_selected_sha:
-        if not (selected_key and only_if_selected_sha in selected_key):
-            log.info('%s: current selection is not ours to change, leaving it', tag)
-            return False
-    if selected_key and sha in selected_key:
-        log.info('%s: already the selected poster, skip', tag)
-        mark_done(tag, guid, sha)
+        log.error('%s: poster state read failed (%s)', tag, e)
+        return None
+
+
+def selection_is_agent_owned(selected_key, owned_shas):
+    """
+        Whether the CURRENT selection is the agent's to change.
+
+        THE ownership rule (replaces the old byte-sha-only guard, which was
+        blind to container selections -- proven live: a fresh-scan pin's
+        metadata:// key hash is NOT the image's byte sha, so unpin never
+        recognized it):
+        - no selection yet                          -> ours (nothing to preserve)
+        - metadata://...com.plexapp.agents.incipit -> ours (agent-supplied
+          poster, whether the container defaulted to it or a user clicked it --
+          the two are indistinguishable, so the pref owns the choice BETWEEN
+          agent images)
+        - upload:// containing one of owned_shas    -> ours (we uploaded it)
+        - anything else (a user's custom upload, another agent's poster)
+                                                    -> theirs, never touched
+    """
+    if not selected_key:
         return True
-    if have_upload:
-        log.warn(
-            '%s: image is uploaded but de-selected on rk %s; the agent cannot '
-            're-select an existing poster (its PUT is downgraded) -- pick it in '
-            'the UI, or use select_cover_poster.py', tag, rk
-        )
+    if 'com.plexapp.agents.incipit' in selected_key:
+        return True
+    for sha in (owned_shas or []):
+        if sha and sha in selected_key:
+            return True
+    return False
+
+
+def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
+    """
+        Make `image_bytes` the SELECTED Plex poster for the item with `guid`,
+        via the trusted local Plex API (Elevated policy -> no token needed).
+
+        WHY this exists: the posters CONTAINER (Proxy.Media + sort_order=0 +
+        validate_keys) only wins on a FRESH scan -- it cannot move Plex's
+        PERSISTED selection. An upload/select through the API DOES override the
+        persisted pick, and it writes into Plex's OWN metadata store (NOT the
+        media folder), so the SMB vfs_fruit veto does not apply.
+
+        Live findings that shape the logic: POST /posters selects only NEW
+        content; re-POSTing an existing upload is a no-op; the agent's PUT is
+        downgraded to GET. When our bytes already exist as a DE-selected
+        upload, re-POST with the deterministic RESELECT_PAD suffix -- new
+        content to the store, identical pixels -- which re-selects. (The pad
+        trick is the one unverified-by-live-test lever here; its WARN line
+        makes the first real occurrence auditable.)
+
+        `token` keys the per-track memo (callers pass a cheap identity like the
+        image URL or the cover sha); `state` is an optional precomputed
+        read_poster_state result so pre-flighted callers don't re-fetch it.
+        Returns True when the image ends up selected. OWNERSHIP is the
+        caller's job (selection_is_agent_owned) -- this function converges.
+    """
+    if not image_bytes:
         return False
-    # New content: POST creates the upload AND selects it (verified live).
+    try:
+        sha, sha_padded, padded_bytes = padded_variants(image_bytes)
+    except Exception as e:
+        log.error('%s: sha1 failed (%s)', tag, e)
+        return False
+    memo_token = token or sha
+    # Per-track collapse (see recent_work_memo): this exact convergence already
+    # completed seconds ago -- we are on track N of the same refresh pass.
+    if not should_run(tag, guid, memo_token, 90):
+        return True
+    if state is None:
+        state = read_poster_state(guid, tag)
+    if state is None:
+        return False
+    rk, selected_key, keys = state
+    if selected_key and (sha in selected_key or sha_padded in selected_key):
+        log.info('%s: already the selected poster, skip', tag)
+        mark_done(tag, guid, memo_token)
+        return True
+    have_plain = any(sha in k for k in keys)
+    have_padded = any(sha_padded in k for k in keys)
+    if have_plain and have_padded:
+        # Both variants exist and neither is selected: the one-extra-level pad
+        # budget is spent. Stable state -- mark it so the pass collapses.
+        log.warn(
+            '%s: image and its padded variant both exist de-selected on rk %s; '
+            'out of in-agent re-select levers -- pick it in the UI, or use '
+            'select_cover_poster.py', tag, rk
+        )
+        mark_done(tag, guid, memo_token)
+        return False
+    post_bytes = padded_bytes if have_plain else image_bytes
     content_type = 'image/png' if image_bytes[:4] == '\x89PNG' else 'image/jpeg'
     try:
         up = PMS + '/library/metadata/' + rk + '/posters'
-        HTTP.Request(up, data=image_bytes,
+        HTTP.Request(up, data=post_bytes,
                      headers={'Content-Type': content_type}, timeout=8)
-        log.warn('%s: uploaded + selected (rk %s, %s bytes, %s)',
-                 tag, rk, len(image_bytes), content_type)
-        mark_done(tag, guid, sha)
+        log.warn('%s: uploaded + selected (rk %s, %s bytes, %s%s)',
+                 tag, rk, len(post_bytes), content_type,
+                 ', PADDED re-select' if have_plain else '')
+        mark_done(tag, guid, memo_token)
         return True
     except Exception as e:
         log.error('%s: upload failed (%s)', tag, e)
         return False
 
 
+def converge_author_art(helper, target_url, other_url, tag):
+    """
+        Make the image at `target_url` the selected poster for this author,
+        respecting ownership -- the shared engine behind pin (target=Hardcover)
+        and unpin (target=Audible), so the two directions cannot drift.
+
+        Order matters for cost: the cheap localhost poster-state read runs
+        FIRST, and a foreign (user-upload) selection bails before ANY image
+        download -- the old unpin fetched two CDN images per author per track
+        just to conclude "not ours". Image bytes are fetched only when the
+        selection is agent-owned; `other_url` is fetched only when judging an
+        upload:// selection, where its sha is needed to recognize our own
+        earlier upload of the other direction.
+    """
+    if not target_url:
+        return
+    guid = helper.metadata.guid
+    if not should_run(tag, guid, target_url, 600):
+        return
+    state = read_poster_state(guid, tag)
+    if state is None:
+        return
+    rk, selected_key, keys = state
+    owned_shas = []
+    target_bytes = None
+    if selected_key and selected_key.startswith('upload'):
+        # Only an upload:// selection needs byte shas to judge ownership.
+        target_bytes = fetch_url_bytes(target_url)
+        for image_bytes in (target_bytes, fetch_url_bytes(other_url)):
+            if image_bytes:
+                s, sp, _ = padded_variants(image_bytes)
+                owned_shas.extend([s, sp])
+    if not selection_is_agent_owned(selected_key, owned_shas):
+        log.info('%s: selection is a user upload -- leaving it', tag)
+        mark_done(tag, guid, target_url)
+        return
+    if target_bytes is None:
+        target_bytes = fetch_url_bytes(target_url)
+    if not target_bytes:
+        return
+    upload_and_select_poster(guid, target_bytes, tag, token=target_url,
+                             state=state)
+
+
 def select_hardcover_author_art(helper):
     """
-        Make the Hardcover portrait the SELECTED poster for an author pinned via
-        the `authors_prefer_hardcover` pref.
-
-        The posters container only wins on a FRESH scan, so adding a name to that
-        pref did nothing for an author Plex had already scanned -- the picture
-        stayed on whatever won at first match, which is exactly the complaint
-        this closes. Routing through the same upload/select path as the local
-        cover makes "add the name, hit Refresh Metadata" actually move it.
+        Pin direction: make the Hardcover portrait (`thumb`) the selection for
+        an author on the `authors_prefer_hardcover` pref. The container only
+        wins on a FRESH scan, so without this the pref did nothing for an
+        already-scanned author on Refresh.
     """
-    if not helper.thumb:
-        return
-    # make_request returns the LAZY HTTPRequest (or None), not bytes -- reading
-    # .content is what actually fetches. Proxy.Media accepts the object, so the
-    # posters-container path never had to unwrap it; sha1/POST here do.
-    try:
-        response = make_request(helper.thumb)
-        art = response.content if response else None
-    except Exception as e:
-        log.error('incipit author-art-select: fetch failed (%s)', e)
-        return
-    upload_and_select_poster(
-        helper.metadata.guid, art, 'incipit author-art-select'
+    converge_author_art(
+        helper, helper.thumb, helper.thumb_secondary,
+        'incipit author-art-select'
     )
 
 
@@ -370,69 +470,55 @@ def offer_secondary_author_poster(helper, valid_posters):
 
 def unpin_hardcover_author_art(helper):
     """
-        Undo a previous `authors_prefer_hardcover` pin.
+        Unpin direction: the author is NOT on the pref (any more), so make the
+        Audible photo (`thumb_secondary`) the selection again -- but only when
+        the current selection is agent-owned, so a user's custom upload
+        survives every refresh. Ownership is key-based (agent metadata:// keys
+        count), which makes FRESH-SCAN pins revertable too -- the old
+        byte-sha-only guard was blind to them, proven live.
 
-        Removing a name from the pref used to do nothing: the Hardcover portrait
-        this agent uploaded stays SELECTED (an upload outranks the container's
-        agent posters, and re-POSTing cannot de-select). So on a forced Refresh
-        of an author that is NOT pinned, upload+select the Audible photo, which
-        restores the default. The Audible image has only ever been an agent
-        poster, never an upload, so POSTing its bytes is new content -- which
-        POST both creates AND selects.
-
-        Deliberately narrow: it acts ONLY when the currently selected poster is
-        an upload whose sha1 matches the Hardcover bytes, i.e. one we placed. A
-        poster the USER chose by hand has a different sha and is left untouched,
-        so manual picks still survive every refresh.
-
-        Known boundary: pin -> unpin -> pin -> unpin. By the second revert BOTH
-        images exist as uploads, and re-POSTing existing content is a no-op, so
-        it logs that it cannot re-select and stops. One toggle each way works.
+        Needs only the TARGET image: an author whose record lost its Hardcover
+        image can still be reverted to the Audible one.
     """
-    if not helper.thumb or not helper.thumb_secondary:
+    if not helper.thumb_secondary or helper.thumb_secondary == helper.thumb:
         return
-    if helper.thumb_secondary == helper.thumb:
-        return
-    try:
-        pinned = make_request(helper.thumb)
-        pinned_bytes = pinned.content if pinned else None
-        if not pinned_bytes:
-            return
-        sha_pinned = hashlib.sha1(pinned_bytes).hexdigest()
-        alt = make_request(helper.thumb_secondary)
-        alt_bytes = alt.content if alt else None
-    except Exception as e:
-        log.error('incipit author-art-unpin: fetch failed (%s)', e)
-        return
-    upload_and_select_poster(
-        helper.metadata.guid, alt_bytes, 'incipit author-art-unpin',
-        only_if_selected_sha=sha_pinned
+    converge_author_art(
+        helper, helper.thumb_secondary, helper.thumb,
+        'incipit author-art-unpin'
     )
 
 
 def select_local_cover(helper):
     """
-        Force the book folder's cover.jpg to become the SELECTED Plex poster, via
-        the trusted local Plex API (Elevated policy -> the plugin's request to
-        127.0.0.1:32400 needs no token).
-
-        WHY this over the posters-container path in update(): Proxy.Media +
-        sort_order=0 + validate_keys only wins on a FRESH scan -- it cannot move
-        Plex's PERSISTED selection, so a cover.jpg dropped/replaced on an
-        already-scanned book never took effect on Refresh Metadata. An
-        upload/select through the API DOES override the persisted pick, and it
-        writes into Plex's OWN metadata store (NOT the media folder), so the SMB
-        vfs_fruit veto that blocked writing cover.jpg back does not apply here.
-
-        In-agent port of select_cover_poster.py: skip if the cover is already the
-        selected poster (its key is upload://posters/<sha1 of the bytes>); PUT to
-        re-select it if it was uploaded before; else POST-upload it (which selects
-        it). Every failure is caught, so a fresh-scan item with no ratingKey yet,
-        or a sealed sandbox, simply falls back to the container behavior.
+        Force the book folder's cover.jpg to become the SELECTED Plex poster on
+        a Refresh of an ALREADY-scanned book (the container path only wins on a
+        fresh scan). Ownership-guarded: an agent-supplied selection (or our own
+        earlier upload) is overridden -- that is what prefer_local_cover means
+        -- but a USER'S custom upload is left alone, so hand-picks survive and
+        backup_selected_poster (which now runs AFTER this) can capture them to
+        cover.jpg instead of this path clobbering them.
     """
-    upload_and_select_poster(
-        helper.metadata.guid, local_cover_bytes(helper), 'incipit local-select'
-    )
+    cover_bytes = local_cover_bytes(helper)
+    if not cover_bytes:
+        return
+    tag = 'incipit local-select'
+    guid = helper.metadata.guid
+    try:
+        sha, sha_padded, _ = padded_variants(cover_bytes)
+    except Exception as e:
+        log.error('%s: sha1 failed (%s)', tag, e)
+        return
+    if not should_run(tag, guid, sha, 90):
+        return
+    state = read_poster_state(guid, tag)
+    if state is None:
+        return
+    rk, selected_key, keys = state
+    if not selection_is_agent_owned(selected_key, [sha, sha_padded]):
+        log.info('%s: selection is a user upload -- leaving it', tag)
+        mark_done(tag, guid, sha)
+        return
+    upload_and_select_poster(guid, cover_bytes, tag, token=sha, state=state)
 
 
 class AudiobookArtist(Agent.Artist):
@@ -723,6 +809,16 @@ class AudiobookArtist(Agent.Artist):
         helper.set_metadata_sort_title()
         # Thumb.
         # Kept here because of Proxy
+        # first_offer BEFORE any add: True only on the genuine FIRST match of
+        # this author (the metadata posters container persists across scans, so
+        # later incremental passes see the thumb already present). The pinned
+        # prune below is restricted to this case -- gating it on `not force`
+        # alone made every incremental scan re-prune the Audible option that
+        # the previous forced refresh had restored (options oscillated).
+        first_offer = bool(
+            helper.thumb and helper.thumb not in helper.metadata.posters
+        )
+        thumb_added = False
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
                 thumb_data = make_request(helper.thumb)
@@ -730,75 +826,81 @@ class AudiobookArtist(Agent.Artist):
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=0
                     )
-            # Author-image selection. Two authors want the Hardcover portrait, MOST
-            # want the Audible photo, and there is no reliable signal to tell them
-            # apart automatically (both providers return real photos; which looks
-            # better is a judgement call). So:
-            #
-            #  - DEFAULT: offer BOTH images -- the API's `image` (Hardcover portrait,
-            #    = helper.thumb) AND the Audible `imageAlt` (= helper.thumb_secondary)
-            #    -- and validate_keys([thumb, secondary]), which in practice SELECTS
-            #    the secondary (Audible). This is the better photo for most authors
-            #    (Brian Jacques, Octavia Butler, Margaret Atwood, Leigh Bardugo,
-            #    Piers Anthony ...). DO NOT drop the secondary to force Hardcover
-            #    (tried in 1.3.49): it removed those better images entirely.
-            #
-            #  - OVERRIDE: authors named in the `authors_prefer_hardcover` pref get
-            #    ONLY the Hardcover portrait, validate_keys([thumb]) -- a single-key
-            #    prune reliably SELECTS on a fresh scan. Scoped to the list so the
-            #    Audible-preferred majority is untouched. For Craig Alanson (Audible
-            #    returns his book cover) and Robert Jordan (Audible photo is an odd
-            #    rectangle vs the square Hardcover one).
-            #
-            # Either way, already-scanned authors keep Plex's persisted selection
-            # until a FRESH re-scan or a manual UI pick -- validate_keys can't move it.
-            # Match the pref against BOTH the API's author name AND the artist
-            # title Plex displays: the user types what they SEE (the title), and
-            # that is not always byte-identical to the API's `name`. Keys are
-            # punctuation/space/case-insensitive (see author_pref_key).
-            pref_raw = Prefs['authors_prefer_hardcover'] or ''
-            hardcover_keys = set(
-                author_pref_key(part) for part in pref_raw.split(',')
-            )
-            hardcover_keys.discard('')
-            author_keys = set(
-                author_pref_key(value)
-                for value in (helper.name, helper.metadata.title)
-            )
-            author_keys.discard('')
-            prefer_hardcover = bool(author_keys & hardcover_keys)
-            # Logged so a non-firing override can be diagnosed from the plugin
-            # log instead of guessed at (set logging_level=DEBUG/INFO to see it).
-            log.info(
-                'author-art: name=%s title=%s pref=%s -> %s',
-                helper.name, helper.metadata.title, pref_raw,
-                'HARDCOVER' if prefer_hardcover else 'audible-default'
-            )
+                    thumb_added = True
+            else:
+                thumb_added = True
+        # Author-image selection. Two authors want the Hardcover portrait, MOST
+        # want the Audible photo, and there is no reliable signal to tell them
+        # apart automatically (both providers return real photos; which looks
+        # better is a judgement call). So:
+        #
+        #  - DEFAULT: offer BOTH images -- the API's `image` (Hardcover portrait,
+        #    = helper.thumb) AND the Audible `imageAlt` (= helper.thumb_secondary)
+        #    -- and validate_keys([thumb, secondary]), which in practice SELECTS
+        #    the secondary (Audible). This is the better photo for most authors
+        #    (Brian Jacques, Octavia Butler, Margaret Atwood, Leigh Bardugo,
+        #    Piers Anthony ...). DO NOT drop the secondary to force Hardcover
+        #    (tried in 1.3.49): it removed those better images entirely.
+        #
+        #  - OVERRIDE: authors named in the `authors_prefer_hardcover` pref get
+        #    ONLY the Hardcover portrait at FIRST match (validate_keys([thumb]) --
+        #    a single-key prune reliably SELECTS on a fresh scan); afterwards the
+        #    upload/select API owns the selection and both images stay offered.
+        #
+        # Match the pref against BOTH the API's author name AND the artist
+        # title Plex displays: the user types what they SEE (the title), and
+        # that is not always byte-identical to the API's `name`. Keys are
+        # punctuation/space/case-insensitive (see author_pref_key).
+        pref_raw = Prefs['authors_prefer_hardcover'] or ''
+        hardcover_keys = set(
+            author_pref_key(part) for part in pref_raw.split(',')
+        )
+        hardcover_keys.discard('')
+        author_keys = set(
+            author_pref_key(value)
+            for value in (helper.name, helper.metadata.title)
+        )
+        author_keys.discard('')
+        prefer_hardcover = bool(author_keys & hardcover_keys)
+        # Logged so a non-firing override can be diagnosed from the plugin
+        # log instead of guessed at (set logging_level=DEBUG/INFO to see it).
+        log.info(
+            'author-art: name=%s title=%s pref=%s -> %s',
+            helper.name, helper.metadata.title, pref_raw,
+            'HARDCOVER' if prefer_hardcover else 'audible-default'
+        )
+        if helper.thumb:
             valid_posters = [helper.thumb]
-            if prefer_hardcover and not helper.force:
-                # FIRST match of a pinned author: the container is the ONLY thing
-                # that can set the selection here (the upload/select API has no
+            if prefer_hardcover and first_offer and thumb_added:
+                # FIRST match of a pinned author: the container is the ONLY
+                # thing that can set the selection (the upload/select API has no
                 # ratingKey to act on yet), and a two-key validate_keys selects
-                # the SECONDARY -- so prune to the Hardcover portrait alone. This
-                # is the one case where the Audible option is withheld; it comes
-                # back on the first Refresh, below.
+                # the SECONDARY -- so prune to the Hardcover portrait alone,
+                # ONLY when the portrait actually made it into the container (a
+                # failed CDN fetch must fall through to offering the Audible
+                # photo, not prune to an empty set and leave NO poster at all).
+                # The Audible option returns on the next pass.
                 pass
             else:
                 valid_posters = offer_secondary_author_poster(
                     helper, valid_posters
                 )
             helper.metadata.posters.validate_keys(valid_posters)
-            # On a REFRESH the container can't move Plex's persisted selection, so
-            # the upload/select API owns it -- which is also why the Audible photo
-            # can stay on offer above without stealing the pick.
-            if helper.force:
-                if prefer_hardcover:
-                    select_hardcover_author_art(helper)
-                else:
-                    # Not pinned. If it WAS pinned before, the portrait we
-                    # uploaded is still selected -- undo it. No-ops unless the
-                    # selection is one this agent placed.
-                    unpin_hardcover_author_art(helper)
+        # On a REFRESH the container can't move Plex's persisted selection, so
+        # the upload/select API owns it -- which is also why the Audible photo
+        # can stay on offer above without stealing the pick. OUTSIDE the
+        # `if helper.thumb:` gate: the unpin direction targets the AUDIBLE
+        # image and must still run when the record has no Hardcover image left,
+        # or an uploaded portrait became permanently stuck.
+        if helper.force:
+            if prefer_hardcover:
+                select_hardcover_author_art(helper)
+            else:
+                # Not pinned. If it WAS pinned before, the portrait we
+                # uploaded (or the container selected on a fresh scan) is
+                # still selected -- undo it. No-ops unless the selection is
+                # agent-owned, so a user's custom upload survives.
+                unpin_hardcover_author_art(helper)
 
         helper.log_update_metadata()
 
@@ -1063,12 +1165,6 @@ class AudiobookAlbum(Agent.Album):
         helper.set_metadata_studio()
         # Summary.
         helper.set_metadata_summary()
-        # Back up the currently-selected poster to cover.jpg (opt-in). Runs BEFORE
-        # the poster block so a freshly-captured cover.jpg is what prefer_local
-        # then serves -- closing the loop in one pass. Force-only, so it fires on
-        # an explicit/scheduled Refresh Metadata, not on every incremental scan.
-        if Prefs['backup_poster_to_cover'] and helper.force:
-            backup_selected_poster(helper)
         # Thumb.
         # Kept here because of Proxy
         # When preferring local art, add our cover only as a fallback (higher
@@ -1142,6 +1238,16 @@ class AudiobookAlbum(Agent.Album):
         # SMB-safe (writes to Plex's metadata store, not the media folder).
         if Prefs['prefer_local_cover'] and helper.force:
             select_local_cover(helper)
+        # Back up the currently-selected poster to cover.jpg (opt-in). Runs
+        # AFTER the select: select_local_cover is ownership-guarded (a user's
+        # custom upload survives it), so what is selected HERE is the state
+        # worth persisting -- a new cover.jpg just got selected (backup sees
+        # identical bytes and skips), or a user hand-pick survived (backup
+        # captures it to cover.jpg, so it survives a library rebuild). The old
+        # backup-first order clobbered a freshly-dropped cover.jpg with the
+        # previous selection before prefer_local could ever serve it.
+        if Prefs['backup_poster_to_cover'] and helper.force:
+            backup_selected_poster(helper)
         # Rating.
         helper.set_metadata_rating()
 
