@@ -176,7 +176,7 @@ def backup_selected_poster(helper):
         log.error('incipit poster-backup: save FAILED %s (%s)', cover_path, e)
 
 
-def upload_and_select_poster(guid, image_bytes, tag):
+def upload_and_select_poster(guid, image_bytes, tag, only_if_selected_sha=None):
     """
         Make `image_bytes` the SELECTED Plex poster for the item with `guid`, via
         the trusted local Plex API (Elevated policy -> the plugin's request to
@@ -240,6 +240,13 @@ def upload_and_select_poster(guid, image_bytes, tag):
     except Exception as e:
         log.error('%s: posters list failed (%s)', tag, e)
         return False
+    # Guard for the revert path: only touch a selection THIS agent placed. If the
+    # selected poster isn't the one named by only_if_selected_sha, a human picked
+    # it (or Plex did) -- leave it alone, so manual choices survive refreshes.
+    if only_if_selected_sha:
+        if not (selected_key and only_if_selected_sha in selected_key):
+            log.info('%s: current selection is not ours to change, leaving it', tag)
+            return False
     if selected_key and sha in selected_key:
         log.info('%s: already the selected poster, skip', tag)
         return True
@@ -288,6 +295,48 @@ def select_hardcover_author_art(helper):
         return
     upload_and_select_poster(
         helper.metadata.guid, art, 'incipit author-art-select'
+    )
+
+
+def unpin_hardcover_author_art(helper):
+    """
+        Undo a previous `authors_prefer_hardcover` pin.
+
+        Removing a name from the pref used to do nothing: the Hardcover portrait
+        this agent uploaded stays SELECTED (an upload outranks the container's
+        agent posters, and re-POSTing cannot de-select). So on a forced Refresh
+        of an author that is NOT pinned, upload+select the Audible photo, which
+        restores the default. The Audible image has only ever been an agent
+        poster, never an upload, so POSTing its bytes is new content -- which
+        POST both creates AND selects.
+
+        Deliberately narrow: it acts ONLY when the currently selected poster is
+        an upload whose sha1 matches the Hardcover bytes, i.e. one we placed. A
+        poster the USER chose by hand has a different sha and is left untouched,
+        so manual picks still survive every refresh.
+
+        Known boundary: pin -> unpin -> pin -> unpin. By the second revert BOTH
+        images exist as uploads, and re-POSTing existing content is a no-op, so
+        it logs that it cannot re-select and stops. One toggle each way works.
+    """
+    if not helper.thumb or not helper.thumb_secondary:
+        return
+    if helper.thumb_secondary == helper.thumb:
+        return
+    try:
+        pinned = make_request(helper.thumb)
+        pinned_bytes = pinned.content if pinned else None
+        if not pinned_bytes:
+            return
+        sha_pinned = hashlib.sha1(pinned_bytes).hexdigest()
+        alt = make_request(helper.thumb_secondary)
+        alt_bytes = alt.content if alt else None
+    except Exception as e:
+        log.error('incipit author-art-unpin: fetch failed (%s)', e)
+        return
+    upload_and_select_poster(
+        helper.metadata.guid, alt_bytes, 'incipit author-art-unpin',
+        only_if_selected_sha=sha_pinned
     )
 
 
@@ -680,6 +729,11 @@ class AudiobookArtist(Agent.Artist):
                                 Proxy.Media(secondary_data, sort_order=1)
                     valid_posters.append(helper.thumb_secondary)
                 helper.metadata.posters.validate_keys(valid_posters)
+                # This author is NOT pinned. If it was pinned BEFORE, the portrait
+                # we uploaded is still selected and the container can't move it --
+                # so undo it here. No-ops unless the selection is one we placed.
+                if helper.force:
+                    unpin_hardcover_author_art(helper)
 
         helper.log_update_metadata()
 
