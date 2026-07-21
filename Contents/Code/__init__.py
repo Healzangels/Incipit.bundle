@@ -231,25 +231,25 @@ def select_local_cover(helper):
     if selected_key and sha in selected_key:
         log.info('incipit local-select: cover.jpg already selected, skip')
         return
-    key = 'upload://posters/' + sha
-    action = 'PUT re-select' if have_upload else 'POST upload'
-    try:
-        if have_upload:
-            sel_url = PMS + '/library/metadata/' + rk + '/poster?url=' + urllib.quote(key, safe='')
-            HTTP.Request(sel_url, method='PUT', timeout=8)
-        else:
-            up = PMS + '/library/metadata/' + rk + '/posters'
-            HTTP.Request(up, data=cover_bytes, headers={'Content-Type': 'image/jpeg'}, timeout=8)
-    except Exception as e:
-        log.error('incipit local-select: %s failed (%s)', action, e)
+    if have_upload:
+        # cover.jpg is already an upload poster on this item but is NOT selected.
+        # The agent can only GET/POST (the framework downgrades PUT/DELETE to
+        # no-ops -- verified live), and re-POSTing content Plex already has does
+        # NOT re-select it. So the agent genuinely cannot re-select a de-selected
+        # existing poster: the rare "revert to a byte-identical prior cover" case.
+        # select_cover_poster.py (which PUTs with a token) is the tool for it.
+        log.warn(
+            'incipit local-select: cover.jpg is uploaded but de-selected on rk %s; the '
+            'agent cannot re-select an existing poster -- use select_cover_poster.py', rk
+        )
         return
-    # Verify the selection actually moved -- a downgraded PUT or a POST dedup would
-    # otherwise pass silently. This log line tells us if the agent can really PUT.
-    now_selected, _ = poster_state()
-    if now_selected and sha in now_selected:
-        log.warn('incipit local-select: %s OK -> cover.jpg is now selected (rk %s)', action, rk)
-    else:
-        log.error('incipit local-select: %s did NOT move selection (rk %s; still %s)', action, rk, now_selected)
+    # New content: POST creates the upload AND selects it (verified live).
+    try:
+        up = PMS + '/library/metadata/' + rk + '/posters'
+        HTTP.Request(up, data=cover_bytes, headers={'Content-Type': 'image/jpeg'}, timeout=8)
+        log.warn('incipit local-select: uploaded + selected cover.jpg (rk %s, %s bytes)', rk, len(cover_bytes))
+    except Exception as e:
+        log.error('incipit local-select: upload failed (%s)', e)
 
 
 class AudiobookArtist(Agent.Artist):
