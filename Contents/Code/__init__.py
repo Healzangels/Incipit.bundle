@@ -298,6 +298,26 @@ def select_hardcover_author_art(helper):
     )
 
 
+def offer_secondary_author_poster(helper, valid_posters):
+    """
+        Add the Audible `imageAlt` to the artist's poster container as a
+        selectable option, and return the updated validate_keys list.
+
+        Kept as an OPTION even for pinned authors: not wanting it selected is not
+        the same as not wanting it available, and pruning it left those authors
+        with a single poster and no way to switch in the UI.
+    """
+    if not helper.thumb_secondary or helper.thumb_secondary == helper.thumb:
+        return valid_posters
+    if (helper.thumb_secondary not in helper.metadata.posters or helper.force):
+        secondary_data = make_request(helper.thumb_secondary)
+        if secondary_data is not None:
+            helper.metadata.posters[helper.thumb_secondary] = \
+                Proxy.Media(secondary_data, sort_order=1)
+    valid_posters.append(helper.thumb_secondary)
+    return valid_posters
+
+
 def unpin_hardcover_author_art(helper):
     """
         Undo a previous `authors_prefer_hardcover` pin.
@@ -704,35 +724,30 @@ class AudiobookArtist(Agent.Artist):
                 helper.name, helper.metadata.title, pref_raw,
                 'HARDCOVER' if prefer_hardcover else 'audible-default'
             )
-            if prefer_hardcover:
-                helper.metadata.posters.validate_keys([helper.thumb])
-                # validate_keys only wins at FIRST match, so on an author Plex has
-                # already scanned the pref would otherwise do nothing. On a forced
-                # Refresh, push the portrait through the upload/select API instead
-                # -- that DOES move a persisted selection. Same route as the local
-                # cover; no-ops harmlessly on a fresh scan (no ratingKey yet).
-                if helper.force:
-                    select_hardcover_author_art(helper)
+            valid_posters = [helper.thumb]
+            if prefer_hardcover and not helper.force:
+                # FIRST match of a pinned author: the container is the ONLY thing
+                # that can set the selection here (the upload/select API has no
+                # ratingKey to act on yet), and a two-key validate_keys selects
+                # the SECONDARY -- so prune to the Hardcover portrait alone. This
+                # is the one case where the Audible option is withheld; it comes
+                # back on the first Refresh, below.
+                pass
             else:
-                valid_posters = [helper.thumb]
-                if (
-                    helper.thumb_secondary
-                    and helper.thumb_secondary != helper.thumb
-                ):
-                    if (
-                        helper.thumb_secondary not in helper.metadata.posters
-                        or helper.force
-                    ):
-                        secondary_data = make_request(helper.thumb_secondary)
-                        if secondary_data is not None:
-                            helper.metadata.posters[helper.thumb_secondary] = \
-                                Proxy.Media(secondary_data, sort_order=1)
-                    valid_posters.append(helper.thumb_secondary)
-                helper.metadata.posters.validate_keys(valid_posters)
-                # This author is NOT pinned. If it was pinned BEFORE, the portrait
-                # we uploaded is still selected and the container can't move it --
-                # so undo it here. No-ops unless the selection is one we placed.
-                if helper.force:
+                valid_posters = offer_secondary_author_poster(
+                    helper, valid_posters
+                )
+            helper.metadata.posters.validate_keys(valid_posters)
+            # On a REFRESH the container can't move Plex's persisted selection, so
+            # the upload/select API owns it -- which is also why the Audible photo
+            # can stay on offer above without stealing the pick.
+            if helper.force:
+                if prefer_hardcover:
+                    select_hardcover_author_art(helper)
+                else:
+                    # Not pinned. If it WAS pinned before, the portrait we
+                    # uploaded is still selected -- undo it. No-ops unless the
+                    # selection is one this agent placed.
                     unpin_hardcover_author_art(helper)
 
         helper.log_update_metadata()
