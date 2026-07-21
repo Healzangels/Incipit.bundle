@@ -20,6 +20,17 @@ GOOD_SCORE = 98
 log = Logging()
 
 
+def author_pref_key(value):
+    """
+        Normalize an author name for `authors_prefer_hardcover` matching:
+        case-, whitespace- and punctuation-insensitive, so "J. R. R. Tolkien",
+        "J.R.R. Tolkien" and "j r r  tolkien" all resolve to the same key.
+    """
+    if not value:
+        return ''
+    return re.sub(r'[^a-z0-9]+', '', value.lower())
+
+
 def apply_http_cache_time():
     # API responses are cached for a week by default to spare incipit-api. That
     # also means an API improvement stays invisible to already-scanned items for
@@ -569,13 +580,29 @@ class AudiobookArtist(Agent.Artist):
             #
             # Either way, already-scanned authors keep Plex's persisted selection
             # until a FRESH re-scan or a manual UI pick -- validate_keys can't move it.
-            author_name = (helper.name or '').strip().lower()
-            hardcover_names = set(
-                part.strip().lower()
-                for part in (Prefs['authors_prefer_hardcover'] or '').split(',')
-                if part.strip()
+            # Match the pref against BOTH the API's author name AND the artist
+            # title Plex displays: the user types what they SEE (the title), and
+            # that is not always byte-identical to the API's `name`. Keys are
+            # punctuation/space/case-insensitive (see author_pref_key).
+            pref_raw = Prefs['authors_prefer_hardcover'] or ''
+            hardcover_keys = set(
+                author_pref_key(part) for part in pref_raw.split(',')
             )
-            if author_name and author_name in hardcover_names:
+            hardcover_keys.discard('')
+            author_keys = set(
+                author_pref_key(value)
+                for value in (helper.name, helper.metadata.title)
+            )
+            author_keys.discard('')
+            prefer_hardcover = bool(author_keys & hardcover_keys)
+            # Logged so a non-firing override can be diagnosed from the plugin
+            # log instead of guessed at (set logging_level=DEBUG/INFO to see it).
+            log.info(
+                'author-art: name=%s title=%s pref=%s -> %s',
+                helper.name, helper.metadata.title, pref_raw,
+                'HARDCOVER' if prefer_hardcover else 'audible-default'
+            )
+            if prefer_hardcover:
                 helper.metadata.posters.validate_keys([helper.thumb])
             else:
                 valid_posters = [helper.thumb]
