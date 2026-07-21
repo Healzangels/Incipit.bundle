@@ -547,32 +547,52 @@ class AudiobookArtist(Agent.Artist):
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=0
                     )
-            # Offer BOTH author images -- the API's `image` (Hardcover portrait) AND
-            # the Audible `imageAlt` -- and validate_keys([thumb, secondary]), which
-            # in practice SELECTS the secondary (Audible).
+            # Author-image selection. Two authors want the Hardcover portrait, MOST
+            # want the Audible photo, and there is no reliable signal to tell them
+            # apart automatically (both providers return real photos; which looks
+            # better is a judgement call). So:
             #
-            # DO NOT drop the secondary to "force the Hardcover portrait" (tried in
-            # 1.3.49, reverted here): the Audible imageAlt is the BETTER author photo
-            # for MOST authors (Brian Jacques, Octavia Butler, Margaret Atwood, Leigh
-            # Bardugo, Piers Anthony ...), and dropping it removed those images as an
-            # option entirely. Hardcover is only better for a FEW (Craig Alanson,
-            # whose Audible image is his book cover; Robert Jordan, square vs rect) --
-            # those are hand-picked. Keeping both offered means no image is ever lost.
-            valid_posters = [helper.thumb]
-            if (
-                helper.thumb_secondary
-                and helper.thumb_secondary != helper.thumb
-            ):
+            #  - DEFAULT: offer BOTH images -- the API's `image` (Hardcover portrait,
+            #    = helper.thumb) AND the Audible `imageAlt` (= helper.thumb_secondary)
+            #    -- and validate_keys([thumb, secondary]), which in practice SELECTS
+            #    the secondary (Audible). This is the better photo for most authors
+            #    (Brian Jacques, Octavia Butler, Margaret Atwood, Leigh Bardugo,
+            #    Piers Anthony ...). DO NOT drop the secondary to force Hardcover
+            #    (tried in 1.3.49): it removed those better images entirely.
+            #
+            #  - OVERRIDE: authors named in the `authors_prefer_hardcover` pref get
+            #    ONLY the Hardcover portrait, validate_keys([thumb]) -- a single-key
+            #    prune reliably SELECTS on a fresh scan. Scoped to the list so the
+            #    Audible-preferred majority is untouched. For Craig Alanson (Audible
+            #    returns his book cover) and Robert Jordan (Audible photo is an odd
+            #    rectangle vs the square Hardcover one).
+            #
+            # Either way, already-scanned authors keep Plex's persisted selection
+            # until a FRESH re-scan or a manual UI pick -- validate_keys can't move it.
+            author_name = (helper.name or '').strip().lower()
+            hardcover_names = set(
+                part.strip().lower()
+                for part in (Prefs['authors_prefer_hardcover'] or '').split(',')
+                if part.strip()
+            )
+            if author_name and author_name in hardcover_names:
+                helper.metadata.posters.validate_keys([helper.thumb])
+            else:
+                valid_posters = [helper.thumb]
                 if (
-                    helper.thumb_secondary not in helper.metadata.posters
-                    or helper.force
+                    helper.thumb_secondary
+                    and helper.thumb_secondary != helper.thumb
                 ):
-                    secondary_data = make_request(helper.thumb_secondary)
-                    if secondary_data is not None:
-                        helper.metadata.posters[helper.thumb_secondary] = \
-                            Proxy.Media(secondary_data, sort_order=1)
-                valid_posters.append(helper.thumb_secondary)
-            helper.metadata.posters.validate_keys(valid_posters)
+                    if (
+                        helper.thumb_secondary not in helper.metadata.posters
+                        or helper.force
+                    ):
+                        secondary_data = make_request(helper.thumb_secondary)
+                        if secondary_data is not None:
+                            helper.metadata.posters[helper.thumb_secondary] = \
+                                Proxy.Media(secondary_data, sort_order=1)
+                    valid_posters.append(helper.thumb_secondary)
+                helper.metadata.posters.validate_keys(valid_posters)
 
         helper.log_update_metadata()
 
