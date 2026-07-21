@@ -1,5 +1,6 @@
 # Incipit (fork of Audnexus Agent)
 # coding: utf-8
+import hashlib
 import json
 import re
 import urllib
@@ -175,6 +176,77 @@ def backup_selected_poster(helper):
         log.warn('incipit poster-backup: saved -> %s (%s bytes)', cover_path, len(selected))
     except Exception as e:
         log.error('incipit poster-backup: save FAILED %s (%s)', cover_path, e)
+
+
+def select_local_cover(helper):
+    """
+        Force the book folder's cover.jpg to become the SELECTED Plex poster, via
+        the trusted local Plex API (Elevated policy -> the plugin's request to
+        127.0.0.1:32400 needs no token).
+
+        WHY this over the posters-container path in update(): Proxy.Media +
+        sort_order=0 + validate_keys only wins on a FRESH scan -- it cannot move
+        Plex's PERSISTED selection, so a cover.jpg dropped/replaced on an
+        already-scanned book never took effect on Refresh Metadata. An
+        upload/select through the API DOES override the persisted pick, and it
+        writes into Plex's OWN metadata store (NOT the media folder), so the SMB
+        vfs_fruit veto that blocked writing cover.jpg back does not apply here.
+
+        In-agent port of select_cover_poster.py: skip if the cover is already the
+        selected poster (its key is upload://posters/<sha1 of the bytes>); PUT to
+        re-select it if it was uploaded before; else POST-upload it (which selects
+        it). Every failure is caught, so a fresh-scan item with no ratingKey yet,
+        or a sealed sandbox, simply falls back to the container behavior.
+    """
+    PMS = 'http://127.0.0.1:32400'
+    cover_bytes = local_cover_bytes(helper)
+    if not cover_bytes:
+        return
+    try:
+        sha = hashlib.sha1(cover_bytes).hexdigest()
+    except Exception as e:
+        log.error('incipit local-select: sha1 failed (%s)', e)
+        return
+    # Resolve this item's ratingKey from its guid (trusted local API).
+    try:
+        url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
+        text = str(HTTP.Request(url, timeout=8).content)
+        m = re.search(r'ratingKey="([0-9]+)"', text)
+        if not m:
+            log.warn('incipit local-select: no ratingKey for this item yet (fresh scan?)'); return
+        rk = m.group(1)
+    except Exception as e:
+        log.error('incipit local-select: ratingKey resolve failed (%s)', e)
+        return
+    # Current posters: is cover.jpg already the selected one? Note any prior upload.
+    selected_key = None
+    candidate_key = None
+    try:
+        purl = PMS + '/library/metadata/' + rk + '/posters'
+        pdata = json.loads(HTTP.Request(purl, headers={'Accept': 'application/json'}, timeout=8).content)
+        for p in (pdata.get('MediaContainer', {}).get('Metadata', []) or []):
+            pk = p.get('ratingKey', '') or ''
+            if p.get('selected'):
+                selected_key = pk
+            if sha in pk and candidate_key is None:
+                candidate_key = pk
+    except Exception as e:
+        log.error('incipit local-select: posters list failed (%s)', e)
+    if selected_key and sha in selected_key:
+        log.info('incipit local-select: cover.jpg already selected, skip')
+        return
+    # Re-select the already-uploaded cover, or upload it fresh (both select it).
+    try:
+        if candidate_key:
+            sel = PMS + '/library/metadata/' + rk + '/poster?url=' + urllib.quote(candidate_key, safe='')
+            HTTP.Request(sel, method='PUT', timeout=8)
+            log.warn('incipit local-select: re-selected existing cover poster (rk %s)', rk)
+        else:
+            up = PMS + '/library/metadata/' + rk + '/posters'
+            HTTP.Request(up, data=cover_bytes, headers={'Content-Type': 'image/jpeg'}, method='POST', timeout=8)
+            log.warn('incipit local-select: uploaded + selected cover.jpg (rk %s, %s bytes)', rk, len(cover_bytes))
+    except Exception as e:
+        log.error('incipit local-select: select/upload failed (%s)', e)
 
 
 class AudiobookArtist(Agent.Artist):
@@ -839,6 +911,13 @@ class AudiobookAlbum(Agent.Album):
                     and helper.thumb in helper.metadata.posters
                 ):
                     helper.metadata.posters.validate_keys([helper.thumb])
+
+        # Local cover, force-select via the trusted Plex API so a dropped/replaced
+        # cover.jpg takes effect on Refresh Metadata even on an ALREADY-scanned
+        # book -- the posters-container path above only wins on a fresh scan.
+        # SMB-safe (writes to Plex's metadata store, not the media folder).
+        if Prefs['prefer_local_cover'] and helper.force:
+            select_local_cover(helper)
         # Rating.
         helper.set_metadata_rating()
 
