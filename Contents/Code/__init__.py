@@ -277,8 +277,12 @@ def select_hardcover_author_art(helper):
     """
     if not helper.thumb:
         return
+    # make_request returns the LAZY HTTPRequest (or None), not bytes -- reading
+    # .content is what actually fetches. Proxy.Media accepts the object, so the
+    # posters-container path never had to unwrap it; sha1/POST here do.
     try:
-        art = make_request(helper.thumb)
+        response = make_request(helper.thumb)
+        art = response.content if response else None
     except Exception as e:
         log.error('incipit author-art-select: fetch failed (%s)', e)
         return
