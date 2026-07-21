@@ -205,32 +205,51 @@ def select_local_cover(helper):
     except Exception as e:
         log.error('incipit local-select: ratingKey resolve failed (%s)', e)
         return
-    # Is cover.jpg already the selected poster? An upload:// key embeds the sha1.
-    selected_key = None
-    try:
-        purl = PMS + '/library/metadata/' + rk + '/posters'
-        pdata = json.loads(HTTP.Request(purl, headers={'Accept': 'application/json'}, timeout=8).content)
-        for p in (pdata.get('MediaContainer', {}).get('Metadata', []) or []):
-            if p.get('selected'):
-                selected_key = p.get('ratingKey', '') or ''
-                break
-    except Exception as e:
-        log.error('incipit local-select: posters list failed (%s)', e)
+    # Read the poster set: what's selected, and is our cover already uploaded?
+    # (an upload:// ratingKey embeds the sha1 of the bytes.) Live findings:
+    # POST /posters selects only NEW content -- re-posting an existing upload is a
+    # no-op for selection. GET /poster?url= is also a no-op. Only PUT /poster?url=
+    # actually moves the selection. So: POST new content, PUT to re-select an
+    # existing upload -- then VERIFY, because the framework may downgrade the PUT.
+    def poster_state():
+        sel = None
+        have = False
+        try:
+            purl = PMS + '/library/metadata/' + rk + '/posters'
+            data = json.loads(HTTP.Request(purl, headers={'Accept': 'application/json'}, timeout=8).content)
+            for p in (data.get('MediaContainer', {}).get('Metadata', []) or []):
+                pk = p.get('ratingKey', '') or ''
+                if p.get('selected'):
+                    sel = pk
+                if sha in pk:
+                    have = True
+        except Exception as e:
+            log.error('incipit local-select: posters list failed (%s)', e)
+        return sel, have
+
+    selected_key, have_upload = poster_state()
     if selected_key and sha in selected_key:
         log.info('incipit local-select: cover.jpg already selected, skip')
         return
-    # Always POST-upload to select. A PUT /poster?url= re-select does NOT take from
-    # the agent: the framework's HTTP.Request ignores method= (data= is what makes
-    # it a POST), so a body-less PUT goes out as a GET and never moves the selection
-    # -- proven live by swapping back to a prior cover, which left the poster
-    # unchanged. POST always creates-or-reuses the upload poster AND selects it, so
-    # re-posting the same bytes is a safe, idempotent way to force the selection.
+    key = 'upload://posters/' + sha
+    action = 'PUT re-select' if have_upload else 'POST upload'
     try:
-        up = PMS + '/library/metadata/' + rk + '/posters'
-        HTTP.Request(up, data=cover_bytes, headers={'Content-Type': 'image/jpeg'}, timeout=8)
-        log.warn('incipit local-select: uploaded + selected cover.jpg (rk %s, %s bytes)', rk, len(cover_bytes))
+        if have_upload:
+            sel_url = PMS + '/library/metadata/' + rk + '/poster?url=' + urllib.quote(key, safe='')
+            HTTP.Request(sel_url, method='PUT', timeout=8)
+        else:
+            up = PMS + '/library/metadata/' + rk + '/posters'
+            HTTP.Request(up, data=cover_bytes, headers={'Content-Type': 'image/jpeg'}, timeout=8)
     except Exception as e:
-        log.error('incipit local-select: upload failed (%s)', e)
+        log.error('incipit local-select: %s failed (%s)', action, e)
+        return
+    # Verify the selection actually moved -- a downgraded PUT or a POST dedup would
+    # otherwise pass silently. This log line tells us if the agent can really PUT.
+    now_selected, _ = poster_state()
+    if now_selected and sha in now_selected:
+        log.warn('incipit local-select: %s OK -> cover.jpg is now selected (rk %s)', action, rk)
+    else:
+        log.error('incipit local-select: %s did NOT move selection (rk %s; still %s)', action, rk, now_selected)
 
 
 class AudiobookArtist(Agent.Artist):
