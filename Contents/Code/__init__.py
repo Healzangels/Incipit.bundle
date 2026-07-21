@@ -417,8 +417,11 @@ def converge_author_art(helper, target_url, other_url, tag):
         'incipit author-art-select': 'incipit author-art-unpin',
         'incipit author-art-unpin': 'incipit author-art-select',
     }.get(tag)
-    if opposite and (opposite, guid) in recent_work_memo:
-        del recent_work_memo[(opposite, guid)]
+    # .pop(), not `del d[k]`: RestrictedPython compiles subscript-deletion
+    # through a guard that may be absent (the same class of silent whole-plugin
+    # death as leading-underscore names); a method call is unambiguously safe.
+    if opposite:
+        recent_work_memo.pop((opposite, guid), None)
     if not should_run(tag, guid, target_url, 600):
         return
     state = read_poster_state(guid, tag)
