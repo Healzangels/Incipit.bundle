@@ -306,21 +306,15 @@ class SearchTool:
         if self.content_type == 'books':
             asin_search_title = self.normalizedName
 
-        # ASIN override
+        # ASIN override (an ASIN literally in the title/artist text). NOTE: the
+        # sidecar ASIN is deliberately NOT routed here -- a hard override does an
+        # Audible-catalog keyword search that fails on new ASINs and short-circuits
+        # with no fallback. The sidecar ASIN is sent as an &asin= HINT on the normal
+        # title/author search instead (see incipit_extra_args), which the API pins.
         match_asin = self.search_asin(asin_search_title)
         if match_asin:
             log.debug('ASIN found in title')
             return self.override_with_asin(match_asin, self.region_override)
-        # Sidecar metadata.json ASIN (Audiobookshelf-style) -- a DEFINITIVE match
-        # that skips scoring, tags, language, and the (often-dormant) duration
-        # veto entirely. Books only; a null/blank asin just falls through.
-        if self.content_type == 'books':
-            sc = self.sidecar()
-            if sc:
-                sc_match = self.search_asin((sc.get('asin') or '').upper())
-                if sc_match:
-                    log.info('incipit sidecar: ASIN %s from metadata.json', sc_match.group(0))
-                    return self.override_with_asin(sc_match, self.region_override)
 
     def search_asin(self, input):
         """
@@ -638,15 +632,30 @@ class AlbumSearchTool(SearchTool):
         if duration and duration > 0:
             extra += '&duration=' + urllib.quote(str(duration))
 
-        # Filename ASIN (Audiobookshelf/seanap tag), if present.
+        # ASIN hint: the filename (Audiobookshelf/seanap tag) if present, else the
+        # metadata.json sidecar. Sent as &asin= so the incipit-api PINS it
+        # (definitive) when it's among the search results, but still falls back to
+        # title/author scoring when it isn't -- unlike a hard ASIN override, which
+        # short-circuits and fails outright when the ASIN lookup is empty (proven
+        # live: a brand-new Podium ASIN returned no Audible-catalog results).
+        asin_hint = None
         try:
             if self.media.filename:
                 fn = urllib.unquote(self.media.filename).decode('utf8')
                 asin_match = self.search_asin(fn)
                 if asin_match:
-                    extra += '&asin=' + urllib.quote(asin_match.group(0))
+                    asin_hint = asin_match.group(0)
         except Exception as e:
             log.error('incipit asin probe failed: %s', e)
+        if not asin_hint:
+            sc = self.sidecar()
+            if sc:
+                sc_match = self.search_asin((sc.get('asin') or '').upper())
+                if sc_match:
+                    asin_hint = sc_match.group(0)
+        if asin_hint:
+            extra += '&asin=' + urllib.quote(asin_hint)
+            log.info('incipit asin hint: %s', asin_hint)
 
         # First track title — fallback when the album tag has no real title.
         track_title = None
