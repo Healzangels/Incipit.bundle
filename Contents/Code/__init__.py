@@ -76,12 +76,10 @@ def local_cover_bytes(helper):
 
         BYTES specifically, because Proxy.Media(bytes) IS accepted by the posters
         container while Proxy.LocalFile is rejected (proven 1.3.26/1.3.27).
-        Reading them needs open() or Core.storage, both blocked under the default
-        sandbox policy -- so this doubles as the live test of whether
-        PlexPluginCodePolicy=Elevated (Info.plist) unlocks either. Every failure
-        is caught (a blocked builtin raises NameError, a missing file raises IOError),
-        so a still-sealed sandbox simply returns None and the caller uses the online
-        cover unchanged.
+        Core.storage.load is the reader that works under PlexPluginCodePolicy=
+        Elevated (open() stays blocked even then, so we don't attempt it). Every
+        failure is caught, so a missing cover.jpg or a sealed sandbox simply
+        returns None and the caller falls back to the online cover.
     """
     try:
         raw = helper.album_file_path()
@@ -94,24 +92,13 @@ def local_cover_bytes(helper):
     except Exception as e:
         log.error('incipit cover: path resolve failed (%s)', e)
         return None
-    # Method 1: Core.storage.load (the framework's own file reader).
     try:
         data = Core.storage.load(candidate)
         if data:
-            log.warn('incipit cover: Core.storage read %s (%s bytes)', candidate, len(data))
+            log.info('incipit cover: read %s (%s bytes)', candidate, len(data))
             return data
     except Exception as e:
-        log.warn('incipit cover: Core.storage unavailable/failed (%s)', e)
-    # Method 2: plain open() (Elevated policy may grant the builtin).
-    try:
-        handle = open(candidate, 'rb')
-        data = handle.read()
-        handle.close()
-        if data:
-            log.warn('incipit cover: open() read %s (%s bytes)', candidate, len(data))
-            return data
-    except Exception as e:
-        log.warn('incipit cover: open() unavailable/failed (%s)', e)
+        log.warn('incipit cover: Core.storage read failed (%s)', e)
     return None
 
 
@@ -218,35 +205,32 @@ def select_local_cover(helper):
     except Exception as e:
         log.error('incipit local-select: ratingKey resolve failed (%s)', e)
         return
-    # Current posters: is cover.jpg already the selected one? Note any prior upload.
+    # Is cover.jpg already the selected poster? An upload:// key embeds the sha1.
     selected_key = None
-    candidate_key = None
     try:
         purl = PMS + '/library/metadata/' + rk + '/posters'
         pdata = json.loads(HTTP.Request(purl, headers={'Accept': 'application/json'}, timeout=8).content)
         for p in (pdata.get('MediaContainer', {}).get('Metadata', []) or []):
-            pk = p.get('ratingKey', '') or ''
             if p.get('selected'):
-                selected_key = pk
-            if sha in pk and candidate_key is None:
-                candidate_key = pk
+                selected_key = p.get('ratingKey', '') or ''
+                break
     except Exception as e:
         log.error('incipit local-select: posters list failed (%s)', e)
     if selected_key and sha in selected_key:
         log.info('incipit local-select: cover.jpg already selected, skip')
         return
-    # Re-select the already-uploaded cover, or upload it fresh (both select it).
+    # Always POST-upload to select. A PUT /poster?url= re-select does NOT take from
+    # the agent: the framework's HTTP.Request ignores method= (data= is what makes
+    # it a POST), so a body-less PUT goes out as a GET and never moves the selection
+    # -- proven live by swapping back to a prior cover, which left the poster
+    # unchanged. POST always creates-or-reuses the upload poster AND selects it, so
+    # re-posting the same bytes is a safe, idempotent way to force the selection.
     try:
-        if candidate_key:
-            sel = PMS + '/library/metadata/' + rk + '/poster?url=' + urllib.quote(candidate_key, safe='')
-            HTTP.Request(sel, method='PUT', timeout=8)
-            log.warn('incipit local-select: re-selected existing cover poster (rk %s)', rk)
-        else:
-            up = PMS + '/library/metadata/' + rk + '/posters'
-            HTTP.Request(up, data=cover_bytes, headers={'Content-Type': 'image/jpeg'}, method='POST', timeout=8)
-            log.warn('incipit local-select: uploaded + selected cover.jpg (rk %s, %s bytes)', rk, len(cover_bytes))
+        up = PMS + '/library/metadata/' + rk + '/posters'
+        HTTP.Request(up, data=cover_bytes, headers={'Content-Type': 'image/jpeg'}, timeout=8)
+        log.warn('incipit local-select: uploaded + selected cover.jpg (rk %s, %s bytes)', rk, len(cover_bytes))
     except Exception as e:
-        log.error('incipit local-select: select/upload failed (%s)', e)
+        log.error('incipit local-select: upload failed (%s)', e)
 
 
 class AudiobookArtist(Agent.Artist):
