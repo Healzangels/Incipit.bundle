@@ -56,6 +56,12 @@
         "default": "true"
     },
     {
+        "id": "prefer_sidecar_metadata",
+        "label": "Trust a metadata.json sidecar (Audiobookshelf-style) for ASIN/title/author over the file tags. An ASIN gives a definitive match; otherwise its title/author are used for the search.",
+        "type": "bool",
+        "default": "true"
+    },
+    {
         "id": "simplify_title",
         "label": "Simplify titles (drop subtitle, series part, (un)abridged)",
         "type": "bool",

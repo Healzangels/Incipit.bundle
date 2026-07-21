@@ -1,4 +1,5 @@
 from datetime import date
+import json
 import re
 # Import internal tools
 from logging import Logging
@@ -260,6 +261,35 @@ class SearchTool:
         self.log_search_url(search_url)
         return search_url
 
+    def sidecar(self):
+        """
+            The Audiobookshelf-style metadata.json next to the book, as a dict, or
+            None. This is machine-written, authoritative metadata (asin, title,
+            authors, language) -- far better than the often-scrambled file tags.
+            Read via Core.storage.load (the Elevated-policy reader the cover code
+            uses). Gated on prefer_sidecar_metadata; every failure is caught, so a
+            missing sidecar or a sealed sandbox just yields None and matching falls
+            back to the tags. Memoized per search (None is a valid cached result).
+        """
+        try:
+            return self.sidecar_cache
+        except AttributeError:
+            pass
+        result = None
+        try:
+            if self.prefs['prefer_sidecar_metadata'] and self.media.filename:
+                path = urllib.unquote(self.media.filename).decode('utf8')
+                if '/' in path:
+                    raw = Core.storage.load(path.rsplit('/', 1)[0] + '/metadata.json')
+                    if raw:
+                        data = json.loads(raw)
+                        if isinstance(data, dict):
+                            result = data
+        except Exception as e:
+            log.error('incipit sidecar: read/parse failed (%s)', e)
+        self.sidecar_cache = result
+        return result
+
     def pre_process_title(self):
         """
             Pre-processes the title to remove any contributor text.
@@ -281,6 +311,16 @@ class SearchTool:
         if match_asin:
             log.debug('ASIN found in title')
             return self.override_with_asin(match_asin, self.region_override)
+        # Sidecar metadata.json ASIN (Audiobookshelf-style) -- a DEFINITIVE match
+        # that skips scoring, tags, language, and the (often-dormant) duration
+        # veto entirely. Books only; a null/blank asin just falls through.
+        if self.content_type == 'books':
+            sc = self.sidecar()
+            if sc:
+                sc_match = self.search_asin((sc.get('asin') or '').upper())
+                if sc_match:
+                    log.info('incipit sidecar: ASIN %s from metadata.json', sc_match.group(0))
+                    return self.override_with_asin(sc_match, self.region_override)
 
     def search_asin(self, input):
         """
@@ -330,6 +370,15 @@ class AlbumSearchTool(SearchTool):
             tag, then whatever album value we have.
         """
         if self.resolved_title is not None:
+            return self.resolved_title
+
+        # Sidecar metadata.json title is authoritative over the (often scrambled)
+        # album tag. Kept WITH any "[Series N]" suffix -- the API normalizer strips
+        # it, and the structure helps the API rank the audio edition correctly.
+        sc = self.sidecar()
+        if sc and sc.get('title'):
+            self.resolved_title = sc['title']
+            log.info('incipit title: using metadata.json title "%s"', sc['title'])
             return self.resolved_title
 
         album = self.media.album
@@ -413,6 +462,17 @@ class AlbumSearchTool(SearchTool):
             returning every title collision (e.g. the many unrelated books
             named "Luck of the Draw").
         """
+        # Sidecar metadata.json author(s) are authoritative over a scrambled or
+        # narrator-as-artist ALBUMARTIST tag. Joined so the API's multi-author
+        # split can match any of them.
+        sc = self.sidecar()
+        if sc:
+            names = [a for a in (sc.get('authors') or []) if a]
+            if names:
+                joined = ', '.join(names)
+                log.info('incipit author: using metadata.json author(s) "%s"', joined)
+                return self.clean_search_author(joined)
+
         author = self.media.artist
 
         # When the ALBUMARTIST tag is a NARRATOR (differs from the matched parent
