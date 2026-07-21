@@ -8,7 +8,7 @@ import urllib
 from _version import version
 from logging import Logging
 from search_tools import AlbumSearchTool, ArtistSearchTool, ScoreTool
-from time import sleep
+from time import sleep, time
 from update_tools import AlbumUpdateTool, ArtistUpdateTool
 
 VERSION_NO = version
@@ -81,6 +81,29 @@ def Start():
     )
 
 
+# Plex calls update() once PER TRACK, so on a force refresh of a multi-part
+# book the API-backed poster work (backup, local-select, author-art) would
+# repeat its full HTTP round-trips for every track -- a 27-part book means 27x.
+# The container path has its own in-container guard; these calls need one too.
+# Keyed by (tag, guid) with the work's INPUT as the token (e.g. the cover's
+# sha1), so CHANGED input always re-runs and only true repeats are skipped. The
+# TTL bounds staleness: entries expire in seconds-to-minutes, so a deliberate
+# later re-Refresh does the work again while one pass's track-fanout collapses.
+_recent_work = {}
+
+
+def should_run(tag, guid, token, ttl):
+    """True unless the same (tag, guid, token) completed within ttl seconds."""
+    entry = _recent_work.get((tag, guid))
+    if entry and entry[0] == token and (time() - entry[1]) < ttl:
+        return False
+    return True
+
+
+def mark_done(tag, guid, token):
+    _recent_work[(tag, guid)] = (token, time())
+
+
 def local_cover_bytes(helper):
     """
         Raw bytes of the book folder's cover.jpg, or None.
@@ -128,6 +151,14 @@ def backup_selected_poster(helper):
         ORIGINAL bytes (verified identical to cover.jpg on an unchanged book).
     """
     PMS = 'http://127.0.0.1:32400'
+    # Per-track collapse (see _recent_work): the input here is Plex's current
+    # selection, unknowable without the HTTP round-trips this guard exists to
+    # avoid -- so the token is fixed and the short TTL alone bounds the work to
+    # once per pass. Marked optimistically: a failed backup simply retries on
+    # the next refresh rather than on the next track.
+    if not should_run('poster-backup', helper.metadata.guid, '', 60):
+        return
+    mark_done('poster-backup', helper.metadata.guid, '')
     # Where cover.jpg lives for this book.
     try:
         raw = helper.album_file_path()
@@ -139,6 +170,23 @@ def backup_selected_poster(helper):
         cover_path = path.rsplit('/', 1)[0] + '/cover.jpg'
     except Exception as e:
         log.error('incipit poster-backup: path resolve failed (%s)', e)
+        return
+    # Read the on-disk cover FIRST: with prefer_local_cover on, an existing
+    # cover.jpg is the AUTHORITATIVE art (that is what the pref means), and this
+    # backup used to run before the prefer_local read and OVERWRITE a freshly
+    # user-dropped cover.jpg with the OLD selected poster -- destroying the new
+    # file before it was ever served. So under prefer_local, backup only ever
+    # CREATES a missing cover.jpg, never replaces one. (Reading first also skips
+    # the poster download entirely on that path.)
+    try:
+        existing = Core.storage.load(cover_path)
+    except Exception:
+        existing = None
+    if existing and Prefs['prefer_local_cover']:
+        log.info(
+            'incipit poster-backup: cover.jpg exists and prefer_local_cover is '
+            'authoritative -- not overwriting'
+        )
         return
     # The currently-selected poster, via the Plex API (guid -> thumb -> bytes).
     try:
@@ -156,10 +204,6 @@ def backup_selected_poster(helper):
     if not selected:
         return
     # Change detection: skip when the on-disk cover.jpg already matches.
-    try:
-        existing = Core.storage.load(cover_path)
-    except Exception:
-        existing = None
     if existing and len(existing) == len(selected) and existing == selected:
         log.info('incipit poster-backup: unchanged, skip'); return
     # Write via the framework's Core.storage.save (open() is blocked in this
@@ -210,6 +254,10 @@ def upload_and_select_poster(guid, image_bytes, tag, only_if_selected_sha=None):
     except Exception as e:
         log.error('%s: sha1 failed (%s)', tag, e)
         return False
+    # Per-track collapse (see _recent_work): identical bytes for this item were
+    # already handled seconds ago -- this is track N of the same refresh pass.
+    if not should_run(tag, guid, sha, 90):
+        return True
     # Resolve this item's ratingKey from its guid (trusted local API).
     try:
         url = PMS + '/library/all?guid=' + urllib.quote(guid)
@@ -249,6 +297,7 @@ def upload_and_select_poster(guid, image_bytes, tag, only_if_selected_sha=None):
             return False
     if selected_key and sha in selected_key:
         log.info('%s: already the selected poster, skip', tag)
+        mark_done(tag, guid, sha)
         return True
     if have_upload:
         log.warn(
@@ -265,6 +314,7 @@ def upload_and_select_poster(guid, image_bytes, tag, only_if_selected_sha=None):
                      headers={'Content-Type': content_type}, timeout=8)
         log.warn('%s: uploaded + selected (rk %s, %s bytes, %s)',
                  tag, rk, len(image_bytes), content_type)
+        mark_done(tag, guid, sha)
         return True
     except Exception as e:
         log.error('%s: upload failed (%s)', tag, e)
@@ -1021,65 +1071,70 @@ class AudiobookAlbum(Agent.Album):
             backup_selected_poster(helper)
         # Thumb.
         # Kept here because of Proxy
-        if helper.thumb:
-            # When preferring local art, add our cover only as a fallback (higher
-            # sort_order = lower priority) and don't re-prioritize it to the front,
-            # so a local cover.jpg (via Local Media Assets) keeps the default slot.
-            # For books with no local cover, ours is still the only option -> used.
-            prefer_local = Prefs['prefer_local_cover']
-            primary_order = 1 if prefer_local else 0
+        # When preferring local art, add our cover only as a fallback (higher
+        # sort_order = lower priority) and don't re-prioritize it to the front,
+        # so a local cover.jpg (via Local Media Assets) keeps the default slot.
+        # For books with no local cover, ours is still the only option -> used.
+        prefer_local = Prefs['prefer_local_cover']
+        primary_order = 1 if prefer_local else 0
 
-            # LOCAL COVER (Elevated-policy attempt). Prior builds (1.3.23-1.3.27)
-            # proved Proxy.LocalFile is REJECTED by the posters container and the
-            # default sandbox blocks open()/Core -- so the agent couldn't read the
-            # sidecar. NEW lever (Info.plist PlexPluginCodePolicy=Elevated): it may
-            # unlock open()/Core.storage. And crucially Proxy.Media(BYTES) IS
-            # accepted here. So if we can READ cover.jpg we serve it as our own
-            # poster at sort_order=0 and prune to it -> the local cover becomes the
-            # sole default even with Incipit ABOVE Local Media Assets (titles stay
-            # clean). local_cover_bytes() swallows every failure, so a still-sealed
-            # sandbox just yields None and we fall through to the online cover
-            # exactly as before. If this works it replaces select_cover_poster.py
-            # for freshly-scanned items; if it doesn't, that script stays the fix.
-            local_set = False
-            if prefer_local:
-                local_key = 'incipit-local-cover'
-                # Per-track guard: Plex calls update() once PER TRACK, so a
-                # multi-part book would re-read the (up to ~1MB) cover.jpg on every
-                # track. Skip the re-read once our poster is already in this pass's
-                # container -- UNLESS force, so a real "Refresh Metadata" (force=1)
-                # always re-reads and picks up a NEWLY dropped/replaced cover.jpg.
-                if local_key in helper.metadata.posters and not helper.force:
-                    local_set = True
-                else:
-                    cover_bytes = local_cover_bytes(helper)
-                    if cover_bytes:
-                        try:
-                            helper.metadata.posters[local_key] = Proxy.Media(
-                                cover_bytes, sort_order=0
-                            )
-                            helper.metadata.posters.validate_keys([local_key])
-                            log.warn('incipit cover: LOCAL cover set as the default poster')
-                            local_set = True
-                        except Exception as e:
-                            log.error('incipit cover: Proxy.Media(local) failed (%s)', e)
-
-            if not local_set:
-                if helper.thumb not in helper.metadata.posters or helper.force:
-                    thumb_data = make_request(helper.thumb)
-                    if thumb_data is not None:
-                        helper.metadata.posters[helper.thumb] = Proxy.Media(
-                            thumb_data, sort_order=primary_order
+        # LOCAL COVER (Elevated-policy attempt). Prior builds (1.3.23-1.3.27)
+        # proved Proxy.LocalFile is REJECTED by the posters container and the
+        # default sandbox blocks open()/Core -- so the agent couldn't read the
+        # sidecar. NEW lever (Info.plist PlexPluginCodePolicy=Elevated): it may
+        # unlock open()/Core.storage. And crucially Proxy.Media(BYTES) IS
+        # accepted here. So if we can READ cover.jpg we serve it as our own
+        # poster at sort_order=0 and prune to it -> the local cover becomes the
+        # sole default even with Incipit ABOVE Local Media Assets (titles stay
+        # clean). local_cover_bytes() swallows every failure, so a still-sealed
+        # sandbox just yields None and we fall through to the online cover
+        # exactly as before. If this works it replaces select_cover_poster.py
+        # for freshly-scanned items; if it doesn't, that script stays the fix.
+        #
+        # Deliberately OUTSIDE any `if helper.thumb:` gate: a record with no
+        # online image (Hardcover/OpenLibrary book-level matches have none) used
+        # to skip this whole path, leaving a prefer_local book with a perfectly
+        # readable cover.jpg and NO poster at all on a normal incremental scan.
+        # The local cover does not depend on the online one existing.
+        local_set = False
+        if prefer_local:
+            local_key = 'incipit-local-cover'
+            # Per-track guard: Plex calls update() once PER TRACK, so a
+            # multi-part book would re-read the (up to ~1MB) cover.jpg on every
+            # track. Skip the re-read once our poster is already in this pass's
+            # container -- UNLESS force, so a real "Refresh Metadata" (force=1)
+            # always re-reads and picks up a NEWLY dropped/replaced cover.jpg.
+            if local_key in helper.metadata.posters and not helper.force:
+                local_set = True
+            else:
+                cover_bytes = local_cover_bytes(helper)
+                if cover_bytes:
+                    try:
+                        helper.metadata.posters[local_key] = Proxy.Media(
+                            cover_bytes, sort_order=0
                         )
-                # Prune to our single primary so a stale earlier poster can't stay
-                # the default -- but NOT when preferring local, so a not-yet-readable
-                # local cover keeps its pickable slot. (validate_keys only touches
-                # our metadata:// posters; a user's upload:// pick is never evicted.)
-                if (
-                    not prefer_local
-                    and helper.thumb in helper.metadata.posters
-                ):
-                    helper.metadata.posters.validate_keys([helper.thumb])
+                        helper.metadata.posters.validate_keys([local_key])
+                        log.warn('incipit cover: LOCAL cover set as the default poster')
+                        local_set = True
+                    except Exception as e:
+                        log.error('incipit cover: Proxy.Media(local) failed (%s)', e)
+
+        if not local_set and helper.thumb:
+            if helper.thumb not in helper.metadata.posters or helper.force:
+                thumb_data = make_request(helper.thumb)
+                if thumb_data is not None:
+                    helper.metadata.posters[helper.thumb] = Proxy.Media(
+                        thumb_data, sort_order=primary_order
+                    )
+            # Prune to our single primary so a stale earlier poster can't stay
+            # the default -- but NOT when preferring local, so a not-yet-readable
+            # local cover keeps its pickable slot. (validate_keys only touches
+            # our metadata:// posters; a user's upload:// pick is never evicted.)
+            if (
+                not prefer_local
+                and helper.thumb in helper.metadata.posters
+            ):
+                helper.metadata.posters.validate_keys([helper.thumb])
 
         # Local cover, force-select via the trusted Plex API so a dropped/replaced
         # cover.jpg takes effect on Refresh Metadata even on an ALREADY-scanned

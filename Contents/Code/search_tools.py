@@ -369,11 +369,19 @@ class AlbumSearchTool(SearchTool):
         # Sidecar metadata.json title is authoritative over the (often scrambled)
         # album tag. Kept WITH any "[Series N]" suffix -- the API normalizer strips
         # it, and the structure helps the API rank the audio edition correctly.
-        sc = self.sidecar()
-        if sc and sc.get('title'):
-            self.resolved_title = sc['title']
-            log.info('incipit title: using metadata.json title "%s"', sc['title'])
-            return self.resolved_title
+        # NOT on a manual search: a Fix Match query is the USER typing a
+        # correction, and the sidecar overriding it made Fix Match silently
+        # ignore whatever was typed whenever a metadata.json existed.
+        # isinstance guard: a malformed sidecar with a non-string title (a list,
+        # a number) must fall through to the tags, not crash the search.
+        if not self.manual:
+            sc = self.sidecar()
+            if sc:
+                sc_title = sc.get('title')
+                if isinstance(sc_title, (str, unicode)) and sc_title.strip():
+                    self.resolved_title = sc_title
+                    log.info('incipit title: using metadata.json title "%s"', sc_title)
+                    return self.resolved_title
 
         album = self.media.album
         if not is_missing_album(album):
@@ -466,14 +474,30 @@ class AlbumSearchTool(SearchTool):
         """
         # Sidecar metadata.json author(s) are authoritative over a scrambled or
         # narrator-as-artist ALBUMARTIST tag. Joined so the API's multi-author
-        # split can match any of them.
-        sc = self.sidecar()
-        if sc:
-            names = [a for a in (sc.get('authors') or []) if a]
-            if names:
-                joined = ', '.join(names)
-                log.info('incipit author: using metadata.json author(s) "%s"', joined)
-                return self.clean_search_author(joined)
+        # split can match any of them. NOT on a manual search -- same reason as
+        # the title: Fix Match input must win (see resolve_search_title).
+        if not self.manual:
+            sc = self.sidecar()
+            if sc:
+                # Tolerate the format variants seen in the wild instead of
+                # assuming a list of plain strings: Audiobookshelf/OPF exports
+                # can store authors as [{"name": ...}] (a dict per author) or as
+                # one bare string -- the bare string would otherwise be iterated
+                # CHARACTER BY CHARACTER into "J, o, h, n" garbage, and a dict
+                # entry would crash the join.
+                sc_authors = sc.get('authors')
+                if isinstance(sc_authors, (str, unicode)):
+                    sc_authors = [sc_authors]
+                names = []
+                for a in (sc_authors or []):
+                    if isinstance(a, dict):
+                        a = a.get('name')
+                    if a and isinstance(a, (str, unicode)):
+                        names.append(a)
+                if names:
+                    joined = ', '.join(names)
+                    log.info('incipit author: using metadata.json author(s) "%s"', joined)
+                    return self.clean_search_author(joined)
 
         author = self.media.artist
 
@@ -646,21 +670,27 @@ class AlbumSearchTool(SearchTool):
         # title/author scoring when it isn't -- unlike a hard ASIN override, which
         # short-circuits and fails outright when the ASIN lookup is empty (proven
         # live: a brand-new Podium ASIN returned no Audible-catalog results).
+        # NOT on a manual search: the hint carries the identity that produced the
+        # match the user is CORRECTING -- pinned to full confidence it would beat
+        # whatever they typed, the same silent-discard as the sidecar title/author.
         asin_hint = None
-        try:
-            if self.media.filename:
-                fn = urllib.unquote(self.media.filename).decode('utf8')
-                asin_match = self.search_asin(fn)
-                if asin_match:
-                    asin_hint = asin_match.group(0)
-        except Exception as e:
-            log.error('incipit asin probe failed: %s', e)
-        if not asin_hint:
-            sc = self.sidecar()
-            if sc:
-                sc_match = self.search_asin((sc.get('asin') or '').upper())
-                if sc_match:
-                    asin_hint = sc_match.group(0)
+        if not self.manual:
+            try:
+                if self.media.filename:
+                    fn = urllib.unquote(self.media.filename).decode('utf8')
+                    asin_match = self.search_asin(fn)
+                    if asin_match:
+                        asin_hint = asin_match.group(0)
+            except Exception as e:
+                log.error('incipit asin probe failed: %s', e)
+            if not asin_hint:
+                sc = self.sidecar()
+                if sc:
+                    sc_asin = sc.get('asin')
+                    if isinstance(sc_asin, (str, unicode)):
+                        sc_match = self.search_asin(sc_asin.upper())
+                        if sc_match:
+                            asin_hint = sc_match.group(0)
         if asin_hint:
             extra += '&asin=' + urllib.quote(asin_hint)
             log.info('incipit asin hint: %s', asin_hint)
