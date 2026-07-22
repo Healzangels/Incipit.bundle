@@ -211,21 +211,28 @@ def write_cover_sidecar(cover_path, image_bytes):
 
 def backup_selected_poster(helper):
     """
-        Capture a poster the USER picked in Plex to cover.jpg next to the book,
-        so it survives a library rebuild (the fresh scan re-serves it via
-        prefer_local_cover).
+        Mirror the poster Plex is CURRENTLY showing to cover.jpg next to the
+        book, so every item ends up with one and it survives a library rebuild
+        (the fresh scan re-serves it via prefer_local_cover).
 
-        THE RULE (operator's model, "hand-pick wins"): cover.jpg is the seed;
-        whenever the user manually applies a different poster in Plex, THAT
-        becomes the cover and is written to disk, and it stays the cover until
-        the user changes it again. So only a foreign (user-uploaded) selection
-        is captured. An agent-supplied selection -- the container's
-        Audible/Hardcover art, or our own upload of this very cover -- is NOT
-        written: cover.jpg stays authoritative and select_local_cover pushes it
-        back into Plex instead. That makes the two directions converge (a
-        hand-pick lands on disk and matches; a curated cover gets selected and
-        matches) rather than fight, and it is what stops a stale selection from
-        overwriting a cover.jpg the operator just dropped in.
+        THE RULE (operator's model): cover.jpg is a faithful mirror of the
+        current selection, whoever chose it -- a hand-picked upload, the
+        container's Audible art, or a switch from the Audible cover to the
+        Hardcover one. Any change is captured on the next refresh. WHO selected
+        it is deliberately not consulted: the earlier ownership test meant a
+        book whose poster came from the agent never got a cover.jpg at all, and
+        swapping between two agent-supplied covers was invisible to disk.
+
+        Writes only on an actual change: identical bytes are skipped, as is our
+        own padded re-select of the same image (see RESELECT_PAD), so a
+        converged library does no work on refresh.
+
+        This composes with prefer_local_cover rather than fighting it. That
+        pref decides what Plex DISPLAYS -- select_local_cover runs first and
+        pushes cover.jpg into Plex -- and this then mirrors the result, which
+        by then is the same bytes, so nothing is written. With the pref off,
+        Plex's selection is authoritative by definition and mirroring it is
+        exactly right.
 
         Mechanism (the Lambda.bundle pattern, every step verified live under the
         Elevated code policy): resolve this item through Plex's own HTTP API
@@ -288,29 +295,10 @@ def backup_selected_poster(helper):
     if existing and selected == existing + RESELECT_PAD:
         log.info('incipit poster-backup: selection is our padded re-select of '
                  'this cover, skip'); return
-    # WHOSE selection is this? Only a poster the USER applied in Plex may be
-    # written to disk (see the rule in this function's docstring). An
-    # agent-supplied selection differing from cover.jpg means the operator
-    # dropped in a NEW cover that select_local_cover has not converged yet --
-    # capturing it here would overwrite that new file with the stale poster,
-    # exactly backwards. The posters read costs a localhost round-trip and only
-    # happens on the rare differing pass, after both cheap byte checks.
-    owned_shas = []
-    if existing:
-        try:
-            sha, sha_padded, _ = padded_variants(existing)
-            owned_shas = [sha, sha_padded]
-        except Exception as e:
-            log.error('incipit poster-backup: sha1 of cover.jpg failed (%s)', e)
-            return
-    state = read_poster_state(helper.metadata.guid, 'incipit poster-backup')
-    if state is None:
-        return
-    selected_key = state[1]
-    if selection_is_agent_owned(selected_key, owned_shas):
-        log.info('incipit poster-backup: selection is agent-supplied, not a '
-                 'hand-pick -- cover.jpg stays authoritative, skip')
-        return
+    # Whoever chose the selection, it is what Plex shows, so it is what the
+    # sidecar mirrors -- no ownership test, and no posters round-trip to make
+    # one. The two byte checks above already mean this only fires on a real
+    # change.
     if write_cover_sidecar(cover_path, selected):
         log.warn('incipit poster-backup: saved -> %s (%s bytes)', cover_path, len(selected))
 
