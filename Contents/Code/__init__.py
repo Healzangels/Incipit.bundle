@@ -147,6 +147,68 @@ def local_cover_bytes(helper):
     return None
 
 
+# Destination temp name for the sidecar write. Deliberately NOT "._"-prefixed:
+# that namespace is exactly what vfs_fruit vetoes (see write_cover_sidecar).
+COVER_TMP_SUFFIX = '.incipit-tmp'
+COVER_STAGE_PREFIX = 'incipit-cover-'
+
+
+def write_cover_sidecar(cover_path, image_bytes):
+    """
+        Write image_bytes to cover_path without ever creating a "._" file on
+        the destination.
+
+        Core.storage.save() is the sandbox's only writer (open() is blocked
+        even under Elevated), and it is atomic-by-temp: it writes a sibling
+        named "._<name>" then moves it into place. On an SMB share with
+        vfs_fruit loaded, fruit:veto_appledouble reserves that namespace for
+        AppleDouble resource forks and refuses the create, so the whole save
+        died with ENOENT -- which is why hand-picked posters could not persist
+        on this library, where Plex reaches the media over SMB.
+
+        So: stage the bytes into the plugin's own DataItems folder (local,
+        always writable, "._" harmless there), copy them onto the share under a
+        name fruit does not claim (shutil.copy opens the destination directly
+        and writes the literal filename -- no temp), then rename into place.
+        The temp and the destination share a directory, so shutil.move degrades
+        to os.rename: atomic, so a reader never sees a half-written cover, and
+        a failure leaves an inert .incipit-tmp rather than a broken cover.jpg.
+
+        Verified against this Framework build before shipping: copy=shutil.copy,
+        rename=shutil.move, remove=os.remove, and data_item_path/save_data_item
+        both exist. No os import is needed -- paths are plain string work.
+
+        Returns True when the cover is in place.
+    """
+    dest_tmp = cover_path + COVER_TMP_SUFFIX
+    # Per-destination staging name so two album updates cannot collide.
+    # isinstance guard: .encode on a BYTE str implicitly decodes as ascii first
+    # and dies on any non-ASCII path -- the same Py2 trap as quote_param.
+    key = cover_path if isinstance(cover_path, str) else cover_path.encode('utf8')
+    stage_name = COVER_STAGE_PREFIX + hashlib.sha1(key).hexdigest()[:12] + '.jpg'
+    staged = None
+    try:
+        Core.storage.save_data_item(stage_name, image_bytes)
+        staged = Core.storage.data_item_path(stage_name)
+        Core.storage.copy(staged, dest_tmp)
+        Core.storage.rename(dest_tmp, cover_path)
+        return True
+    except Exception as e:
+        log.error('incipit cover-write: FAILED %s (%s)', cover_path, e)
+        # Leave nothing half-done on the share.
+        try:
+            Core.storage.remove(dest_tmp)
+        except Exception:
+            pass
+        return False
+    finally:
+        if staged:
+            try:
+                Core.storage.remove(staged)
+            except Exception:
+                pass
+
+
 def backup_selected_poster(helper):
     """
         Capture a poster the USER picked in Plex to cover.jpg next to the book,
@@ -249,18 +311,8 @@ def backup_selected_poster(helper):
         log.info('incipit poster-backup: selection is agent-supplied, not a '
                  'hand-pick -- cover.jpg stays authoritative, skip')
         return
-    # Write via the framework's Core.storage.save (open() is blocked in this
-    # sandbox even under Elevated -- verified). CAVEAT: Core.storage.save writes a
-    # "._<name>" atomic temp, which vfs_fruit on an SMB share intercepts as an
-    # AppleDouble resource fork -> ENOENT. So this works on a LOCAL library but
-    # FAILS on a fruit-enabled SMB media share (both verified live). For that
-    # split topology the write must be done server-side by a companion script on
-    # the box that holds the media.
-    try:
-        Core.storage.save(cover_path, selected)
+    if write_cover_sidecar(cover_path, selected):
         log.warn('incipit poster-backup: saved -> %s (%s bytes)', cover_path, len(selected))
-    except Exception as e:
-        log.error('incipit poster-backup: save FAILED %s (%s)', cover_path, e)
 
 
 PMS = 'http://127.0.0.1:32400'
