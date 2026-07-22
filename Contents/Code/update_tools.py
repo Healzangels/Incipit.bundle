@@ -89,7 +89,11 @@ SERIES_SORT_ARTICLE_RE = re.compile(r'^\s*(?:the|a|an)\s+', re.IGNORECASE)
 # "17 Harpy Thyme", "1. The Gunslinger", "03_Title". Capped at 3 digits and a
 # real separator required, so a year-shaped folder ("1984") is not mistaken for
 # a number and a number glued to a word ("27Cube") never matches.
-FOLDER_NUMBER_RE = re.compile(r'^\s*(\d{1,3})\s*[-._\s]\s*\S')
+# The decimal part is captured, not truncated: a novella folder "3.5 - The Road
+# To Sevendor" used to yield "Book 3" -- colliding with the real book 3 and
+# shelving the novella on top of it. The fraction is optional and must be
+# digits, so a year-shaped folder ("1984") is still refused.
+FOLDER_NUMBER_RE = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,2})?)\s*[-._\s]\s*\S')
 
 
 def series_from_path_segments(segments, author_names):
@@ -495,7 +499,13 @@ class AlbumUpdateTool(UpdateTool):
             so a book that already has provider series data, or a library using a
             different layout, is left exactly as it was.
         """
-        if self.series:
+        # Both parts are needed, because the sort title only includes a series
+        # when it also has a volume: a record carrying "Spellmonger" with no
+        # book number sorted as a bare title and fell out of its own series on
+        # the shelf. So keep going when either half is missing, and fill only
+        # the half the provider left empty -- a provider series name still wins
+        # over the folder's.
+        if self.series and self.volume:
             return
         raw = self.album_file_path()
         if not raw:
@@ -525,11 +535,16 @@ class AlbumUpdateTool(UpdateTool):
                 'authors=%s', path, author_names
             )
             return
-        self.series = series_name
-        self.volume = self.volume_prefix(number)
+        derived_series = not self.series
+        if derived_series:
+            self.series = series_name
+        if not self.volume:
+            self.volume = self.volume_prefix(number)
         # Now that the series name is known, strip a bare "(<Series>)" the
         # provider left in the title so the display + sort titles are clean.
-        if self.title:
+        # Only when the folder supplied the series -- a provider that gave its
+        # own series name never baked THIS one into the title.
+        if derived_series and self.title:
             pattern = r'\s*\(\s*' + re.escape(series_name) + r'\s*\)\s*$'
             stripped = re.sub(pattern, '', self.title, flags=re.IGNORECASE).strip()
             if stripped:
