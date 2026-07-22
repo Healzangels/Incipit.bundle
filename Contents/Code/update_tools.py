@@ -494,18 +494,29 @@ class AlbumUpdateTool(UpdateTool):
             Fill a MISSING series (name + book number) from the on-disk folder
             layout <Author>/<Series>/<NN> - <Title>/, and strip a bare trailing
             "(<Series>)" a provider baked into the title (e.g. "Cube Route
-            (Xanth)" -> "Cube Route"). Only runs when the API returned no series
-            AND the folder layout clearly matches (see series_from_path_segments),
-            so a book that already has provider series data, or a library using a
-            different layout, is left exactly as it was.
+            (Xanth)" -> "Cube Route"). The folder layout must clearly match (see
+            series_from_path_segments), so a library using a different
+            convention is left exactly as it was.
+
+            With `series_from_folder_wins` the folder also OVERRIDES a series the
+            provider did supply. That exists because providers disagree with each
+            OTHER across a series while a library's own folders do not: Katherine
+            Addison's books came back as "Chronicles of Osreth, Book 1" for two
+            different books, and one volume as "Cemeteries of Amalo" while its
+            own sibling said "Chronicles of Osreth" -- the nested sub-series is
+            real, and each record picks whichever it prefers. The folder tree is
+            the one source that is consistent within a library, and the operator
+            controls it. Default off: a library whose folders are less reliable
+            than its providers wants the old behaviour.
         """
         # Both parts are needed, because the sort title only includes a series
         # when it also has a volume: a record carrying "Spellmonger" with no
         # book number sorted as a bare title and fell out of its own series on
         # the shelf. So keep going when either half is missing, and fill only
-        # the half the provider left empty -- a provider series name still wins
-        # over the folder's.
-        if self.series and self.volume:
+        # the half the provider left empty -- unless the operator has asked for
+        # the folder to win outright, in which case run even with both present.
+        folder_wins = bool(self.prefs['series_from_folder_wins'])
+        if self.series and self.volume and not folder_wins:
             return
         raw = self.album_file_path()
         if not raw:
@@ -535,10 +546,10 @@ class AlbumUpdateTool(UpdateTool):
                 'authors=%s', path, author_names
             )
             return
-        derived_series = not self.series
+        derived_series = folder_wins or not self.series
         if derived_series:
             self.series = series_name
-        if not self.volume:
+        if folder_wins or not self.volume:
             self.volume = self.volume_prefix(number)
         # Now that the series name is known, strip a bare "(<Series>)" the
         # provider left in the title so the display + sort titles are clean.

@@ -3,7 +3,18 @@
         "id": "region",
         "label": "Search region:",
         "type": "enum",
-        "values": ["au", "ca", "de", "es", "fr", "in", "it", "jp", "us", "uk"],
+        "values": [
+            "au",
+            "ca",
+            "de",
+            "es",
+            "fr",
+            "in",
+            "it",
+            "jp",
+            "us",
+            "uk"
+        ],
         "default": "us"
     },
     {
@@ -56,6 +67,12 @@
         "default": "true"
     },
     {
+        "id": "series_from_folder_wins",
+        "label": "Trust the folder for series + book number, even when the provider supplies one (fixes a series whose books disagree, e.g. sub-series vs parent series)",
+        "type": "bool",
+        "default": "false"
+    },
+    {
         "id": "prefer_sidecar_metadata",
         "label": "Trust a metadata.json sidecar (Audiobookshelf-style) for ASIN/title/author over the file tags. An ASIN gives a definitive match; otherwise its title/author are used for the search.",
         "type": "bool",
@@ -89,7 +106,12 @@
         "id": "logging_level",
         "label": "Logging level:",
         "type": "enum",
-        "values": ["DEBUG", "INFO", "WARN", "ERROR"],
+        "values": [
+            "DEBUG",
+            "INFO",
+            "WARN",
+            "ERROR"
+        ],
         "default": "WARN"
     },
     {
