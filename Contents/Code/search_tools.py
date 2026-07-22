@@ -958,6 +958,19 @@ class AlbumSearchTool(SearchTool):
                 # provider rows can carry a print ISBN in the asin field (looks
                 # identical to a 10-char ASIN), and a digit-only identifier must
                 # keep the provider-id path that is known to resolve.
+                #
+                # DO NOT "fix" this back to c['id'] for non-Audible rows. It
+                # looks wrong -- the API documents `id` as the data-fetch key
+                # and warns the asin may 404 -- but re-measured 2026-07-22 the
+                # pinned DCC row is STILL hardcover-edition-32126720 at
+                # confidence 1.0, and fetching it still yields the French
+                # subtitle. Language demotion cannot save it either: Hardcover
+                # reports that edition as lang "en", i.e. mislabeled at source.
+                # The 404 this preference used to cause (a delisted ASIN froze
+                # the item's metadata) is now handled server-side -- the API
+                # rescues PRODUCT_DELISTED through the provider that carries
+                # the ASIN -- so the reason to revert is gone, but the reason
+                # to keep it is not.
                 identifier = c.get('asin') or ''
                 if not (identifier and identifier.startswith('B0')):
                     identifier = c['id']
