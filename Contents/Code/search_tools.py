@@ -927,9 +927,23 @@ class AlbumSearchTool(SearchTool):
                 narrators = [{'name': n} for n in c.get('narrators', []) if n]
                 if not narrators:
                     narrators = [{'name': ''}]
+                # Prefer the row's Audible ASIN over the provider-native id as
+                # the Plex match ID: the update then fetches the canonical
+                # /books/{asin} record instead of re-querying the provider's
+                # edition. Proven consequence of using c['id'] blindly: the
+                # PINNED Dungeon Crawler Carl row was Hardcover's edition
+                # 32126720 -- which maps the live ASIN to their FRENCH-subtitled
+                # edition record -- so the correctly-ranked, correctly-pinned
+                # pick still updated to a French album title. B0-prefixed only:
+                # provider rows can carry a print ISBN in the asin field (looks
+                # identical to a 10-char ASIN), and a digit-only identifier must
+                # keep the provider-id path that is known to resolve.
+                identifier = c.get('asin') or ''
+                if not (identifier and identifier.startswith('B0')):
+                    identifier = c['id']
                 search_results.append(
                     {
-                        'asin': c['id'] + '_' + self.region_override,
+                        'asin': identifier + '_' + self.region_override,
                         'author': authors,
                         'date': '',
                         'language': 'english',
