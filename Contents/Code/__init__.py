@@ -149,10 +149,21 @@ def local_cover_bytes(helper):
 
 def backup_selected_poster(helper):
     """
-        Back up the currently-selected Plex poster to cover.jpg next to the book,
-        writing only when it differs -- so a cover you set manually in Plex
-        persists to disk and survives a library rebuild (the fresh scan then
-        re-serves it via prefer_local_cover).
+        Capture a poster the USER picked in Plex to cover.jpg next to the book,
+        so it survives a library rebuild (the fresh scan re-serves it via
+        prefer_local_cover).
+
+        THE RULE (operator's model, "hand-pick wins"): cover.jpg is the seed;
+        whenever the user manually applies a different poster in Plex, THAT
+        becomes the cover and is written to disk, and it stays the cover until
+        the user changes it again. So only a foreign (user-uploaded) selection
+        is captured. An agent-supplied selection -- the container's
+        Audible/Hardcover art, or our own upload of this very cover -- is NOT
+        written: cover.jpg stays authoritative and select_local_cover pushes it
+        back into Plex instead. That makes the two directions converge (a
+        hand-pick lands on disk and matches; a curated cover gets selected and
+        matches) rather than fight, and it is what stops a stale selection from
+        overwriting a cover.jpg the operator just dropped in.
 
         Mechanism (the Lambda.bundle pattern, every step verified live under the
         Elevated code policy): resolve this item through Plex's own HTTP API
@@ -182,12 +193,8 @@ def backup_selected_poster(helper):
     except Exception as e:
         log.error('incipit poster-backup: path resolve failed (%s)', e)
         return
-    # Read the on-disk cover first for the unchanged-skip below. Overwriting an
-    # existing cover.jpg is safe again: this runs AFTER select_local_cover in
-    # compile_metadata, so by now either the dropped cover IS the selection
-    # (bytes identical -> skip) or a user's custom pick survived the
-    # ownership-guarded select and deserves capturing. The 1.3.57 never-replace
-    # rule fixed the clobber but silently stopped persisting hand-picks.
+    # Read the on-disk cover first, for the unchanged-skip and the ownership
+    # test below (its sha is what lets us recognize our own upload of it).
     try:
         existing = Core.storage.load(cover_path)
     except Exception:
@@ -219,6 +226,29 @@ def backup_selected_poster(helper):
     if existing and selected == existing + RESELECT_PAD:
         log.info('incipit poster-backup: selection is our padded re-select of '
                  'this cover, skip'); return
+    # WHOSE selection is this? Only a poster the USER applied in Plex may be
+    # written to disk (see the rule in this function's docstring). An
+    # agent-supplied selection differing from cover.jpg means the operator
+    # dropped in a NEW cover that select_local_cover has not converged yet --
+    # capturing it here would overwrite that new file with the stale poster,
+    # exactly backwards. The posters read costs a localhost round-trip and only
+    # happens on the rare differing pass, after both cheap byte checks.
+    owned_shas = []
+    if existing:
+        try:
+            sha, sha_padded, _ = padded_variants(existing)
+            owned_shas = [sha, sha_padded]
+        except Exception as e:
+            log.error('incipit poster-backup: sha1 of cover.jpg failed (%s)', e)
+            return
+    state = read_poster_state(helper.metadata.guid, 'incipit poster-backup')
+    if state is None:
+        return
+    selected_key = state[1]
+    if selection_is_agent_owned(selected_key, owned_shas):
+        log.info('incipit poster-backup: selection is agent-supplied, not a '
+                 'hand-pick -- cover.jpg stays authoritative, skip')
+        return
     # Write via the framework's Core.storage.save (open() is blocked in this
     # sandbox even under Elevated -- verified). CAVEAT: Core.storage.save writes a
     # "._<name>" atomic temp, which vfs_fruit on an SMB share intercepts as an
