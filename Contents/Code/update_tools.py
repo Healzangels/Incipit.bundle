@@ -77,6 +77,14 @@ def strip_trailing_series(title):
     return stripped or title
 
 
+# A leading article on the SERIES name splits one series across the shelf: the
+# same Spellmonger series came back as "Spellmonger" for book 13 and "The
+# Spellmonger" for book 17, so sixteen books filed under S and one under T.
+# Libraries sort past a leading article anyway, so strip it from the SORT KEY
+# only -- the series shown on the book stays exactly as the provider gave it.
+SERIES_SORT_ARTICLE_RE = re.compile(r'^\s*(?:the|a|an)\s+', re.IGNORECASE)
+
+
 # A book folder that leads with a track/series number: "27 - Cube Route",
 # "17 Harpy Thyme", "1. The Gunslinger", "03_Title". Capped at 3 digits and a
 # real separator required, so a year-shaped folder ("1984") is not mistaken for
@@ -544,7 +552,9 @@ class AlbumUpdateTool(UpdateTool):
             # shelving correctly and the padding only made the sort title look
             # wrong. Reverted in 1.3.22; don't reintroduce it without first
             # confirming a real mis-ordering in Plex.
-            series_with_volume = self.series + ', ' + self.volume
+            series_with_volume = (
+                SERIES_SORT_ARTICLE_RE.sub('', self.series) + ', ' + self.volume
+            )
         # Only include subtitle in sort if not in a series
         if not self.volume:
             self.title = self.metadata.title
