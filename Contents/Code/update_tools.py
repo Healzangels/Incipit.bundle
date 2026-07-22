@@ -827,11 +827,20 @@ class ArtistUpdateTool(UpdateTool):
             Set sort title of artist
         """
         if not self.metadata.title_sort or self.force:
-            single_word_name = re.match(r'\A[\w-]+\Z', self.name)
+            # re.UNICODE: without it Py2's \w is ASCII-only, so a single-word
+            # name carrying any accented letter ("Voltaire" is fine, "Colette"
+            # is fine, but "Molière"/"Borges"-style non-ASCII forms are not)
+            # fails the single-word guard and gets fed to the surname split,
+            # which then mangles a mononym into "e, Molièr".
+            single_word_name = re.match(r'\A[\w-]+\Z', self.name, re.UNICODE)
             if self.prefs['sort_author_by_last_name'] and not single_word_name:
+                # The separators before the surname and the suffix are literal
+                # SPACES: an unescaped "." there matched any character, so a
+                # name with no space still "split" on an arbitrary letter.
                 split_author_surname = re.match(
-                    '^(.+?).([^\s,]+)(,?.(?:[JS]r\.?|III?|IV))?$',
+                    r'^(.+?)\s([^\s,]+)(,?\s(?:[JS]r\.?|III?|IV))?$',
                     self.name,
+                    re.UNICODE,
                 )
                 if split_author_surname:
                     self.metadata.title_sort = ', '.join(

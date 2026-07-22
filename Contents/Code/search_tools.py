@@ -12,6 +12,24 @@ log = Logging()
 asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
 region_regex = re.compile(r'(?<=\[)[A-Za-z]{2}(?=\])')
 
+
+def quote_param(value):
+    """
+        urllib.quote for any value that may arrive as framework/json unicode.
+
+        Py2's quote looks its safe-map up BY BYTE, so a unicode argument with a
+        codepoint > 127 raises KeyError and takes the whole search down -- a
+        crash reachable from any non-ASCII author or title (a Danish series
+        name, an accented author). A byte str (the tag path) is passed through
+        unchanged. Every query parameter goes through here so the guard can
+        never again be present on one search path and missing on another.
+    """
+    if value is None:
+        return ''
+    if not isinstance(value, str):
+        value = value.encode('utf8')
+    return urllib.quote(value)
+
 # Plex library section root paths, fetched once. Used to derive the author from
 # a file path (<root>/<Author>/...) when the ALBUMARTIST tag is missing or bad.
 # NB: the Plex RestrictedPython sandbox forbids names starting with "_".
@@ -253,7 +271,7 @@ class SearchTool:
         # Param uses keyword for book and nothing for author
         type_param = '&keywords=' if self.content_type == 'books' else ''
         # Wrap the param for url use
-        url_param = type_param + urllib.quote(asin)
+        url_param = type_param + quote_param(asin)
 
         # Setup region helper to get search URL
         self.region_override = region if region else self.prefs['region']
@@ -382,6 +400,38 @@ class SearchTool:
 
 
 class AlbumSearchTool(SearchTool):
+    def sidecar_title(self):
+        """
+            The metadata.json title, or None. NOT on a TYPED search: a Search
+            Options query is the USER typing a correction, and the sidecar
+            overriding it made Fix Match silently ignore whatever was typed
+            whenever a metadata.json existed. The isinstance guard keeps a
+            malformed sidecar (a list, a number) from crashing the search.
+        """
+        if self.is_typed_search():
+            return None
+        sc = self.sidecar()
+        if not sc:
+            return None
+        sc_title = sc.get('title')
+        if isinstance(sc_title, (str, unicode)) and sc_title.strip():
+            return sc_title
+        return None
+
+    def folder_title(self):
+        """
+            A title recovered from the book folder, or None. Gated on the
+            title_from_folder_when_missing pref.
+        """
+        if not (self.prefs['title_from_folder_when_missing'] and self.media.filename):
+            return None
+        try:
+            path = urllib.unquote(self.media.filename).decode('utf8')
+            return folder_title_from_path(path)
+        except Exception as e:
+            log.error('incipit folder title recovery failed: %s', e)
+            return None
+
     def resolve_search_title(self):
         """
             The book title to search on. Normally the album tag, but when that
@@ -398,21 +448,11 @@ class AlbumSearchTool(SearchTool):
         # Sidecar metadata.json title is authoritative over the (often scrambled)
         # album tag. Kept WITH any "[Series N]" suffix -- the API normalizer strips
         # it, and the structure helps the API rank the audio edition correctly.
-        # NOT on a TYPED search: a Search Options query is the USER typing a
-        # correction, and the sidecar overriding it made Fix Match silently
-        # ignore whatever was typed whenever a metadata.json existed. The
-        # dialog's auto-fired list (is_typed_search False) keeps sidecar-first,
-        # like the automatic scan it re-runs.
-        # isinstance guard: a malformed sidecar with a non-string title (a list,
-        # a number) must fall through to the tags, not crash the search.
-        if not self.is_typed_search():
-            sc = self.sidecar()
-            if sc:
-                sc_title = sc.get('title')
-                if isinstance(sc_title, (str, unicode)) and sc_title.strip():
-                    self.resolved_title = sc_title
-                    log.info('incipit title: using metadata.json title "%s"', sc_title)
-                    return self.resolved_title
+        sc_title = self.sidecar_title()
+        if sc_title:
+            self.resolved_title = sc_title
+            log.info('incipit title: using metadata.json title "%s"', sc_title)
+            return self.resolved_title
 
         album = self.media.album
         if not is_missing_album(album):
@@ -422,13 +462,7 @@ class AlbumSearchTool(SearchTool):
         # Album tag missing/"[Unknown Album]": try to recover a title from the
         # book folder, else fall back to the track-title tag (never the literal
         # placeholder -- searching "[Unknown Album]" matches nothing).
-        recovered = None
-        if self.prefs['title_from_folder_when_missing'] and self.media.filename:
-            try:
-                path = urllib.unquote(self.media.filename).decode('utf8')
-                recovered = folder_title_from_path(path)
-            except Exception as e:
-                log.error('incipit resolve_search_title failed: %s', e)
+        recovered = self.folder_title()
         if recovered:
             # warn-level so this recovery is visible at the default log level:
             # it means the album tag is missing and was worked around -- a rare,
@@ -480,18 +514,10 @@ class AlbumSearchTool(SearchTool):
             # mis-ranks a book-level record with the same messy title ABOVE the
             # real audio edition. StripDiacritics keeps punctuation quote-safe.
             raw_title = String.StripDiacritics(self.resolve_search_title() or self.normalizedName)
-            # Sidecar values arrive as unicode (json); Py2 urllib.quote raises on a
-            # unicode with codepoints > 127, so encode to utf8 bytes first (a byte
-            # str -- the tag path -- is left as-is). A native-script metadata.json
-            # title/author would otherwise crash the whole search.
-            if not isinstance(raw_title, str):
-                raw_title = raw_title.encode('utf8')
-            query = 'title=' + urllib.quote(raw_title)
+            query = 'title=' + quote_param(raw_title)
             author = self.resolve_author()
             if author:
-                if not isinstance(author, str):
-                    author = author.encode('utf8')
-                query += '&author=' + urllib.quote(author)
+                query += '&author=' + quote_param(author)
             # Extra signals the API can use: duration (the veto), a filename
             # ASIN, and the first track title (a fallback when the ALBUM tag is
             # a bare series+number).
@@ -506,13 +532,13 @@ class AlbumSearchTool(SearchTool):
             return query
 
         # Audible catalog path.
-        album_param = 'title=' + urllib.quote(self.normalizedName)
+        album_param = 'title=' + quote_param(self.normalizedName)
         # Fix match/manual search doesn't provide author
         if self.media.artist:
-            artist_param = '&author=' + urllib.quote(self.media.artist)
+            artist_param = '&author=' + quote_param(self.media.artist)
         else:
             # Use keyword search to supplement missing author
-            album_param = 'keywords=' + urllib.quote(self.normalizedName)
+            album_param = 'keywords=' + quote_param(self.normalizedName)
             artist_param = ''
         return album_param + artist_param
 
@@ -738,7 +764,7 @@ class AlbumSearchTool(SearchTool):
         log.debug('incipit duration resolved: %s' % str(duration))
         # Plex reports -1 for a not-yet-analyzed file; only send a real runtime.
         if duration and duration > 0:
-            extra += '&duration=' + urllib.quote(str(duration))
+            extra += '&duration=' + quote_param(str(duration))
 
         # ASIN hint: the filename (Audiobookshelf/seanap tag) if present, else the
         # metadata.json sidecar. Sent as &asin= so the incipit-api PINS it
@@ -767,7 +793,7 @@ class AlbumSearchTool(SearchTool):
                     if sc_match:
                         asin_hint = sc_match.group(0)
         if asin_hint:
-            extra += '&asin=' + urllib.quote(asin_hint)
+            extra += '&asin=' + quote_param(asin_hint)
             log.info('incipit asin hint: %s', asin_hint)
 
         # First track title — fallback when the album tag has no real title.
@@ -787,13 +813,7 @@ class AlbumSearchTool(SearchTool):
             track_title = strip_part_index(track_title)
         log.debug('incipit track title resolved: %s' % str(track_title))
         if track_title and track_title != self.normalizedName:
-            # Same utf8 guard as raw_title/author in build_search_args: track
-            # titles come from the framework as unicode, and Py2 urllib.quote
-            # raises on codepoints > 127 -- a single non-ASCII track title
-            # ("Teil 1 - Die Zwerge" with an en-dash) crashed the WHOLE search.
-            if not isinstance(track_title, str):
-                track_title = track_title.encode('utf8')
-            extra += '&trackTitle=' + urllib.quote(track_title)
+            extra += '&trackTitle=' + quote_param(track_title)
 
         return extra
 
@@ -978,17 +998,25 @@ class AlbumSearchTool(SearchTool):
 
         # Handle a couple of edge cases where
         # album search will give bad results.
-        if self.media.album is None and not self.manual:
-            if self.media.title:
+        if is_missing_album(self.media.album) and not self.manual:
+            # The sidecar/folder recovery gets first refusal. These two upstream
+            # gates ran BEFORE it -- "[Unknown Album]" aborted the search
+            # outright and a NULL album was overwritten with the per-track title
+            # (which then looks "present" to resolve_search_title) -- so on an
+            # automatic scan, the only path the recovery exists for, it could
+            # never fire. Assigning the recovered title here also collapses a
+            # multi-part book to ONE search URL instead of one per part.
+            recovered = self.sidecar_title() or self.folder_title()
+            if recovered:
+                self.media.album = recovered
+                return True
+            if self.media.album is None and self.media.title:
                 log.warn('Using track title since album title is missing.')
                 self.media.album = self.media.title
                 return True
-            log.info('Album Title is NULL on an automatic search.  Returning')
-            return None
-        if self.media.album == '[Unknown Album]' and not self.manual:
             log.info(
-                'Album Title is [Unknown Album]'
-                ' on an automatic search.  Returning'
+                'Album title is missing/"[Unknown Album]" and nothing could be '
+                'recovered on an automatic search.  Returning'
             )
             return None
 
@@ -1014,7 +1042,7 @@ class ArtistSearchTool(SearchTool):
         if self.media.artist:
             self.handle_multi_artist()
         modified_artist_name = self.cleanup_author_name(self.media.artist)
-        query = 'name=' + urllib.quote(modified_artist_name)
+        query = 'name=' + quote_param(modified_artist_name)
         # Set param
         return query
 
@@ -1192,10 +1220,10 @@ class ArtistSearchTool(SearchTool):
         if not title:
             return None
         region = self.region_override or self.prefs['region']
-        query = 'title=' + urllib.quote(title.encode('utf8'))
+        query = 'title=' + quote_param(title)
         duration = self.artist_duration()
         if duration:
-            query += '&duration=' + urllib.quote(str(duration))
+            query += '&duration=' + quote_param(str(duration))
         return RegionTool(
             content_type='books', query=query, region=region
         ).get_search_url()
