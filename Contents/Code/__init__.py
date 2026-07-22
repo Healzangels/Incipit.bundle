@@ -210,6 +210,15 @@ def backup_selected_poster(helper):
     # Change detection: skip when the on-disk cover.jpg already matches.
     if existing and len(existing) == len(selected) and existing == selected:
         log.info('incipit poster-backup: unchanged, skip'); return
+    # ...including when the selection is OUR OWN padded re-select of that same
+    # cover (see RESELECT_PAD): identical pixels, different bytes. Writing it
+    # back would silently grow the operator's cover.jpg by the pad -- breaking
+    # any byte/sha reconciliation against the curated-cover manifest -- and
+    # would make the padded copy the new "plain" base, so every later deselect
+    # mints another pad level instead of stopping at the documented boundary.
+    if existing and selected == existing + RESELECT_PAD:
+        log.info('incipit poster-backup: selection is our padded re-select of '
+                 'this cover, skip'); return
     # Write via the framework's Core.storage.save (open() is blocked in this
     # sandbox even under Elevated -- verified). CAVEAT: Core.storage.save writes a
     # "._<name>" atomic temp, which vfs_fruit on an SMB share intercepts as an
