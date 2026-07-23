@@ -229,6 +229,19 @@ def write_cover_sidecar(cover_path, image_bytes):
                 pass
 
 
+def thumb_version(url):
+    """
+        The trailing version stamp of a `/library/metadata/<rk>/thumb/<ver>`
+        URL, or None when the shape is not present. Plex stamps a thumb with the
+        epoch second it was written, so two thumbs sharing a stamp are the SAME
+        underlying image -- the tell used to spot an inherited poster below.
+    """
+    if not url:
+        return None
+    m = re.search(r'/thumb/(\d+)', url)
+    return m.group(1) if m else None
+
+
 def backup_selected_poster(helper):
     """
         Mirror the poster Plex is CURRENTLY showing to cover.jpg next to the
@@ -284,6 +297,25 @@ def backup_selected_poster(helper):
         if not m:
             log.warn('incipit poster-backup: no thumb in API response (first 200: %s)', text[:200]); return
         thumb = m.group(1)
+        # POISON GUARD: a fresh book with no poster of its own shows its ARTIST's
+        # art, and mirroring THAT into cover.jpg stamps the author photo onto the
+        # book -- 10 books hit this on the last rebuild (the first metadata pass
+        # fires before a real cover is selected, so the "current selection" is the
+        # inherited parent poster). Plex gives it away for free: an inheriting
+        # album carries the PARENT's thumb version stamp (verified live -- "The
+        # Stars, Like Dust" served /104369/thumb/1784489227 against its artist's
+        # /104346/thumb/1784489227, same stamp), while a real own cover gets its
+        # own write-time stamp. Equal stamps => inherited art, not a cover: skip
+        # WITHOUT marking done, so the true cover (a different stamp) still mirrors
+        # on the pass that selects it. `parentThumb` is capital-T, so the lowercase
+        # `thumb=` match above never picked it up by mistake.
+        pm = re.search(r'parentThumb="([^"]*)"', text)
+        tv = thumb_version(thumb)
+        pv = thumb_version(pm.group(1)) if pm else None
+        if tv and pv and tv == pv:
+            log.info('incipit poster-backup: album is inheriting its artist poster '
+                     '(thumb stamp %s == parent) -- not a real cover, skip', tv)
+            return
     except Exception as e:
         log.error('incipit poster-backup: could not resolve the selected poster (%s)', e)
         return
