@@ -790,8 +790,23 @@ class AlbumSearchTool(SearchTool):
                 sc_asin = sc.get('asin')
                 if isinstance(sc_asin, (str, unicode)):
                     sc_match = self.search_asin(sc_asin.upper())
-                    if sc_match:
+                    # Require the B0 prefix here, unlike the filename probe.
+                    # asin_regex is a SHAPE test ([A-Z\d]{10}) and a print
+                    # ISBN-10 satisfies it, so an "asin" field written by an
+                    # Audiobookshelf/OPF export can carry 1250771463 -- and
+                    # this hint is PINNED as definitive by the API, which
+                    # would match the print edition over the audio one.
+                    # parse_incipit_candidates guards provider rows the same
+                    # way and for the same stated reason. A missing hint only
+                    # degrades to a normal title+author search, so refusing an
+                    # ambiguous identifier is the cheap side of the trade.
+                    if sc_match and sc_match.group(0).startswith('B0'):
                         asin_hint = sc_match.group(0)
+                    elif sc_match:
+                        log.info(
+                            'incipit asin hint: ignoring non-Audible sidecar '
+                            'identifier %s (not B0-prefixed)', sc_match.group(0)
+                        )
         if asin_hint:
             extra += '&asin=' + quote_param(asin_hint)
             log.info('incipit asin hint: %s', asin_hint)

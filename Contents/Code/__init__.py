@@ -539,7 +539,21 @@ def converge_author_art(helper, target_url, other_url, tag):
         target_bytes = fetch_url_bytes(target_url)
         for image_bytes in (target_bytes, fetch_url_bytes(other_url)):
             if image_bytes:
-                s, sp, _ = padded_variants(image_bytes)
+                # The one padded_variants call site that used to run bare --
+                # its two siblings are both guarded. HTTPRequest.content
+                # decodes text-ish content types to unicode, so a CDN
+                # interstitial or throttle page served as 200 text/html
+                # yields a unicode body and hashlib.sha1 raises
+                # UnicodeEncodeError. Nothing between here and
+                # Agent.Artist.update() catches it, so the artist update died
+                # half-written with only a generic traceback. A body we cannot
+                # hash is by definition not one of our images, so skipping it
+                # is also the correct answer.
+                try:
+                    s, sp, _ = padded_variants(image_bytes)
+                except Exception as e:
+                    log.error('%s: could not hash a candidate image (%s)', tag, e)
+                    continue
                 owned_shas.extend([s, sp])
     if not selection_is_agent_owned(selected_key, owned_shas):
         log.info('%s: selection is a user upload -- leaving it', tag)
@@ -606,7 +620,7 @@ def unpin_hardcover_author_art(helper):
     )
 
 
-def select_local_cover(helper):
+def select_local_cover(helper, cover_bytes=None):
     """
         Force the book folder's cover.jpg to become the SELECTED Plex poster on
         a Refresh of an ALREADY-scanned book (the container path only wins on a
@@ -616,7 +630,11 @@ def select_local_cover(helper):
         backup_selected_poster (which now runs AFTER this) can capture them to
         cover.jpg instead of this path clobbering them.
     """
-    cover_bytes = local_cover_bytes(helper)
+    # The album update has usually just read this exact file to seed the
+    # posters container; accept those bytes rather than pulling ~1MB back over
+    # SMB a second time in the same pass. None means "nobody read it for me".
+    if cover_bytes is None:
+        cover_bytes = local_cover_bytes(helper)
     if not cover_bytes:
         return
     tag = 'incipit local-select'
@@ -1320,6 +1338,10 @@ class AudiobookAlbum(Agent.Album):
         # readable cover.jpg and NO poster at all on a normal incremental scan.
         # The local cover does not depend on the online one existing.
         local_set = False
+        # Hoisted so the bytes read below can be handed to select_local_cover
+        # instead of it re-reading the same file in the same pass. Stays None
+        # on every path that does not read, so the callee still falls back.
+        cover_bytes = None
         if prefer_local:
             local_key = 'incipit-local-cover'
             # Per-track guard: Plex calls update() once PER TRACK, so a
@@ -1364,7 +1386,7 @@ class AudiobookAlbum(Agent.Album):
         # book -- the posters-container path above only wins on a fresh scan.
         # SMB-safe (writes to Plex's metadata store, not the media folder).
         if Prefs['prefer_local_cover'] and helper.force:
-            select_local_cover(helper)
+            select_local_cover(helper, cover_bytes)
         # Back up the currently-selected poster to cover.jpg (opt-in). Runs
         # AFTER the select: select_local_cover is ownership-guarded (a user's
         # custom upload survives it), so what is selected HERE is the state
