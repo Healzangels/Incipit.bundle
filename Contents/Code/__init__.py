@@ -262,12 +262,28 @@ def backup_selected_poster(helper):
     except Exception as e:
         log.error('incipit poster-backup: path resolve failed (%s)', e)
         return
-    # Read the on-disk cover first, for the unchanged-skip and the ownership
-    # test below (its sha is what lets us recognize our own upload of it).
+    # Read the on-disk cover first, for the unchanged-skip and the padded
+    # re-select check below.
+    #
+    # A RAISED read is NOT the same as "there is no cover.jpg here".
+    # Core.storage.load returns falsy for a file that simply is not there --
+    # verified live across 5478 successful reads and 1487 first-time writes
+    # with zero read-failure lines -- so an exception means the file may well
+    # EXIST and we merely could not see it: an SMB blip, a stale handle,
+    # EACCES. Both change guards below are `if existing`, so carrying None
+    # forward from a failed read skips BOTH and turns this mirror into an
+    # unconditional overwrite of a hand-curated cover we never managed to
+    # read. Worse, it is the one path that can write `existing + RESELECT_PAD`
+    # into the operator's file, the exact byte growth the comment below
+    # forbids. Fail closed and let the next refresh retry.
+    existing = None
     try:
         existing = Core.storage.load(cover_path)
-    except Exception:
-        existing = None
+    except Exception as e:
+        log.error('incipit poster-backup: cover.jpg unreadable at %s (%s) -- '
+                  'skipping, so an existing file is never blindly overwritten',
+                  cover_path, e)
+        return
     # The currently-selected poster, via the Plex API (guid -> thumb -> bytes).
     try:
         url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
