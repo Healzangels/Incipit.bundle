@@ -193,7 +193,12 @@ def write_cover_sidecar(cover_path, image_bytes):
     # so what got PUBLISHED as cover.jpg was a truncated JPEG, silently, with
     # no failure logged. Distinct names make concurrent writers independent;
     # the atomic rename still picks a single winner.
-    COVER_STAGE_SEQ[0] += 1
+    # Plain assignment, NOT `+= 1`: RestrictedPython rejects augmented
+    # assignment to a subscript at COMPILE time ("Augmented assignment of
+    # object items and slices is not allowed"), which kills the whole plugin
+    # silently -- Fix Match spins forever with no UI error. Same guard family
+    # as del-subscript. Plain d[k] = v is fine, as recent_work_memo proves.
+    COVER_STAGE_SEQ[0] = COVER_STAGE_SEQ[0] + 1
     unique = '%d-%d' % (int(time() * 1000), COVER_STAGE_SEQ[0])
     # isinstance guard: .encode on a BYTE str implicitly decodes as ascii first
     # and dies on any non-ASCII path -- the same Py2 trap as quote_param.
