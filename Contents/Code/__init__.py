@@ -917,6 +917,15 @@ class AudiobookArtist(Agent.Artist):
         """
             Compiles the metadata for the artist.
         """
+        # Read the DISPLAYED title before anything can rewrite it. The
+        # authors_prefer_hardcover match below deliberately compares against
+        # the title Plex shows -- the operator types what they SEE -- but
+        # set_metadata_title() overwrites metadata.title with the API's `name`
+        # whenever force is set, which is exactly the path the pin/unpin API
+        # runs on. Reading it after that point collapsed the two keys into one
+        # and silently unpinned any author pinned by their displayed name
+        # (e.g. a phantom "Author (Series)" artist) on every Refresh Metadata.
+        displayed_title = helper.metadata.title
         # Description.
         helper.set_metadata_description()
         # Tags.
@@ -976,7 +985,7 @@ class AudiobookArtist(Agent.Artist):
         hardcover_keys.discard('')
         author_keys = set(
             author_pref_key(value)
-            for value in (helper.name, helper.metadata.title)
+            for value in (helper.name, displayed_title)
         )
         author_keys.discard('')
         prefer_hardcover = bool(author_keys & hardcover_keys)
