@@ -256,15 +256,6 @@ def backup_selected_poster(helper):
         cover.jpg. Byte-compare is a safe change-detector: /thumb serves the
         ORIGINAL bytes (verified identical to cover.jpg on an unchanged book).
     """
-    PMS = 'http://127.0.0.1:32400'
-    # Per-track collapse (see recent_work_memo): the input here is Plex's current
-    # selection, unknowable without the HTTP round-trips this guard exists to
-    # avoid -- so the token is fixed and the short TTL alone bounds the work to
-    # once per pass. Marked optimistically: a failed backup simply retries on
-    # the next refresh rather than on the next track.
-    if not should_run('poster-backup', helper.metadata.guid, '', 60):
-        return
-    mark_done('poster-backup', helper.metadata.guid, '')
     # Where cover.jpg lives for this book.
     try:
         raw = helper.album_file_path()
@@ -276,6 +267,37 @@ def backup_selected_poster(helper):
         cover_path = path.rsplit('/', 1)[0] + '/cover.jpg'
     except Exception as e:
         log.error('incipit poster-backup: path resolve failed (%s)', e)
+        return
+    # Resolve Plex's CURRENT selection first: one localhost round-trip, and the
+    # only value that can key the per-track memo honestly.
+    try:
+        url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
+        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
+        m = re.search(r'thumb="([^"]*)"', text)
+        if not m:
+            log.warn('incipit poster-backup: no thumb in API response (first 200: %s)', text[:200]); return
+        thumb = m.group(1)
+    except Exception as e:
+        log.error('incipit poster-backup: could not resolve the selected poster (%s)', e)
+        return
+    # Per-track collapse (see recent_work_memo), keyed on the SELECTION.
+    #
+    # This used to pass a FIXED token with a 60s TTL, which made it a rate
+    # limiter rather than a change detector: change a poster in Plex, hit
+    # Refresh Metadata, and the backup was silently skipped -- no log line and
+    # nothing written -- until 60 seconds had elapsed. Observed live on
+    # "A Warrior's Knowledge": refreshes at 00:59:33 and 00:59:41 did nothing
+    # at all and only the one at 01:00:46 saved. That is the entire feature
+    # failing precisely when someone is watching for it, which is worse than
+    # failing loudly.
+    #
+    # Plex's thumb URL carries a version stamp that moves whenever the
+    # selection changes (verified live: one item held stamps ...763 and ...782
+    # nineteen seconds apart across a poster change), so keying on it still
+    # collapses the repeats WITHIN a pass while letting a genuine change
+    # through on the very next refresh. Correctness no longer rests on the TTL,
+    # so it can be generous.
+    if not should_run('poster-backup', helper.metadata.guid, thumb, 600):
         return
     # Read the on-disk cover first, for the unchanged-skip and the padded
     # re-select check below.
@@ -299,23 +321,23 @@ def backup_selected_poster(helper):
                   'skipping, so an existing file is never blindly overwritten',
                   cover_path, e)
         return
-    # The currently-selected poster, via the Plex API (guid -> thumb -> bytes).
+    # Now the expensive half: the selected poster's actual bytes.
     try:
-        url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
-        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
-        m = re.search(r'thumb="([^"]*)"', text)
-        if not m:
-            log.warn('incipit poster-backup: no thumb in API response (first 200: %s)', text[:200]); return
-        thumb = m.group(1)
         turl = thumb if thumb.startswith('http') else PMS + thumb
         selected = HTTP.Request(turl, timeout=8, cacheTime=0).content
     except Exception as e:
-        log.error('incipit poster-backup: could not read selected poster (%s)', e)
+        log.error('incipit poster-backup: could not download selected poster (%s)', e)
         return
     if not selected:
         return
     # Change detection: skip when the on-disk cover.jpg already matches.
+    #
+    # mark_done fires only on the paths below, where we reached a DEFINITE
+    # outcome for this selection: mirrored, or provably not needing it. Every
+    # failure path above returns without marking, so a blip retries on the next
+    # track instead of being suppressed for the whole TTL.
     if existing and len(existing) == len(selected) and existing == selected:
+        mark_done('poster-backup', helper.metadata.guid, thumb)
         log.info('incipit poster-backup: unchanged, skip'); return
     # ...including when the selection is OUR OWN padded re-select of that same
     # cover (see RESELECT_PAD): identical pixels, different bytes. Writing it
@@ -324,6 +346,7 @@ def backup_selected_poster(helper):
     # would make the padded copy the new "plain" base, so every later deselect
     # mints another pad level instead of stopping at the documented boundary.
     if existing and selected == existing + RESELECT_PAD:
+        mark_done('poster-backup', helper.metadata.guid, thumb)
         log.info('incipit poster-backup: selection is our padded re-select of '
                  'this cover, skip'); return
     # Whoever chose the selection, it is what Plex shows, so it is what the
@@ -331,6 +354,7 @@ def backup_selected_poster(helper):
     # one. The two byte checks above already mean this only fires on a real
     # change.
     if write_cover_sidecar(cover_path, selected):
+        mark_done('poster-backup', helper.metadata.guid, thumb)
         log.warn('incipit poster-backup: saved -> %s (%s bytes)', cover_path, len(selected))
 
 
