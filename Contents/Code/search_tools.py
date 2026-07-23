@@ -418,7 +418,7 @@ class SearchTool:
         if sc:
             authors = self.sidecar_names(sc.get('authors') or sc.get('author'))
             narrators = self.sidecar_names(sc.get('narrators') or sc.get('narrator'))
-            folder = self.author_from_path()
+            folder = self.folder_author_confirmed()
             if folder and narrators and authors:
                 authors_ok = self.names_include_folder_author(authors, folder)
                 narrators_ok = self.names_include_folder_author(narrators, folder)
@@ -798,6 +798,45 @@ class AlbumSearchTool(SearchTool):
         if author and self.prefs['strip_series_from_author']:
             return self.clear_series_text(author)
         return author or ''
+
+    def folder_author_confirmed(self):
+        """
+            The author folder for this file, resolved ROOT-FREE.
+
+            author_from_path() derives the author by stripping a get_library_roots()
+            prefix -- but that call is BLOCKED at search time (see the note in
+            resolve_author), so it returns None on every scan. That is exactly why
+            the swap correction below never fired for the swapped UK Harry Potter
+            sidecars: its arbiter was always None, so `if folder and ...` skipped,
+            and the agent searched author=Stephen Fry / narrator=J.K. Rowling.
+
+            Confirm the ALBUMARTIST against the path segments instead (the pattern
+            parent_author_in_path uses on media.filename, which IS readable): when
+            media.artist names a folder in this file's path it IS the
+            <root>/<Author>/ segment. A NARRATOR-tagged ALBUMARTIST -- which never
+            appears as an author folder -- fails the confirmation and returns None,
+            so this can only ever supply a TRUE author, never mistake a narrator
+            for one. Falls back to the root-based path for any context where the
+            roots do resolve.
+        """
+        fp = self.author_from_path()
+        if fp:
+            return fp
+        try:
+            artist = self.media.artist
+            if not artist or not self.media.filename:
+                return None
+            path = urllib.unquote(self.media.filename).decode('utf8')
+            akey = name_key(artist)
+            if not akey:
+                return None
+            for seg in path.split('/'):
+                seg = seg.strip()
+                if seg and name_key(seg) == akey:
+                    return artist
+        except Exception as e:
+            log.error('incipit folder_author_confirmed failed: %s', e)
+        return None
 
     def author_from_path(self):
         """
