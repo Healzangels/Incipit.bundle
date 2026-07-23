@@ -971,8 +971,19 @@ class AlbumSearchTool(SearchTool):
                 # rescues PRODUCT_DELISTED through the provider that carries
                 # the ASIN -- so the reason to revert is gone, but the reason
                 # to keep it is not.
+                # isinstance, not bare truthiness: a provider row can carry a
+                # print ISBN in the asin field serialized as a JSON NUMBER, and
+                # a number is truthy, so `or ''` does not rescue it and
+                # .startswith raises AttributeError. That lands in the
+                # per-candidate except below, which drops the row entirely --
+                # a candidate that matched fine before this preference existed
+                # would silently vanish from the results.
                 identifier = c.get('asin') or ''
-                if not (identifier and identifier.startswith('B0')):
+                # (str, unicode) rather than basestring: the sandbox's builtin
+                # blocklist is irregular and basestring has no precedent here,
+                # while this exact tuple is already proven at the sidecar sites.
+                if not (isinstance(identifier, (str, unicode))
+                        and identifier.startswith('B0')):
                     identifier = c['id']
                 search_results.append(
                     {
@@ -1023,7 +1034,14 @@ class AlbumSearchTool(SearchTool):
             if recovered:
                 self.media.album = recovered
                 return True
-            if self.media.album is None and self.media.title:
+            # The enclosing gate already established the album is missing, so
+            # re-testing `is None` here only NARROWS it -- and wrongly. When
+            # this block was widened from `album is None` to is_missing_album()
+            # this line kept the old predicate, so an album that is missing but
+            # not literally None (an empty tag, or a bare "Unknown Album"
+            # without the brackets) fell past the fallback and aborted the
+            # search outright. Release matched those on the track title.
+            if self.media.title:
                 log.warn('Using track title since album title is missing.')
                 self.media.album = self.media.title
                 return True
