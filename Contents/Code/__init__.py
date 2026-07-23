@@ -229,19 +229,6 @@ def write_cover_sidecar(cover_path, image_bytes):
                 pass
 
 
-def thumb_version(url):
-    """
-        The trailing version stamp of a `/library/metadata/<rk>/thumb/<ver>`
-        URL, or None when the shape is not present. Plex stamps a thumb with the
-        epoch second it was written, so two thumbs sharing a stamp are the SAME
-        underlying image -- the tell used to spot an inherited poster below.
-    """
-    if not url:
-        return None
-    m = re.search(r'/thumb/(\d+)', url)
-    return m.group(1) if m else None
-
-
 def backup_selected_poster(helper):
     """
         Mirror the poster Plex is CURRENTLY showing to cover.jpg next to the
@@ -297,25 +284,12 @@ def backup_selected_poster(helper):
         if not m:
             log.warn('incipit poster-backup: no thumb in API response (first 200: %s)', text[:200]); return
         thumb = m.group(1)
-        # POISON GUARD: a fresh book with no poster of its own shows its ARTIST's
-        # art, and mirroring THAT into cover.jpg stamps the author photo onto the
-        # book -- 10 books hit this on the last rebuild (the first metadata pass
-        # fires before a real cover is selected, so the "current selection" is the
-        # inherited parent poster). Plex gives it away for free: an inheriting
-        # album carries the PARENT's thumb version stamp (verified live -- "The
-        # Stars, Like Dust" served /104369/thumb/1784489227 against its artist's
-        # /104346/thumb/1784489227, same stamp), while a real own cover gets its
-        # own write-time stamp. Equal stamps => inherited art, not a cover: skip
-        # WITHOUT marking done, so the true cover (a different stamp) still mirrors
-        # on the pass that selects it. `parentThumb` is capital-T, so the lowercase
-        # `thumb=` match above never picked it up by mistake.
+        # The ARTIST's poster URL, from the same response. Used by the poison
+        # guard at the first-write path below to recognise inherited art.
+        # `parentThumb` is capital-T, so the lowercase `thumb=` match above never
+        # picked it up by mistake.
         pm = re.search(r'parentThumb="([^"]*)"', text)
-        tv = thumb_version(thumb)
-        pv = thumb_version(pm.group(1)) if pm else None
-        if tv and pv and tv == pv:
-            log.info('incipit poster-backup: album is inheriting its artist poster '
-                     '(thumb stamp %s == parent) -- not a real cover, skip', tv)
-            return
+        parent_thumb = pm.group(1) if pm else None
     except Exception as e:
         log.error('incipit poster-backup: could not resolve the selected poster (%s)', e)
         return
@@ -388,6 +362,31 @@ def backup_selected_poster(helper):
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.info('incipit poster-backup: selection is our padded re-select of '
                  'this cover, skip'); return
+    # POISON GUARD (first write only). A fresh book with no poster of its own
+    # shows its ARTIST's art, and the first metadata pass fires before a real
+    # cover is selected -- so the "current selection" is the inherited author
+    # photo, and mirroring THAT seeds cover.jpg with it (10 books hit this on the
+    # last rebuild). Gate strictly on `not existing`: this is the ONE moment the
+    # poison can be born, and skipping it costs nothing because there is no cover
+    # to preserve. A book that already has a cover.jpg is past this window and
+    # takes the normal mirror above -- so an inherited-looking thumb stamp can
+    # never false-skip a real cover (the ground truth, not a version heuristic,
+    # decides). Compare the SELECTED bytes to the artist's actual poster bytes;
+    # identical means we are about to write the author photo, so refuse and let a
+    # later pass -- once a real cover is selected -- write the true one.
+    if not existing and parent_thumb:
+        try:
+            aurl = parent_thumb if parent_thumb.startswith('http') else PMS + parent_thumb
+            artist_bytes = HTTP.Request(aurl, timeout=8, cacheTime=0).content
+        except Exception as e:
+            log.error('incipit poster-backup: could not read artist poster for the '
+                      'poison check (%s) -- skipping this write to be safe', e)
+            return
+        if artist_bytes and len(artist_bytes) == len(selected) and artist_bytes == selected:
+            log.warn('incipit poster-backup: first cover would be the inherited ARTIST '
+                     'poster (byte-identical) -- refusing so the book is not poisoned; '
+                     'a real cover will mirror once selected')
+            return
     # Whoever chose the selection, it is what Plex shows, so it is what the
     # sidecar mirrors -- no ownership test, and no posters round-trip to make
     # one. The two byte checks above already mean this only fires on a real
