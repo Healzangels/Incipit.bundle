@@ -521,11 +521,27 @@ class AlbumUpdateTool(UpdateTool):
         raw = self.album_file_path()
         if not raw:
             return
+        # Only unquote the source that is actually URL-encoded. album_file_path
+        # returns media.filename (encoded) when it exists and otherwise
+        # part.file, which is a REAL filesystem path -- and this runs on the
+        # UPDATE media, where filename does not exist, so it was unquoting real
+        # paths unconditionally. That silently rewrites any directory holding a
+        # literal '%' followed by two same-case hex digits ("50%2F50" ->
+        # "50/50", "Mix%ab" -> "Mix\xab"), so the folder segments below are
+        # parsed from a path that does not exist and the series/volume come out
+        # wrong or empty. Same test album_file_path itself uses to choose.
+        encoded = False
         try:
-            path = urllib.unquote(raw)
-        except Exception as e:
-            log.error('incipit series-from-path failed: %s', e)
-            return
+            encoded = bool(self.media.filename)
+        except Exception:
+            encoded = False
+        path = raw
+        if encoded:
+            try:
+                path = urllib.unquote(raw)
+            except Exception as e:
+                log.error('incipit series-from-path failed: %s', e)
+                return
         # part.file is a real (unicode) path; media.filename is url-encoded str.
         # Decode str->unicode where needed; ignore if already unicode/py3 str.
         try:

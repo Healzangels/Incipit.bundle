@@ -577,6 +577,15 @@ class AlbumSearchTool(SearchTool):
             sc_authors = sc.get('authors')
             if isinstance(sc_authors, (str, unicode)):
                 sc_authors = [sc_authors]
+            elif isinstance(sc_authors, dict):
+                # The SINGULAR object variant, {"name": ...}, rather than a
+                # list of them. Without this branch Py2 iterates the dict's
+                # KEYS, so the loop below sees the literal string "name",
+                # accepts it as an author, and the search goes out with
+                # &author=name -- scoring every real candidate down on the
+                # author component and potentially pushing the correct match
+                # below the acceptance floor.
+                sc_authors = [sc_authors]
             names = []
             for a in (sc_authors or []):
                 if isinstance(a, dict):

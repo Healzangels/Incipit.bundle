@@ -151,6 +151,10 @@ def local_cover_bytes(helper):
 # that namespace is exactly what vfs_fruit vetoes (see write_cover_sidecar).
 COVER_TMP_SUFFIX = '.incipit-tmp'
 COVER_STAGE_PREFIX = 'incipit-cover-'
+# Per-INVOCATION counter for the staging name (see write_cover_sidecar). A
+# one-element list rather than a bare int so the increment mutates in place and
+# needs no `global` statement -- the same reason recent_work_memo is a dict.
+COVER_STAGE_SEQ = [0]
 
 
 def write_cover_sidecar(cover_path, image_bytes):
@@ -180,12 +184,23 @@ def write_cover_sidecar(cover_path, image_bytes):
 
         Returns True when the cover is in place.
     """
-    dest_tmp = cover_path + COVER_TMP_SUFFIX
-    # Per-destination staging name so two album updates cannot collide.
+    # Unique per INVOCATION, not per destination. A per-destination name gave
+    # every writer of the SAME cover.jpg one shared stage file AND one shared
+    # dest_tmp, so two update() passes for one album -- two tracks, or one
+    # arriving just past the 60s memo TTL while the first is still copying ~1MB
+    # over SMB -- could interleave: B's save_data_item rewrites the stage under
+    # A's copy, or A's finally-remove unlinks it under B. The rename is atomic,
+    # so what got PUBLISHED as cover.jpg was a truncated JPEG, silently, with
+    # no failure logged. Distinct names make concurrent writers independent;
+    # the atomic rename still picks a single winner.
+    COVER_STAGE_SEQ[0] += 1
+    unique = '%d-%d' % (int(time() * 1000), COVER_STAGE_SEQ[0])
     # isinstance guard: .encode on a BYTE str implicitly decodes as ascii first
     # and dies on any non-ASCII path -- the same Py2 trap as quote_param.
     key = cover_path if isinstance(cover_path, str) else cover_path.encode('utf8')
-    stage_name = COVER_STAGE_PREFIX + hashlib.sha1(key).hexdigest()[:12] + '.jpg'
+    stage_name = (COVER_STAGE_PREFIX + hashlib.sha1(key).hexdigest()[:12]
+                  + '-' + unique + '.jpg')
+    dest_tmp = cover_path + '.' + unique + COVER_TMP_SUFFIX
     staged = None
     try:
         Core.storage.save_data_item(stage_name, image_bytes)
