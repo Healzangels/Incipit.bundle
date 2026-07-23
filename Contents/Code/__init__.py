@@ -567,7 +567,7 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
         return False
 
 
-def converge_author_art(helper, target_url, other_url, tag):
+def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=False):
     """
         Make the image at `target_url` the selected poster for this author,
         respecting ownership -- the shared engine behind pin (target=Hardcover)
@@ -604,6 +604,24 @@ def converge_author_art(helper, target_url, other_url, tag):
     if state is None:
         return
     rk, selected_key, keys = state
+    # Strict mode (the unpin direction): act only on a selection this agent
+    # demonstrably UPLOADED. A metadata:// container key is ambiguous by
+    # construction -- the container may have defaulted to it, or the user may
+    # have clicked it, and Plex exposes nothing that tells the two apart. The
+    # loose test counted every incipit metadata:// key as ours, so unpin ran
+    # for authors that were never pinned at all: 69 uploads in one day against
+    # 233 no-ops, each one converting a container selection into a permanent
+    # upload:// poster, and each one capable of overwriting a poster the user
+    # had chosen by hand. Undo only what we can prove we did.
+    #
+    # The case this gives up -- reverting a pin that only ever existed as a
+    # fresh-scan container prune -- largely self-corrects: with the author off
+    # the pref, the next scan offers both images again and validate_keys
+    # selects the secondary, which is what unpin wanted anyway.
+    if own_uploads_only and not (selected_key or '').startswith('upload'):
+        log.info('%s: selection is not one of our uploads -- leaving it', tag)
+        mark_done(tag, guid, target_url)
+        return
     owned_shas = []
     target_bytes = None
     if selected_key and selected_key.startswith('upload'):
@@ -675,11 +693,25 @@ def offer_secondary_author_poster(helper, valid_posters):
 def unpin_hardcover_author_art(helper):
     """
         Unpin direction: the author is NOT on the pref (any more), so make the
-        Audible photo (`thumb_secondary`) the selection again -- but only when
-        the current selection is agent-owned, so a user's custom upload
-        survives every refresh. Ownership is key-based (agent metadata:// keys
-        count), which makes FRESH-SCAN pins revertable too -- the old
-        byte-sha-only guard was blind to them, proven live.
+        Audible photo (`thumb_secondary`) the selection again -- but ONLY when
+        the current selection is one this agent uploaded.
+
+        There is no "was this author ever pinned" state anywhere, so this runs
+        for every author absent from the pref, which by default is every author
+        in the library. Under the old key-based ownership test that meant any
+        incipit metadata:// selection counted as ours, so unpin did real work
+        for authors that were never pinned -- 69 uploads in a single day
+        against 233 no-ops -- converting container selections into permanent
+        upload:// posters and, worse, silently replacing a poster the user had
+        picked in the Plex UI. A container key cannot be told apart from a
+        deliberate click; Plex exposes no signal for it.
+
+        So this direction now undoes only what it can prove it did. The pin
+        path's own uploads are still revertable, which is the case that
+        matters. A pin that existed only as a fresh-scan container prune is
+        not reverted here, but that self-corrects: with the author off the
+        pref, the next scan offers both images and validate_keys selects the
+        secondary -- the outcome unpin was reaching for.
 
         Needs only the TARGET image: an author whose record lost its Hardcover
         image can still be reverted to the Audible one.
@@ -688,7 +720,7 @@ def unpin_hardcover_author_art(helper):
         return
     converge_author_art(
         helper, helper.thumb_secondary, helper.thumb,
-        'incipit author-art-unpin'
+        'incipit author-art-unpin', own_uploads_only=True
     )
 
 
