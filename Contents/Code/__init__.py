@@ -273,6 +273,8 @@ def backup_selected_poster(helper):
     try:
         url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
         text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
+        if guid_lookup_is_ambiguous(text, 'incipit poster-backup'):
+            return
         m = re.search(r'thumb="([^"]*)"', text)
         if not m:
             log.warn('incipit poster-backup: no thumb in API response (first 200: %s)', text[:200]); return
@@ -391,6 +393,35 @@ def fetch_url_bytes(url):
         return None
 
 
+def guid_lookup_is_ambiguous(text, tag):
+    """
+        True when /library/all?guid= matched MORE THAN ONE item.
+
+        Both callers scrape the FIRST regex hit out of a SERVER-WIDE response,
+        so when one agent guid exists in two library sections -- exactly the
+        state during a rebuild, where an old and a new section coexist over the
+        same media -- they silently act on whichever item happens to sort first:
+        reading one item's selected poster and mirroring it into the other's
+        folder, or POSTing an upload to the copy nobody is looking at. Every
+        later refresh repeats it, because the state read never matches what was
+        changed, so it never converges and never errors.
+
+        Refusing is the only honest answer -- this response carries nothing that
+        says which item belongs to the library being updated. One warn line
+        naming the duplicates beats silently mirroring the wrong one.
+    """
+    distinct = []
+    for k in re.findall(r'ratingKey="([0-9]+)"', text):
+        if k not in distinct:
+            distinct.append(k)
+    if len(distinct) > 1:
+        log.warn('%s: guid resolves to %s items (%s) -- refusing to guess which '
+                 'copy is this library\'s; remove the duplicate section',
+                 tag, len(distinct), ', '.join(distinct[:4]))
+        return True
+    return False
+
+
 def read_poster_state(guid, tag):
     """
         (ratingKey, selected_key, all_poster_keys) for the item with `guid`, via
@@ -402,6 +433,8 @@ def read_poster_state(guid, tag):
     try:
         url = PMS + '/library/all?guid=' + urllib.quote(guid)
         text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
+        if guid_lookup_is_ambiguous(text, tag):
+            return None
         m = re.search(r'ratingKey="([0-9]+)"', text)
         if not m:
             log.info('%s: no ratingKey for this item yet (fresh scan?)', tag)

@@ -836,7 +836,24 @@ class AlbumSearchTool(SearchTool):
         if track_title:
             track_title = strip_part_index(track_title)
         log.debug('incipit track title resolved: %s' % str(track_title))
-        if track_title and track_title != self.normalizedName:
+        # Suppress the widening signal when the track title adds nothing new.
+        #
+        # The test used to be `track_title != normalizedName` alone, which held
+        # while normalizedName came from the ALBUM tag: a junk album tag and a
+        # junk track title were equal, so nothing was sent. Once the sidecar
+        # began supplying the title, normalizedName became the GOOD title, the
+        # two stopped matching, and the junk track title started riding along as
+        # a widening signal -- on exactly the badly-tagged books the sidecar
+        # exists to rescue, and reopening a leak this file has closed twice.
+        # Comparing against the ALBUM TAG as well keeps a track title that
+        # merely repeats the scanner's hint out of the query, whatever the
+        # resolved title turned out to be.
+        album_tag = self.media.album or ''
+        redundant = (
+            track_title == self.normalizedName
+            or track_title == strip_part_index(album_tag)
+        )
+        if track_title and not redundant:
             extra += '&trackTitle=' + quote_param(track_title)
 
         return extra

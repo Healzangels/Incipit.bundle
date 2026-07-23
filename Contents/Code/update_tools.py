@@ -83,6 +83,19 @@ def strip_trailing_series(title):
 # Libraries sort past a leading article anyway, so strip it from the SORT KEY
 # only -- the series shown on the book stays exactly as the provider gave it.
 SERIES_SORT_ARTICLE_RE = re.compile(r'^\s*(?:the|a|an)\s+', re.IGNORECASE)
+SERIES_KEY_STRIP_RE = re.compile(r'[^a-z0-9]+')
+
+
+def series_key(name):
+    """
+        Comparison key for two spellings of one series name.
+
+        Folds the leading article and all punctuation/spacing, so "The
+        Spellmonger" and "Spellmonger" -- the split this bundle already
+        normalises for sort titles -- compare equal here too.
+    """
+    folded = SERIES_SORT_ARTICLE_RE.sub('', name or '').lower()
+    return SERIES_KEY_STRIP_RE.sub('', folded)
 
 
 # A book folder that leads with a track/series number: "27 - Cube Route",
@@ -565,7 +578,16 @@ class AlbumUpdateTool(UpdateTool):
         derived_series = folder_wins or not self.series
         if derived_series:
             self.series = series_name
-        if folder_wins or not self.volume:
+        # Only take the folder's NUMBER when that number belongs to the series
+        # actually being stored. When the provider supplied the series name and
+        # we kept it, the folder may file this book under a DIFFERENT series --
+        # a parent series, or a sibling sub-series -- and grafting the folder's
+        # index onto the provider's name yields a book number from a series the
+        # book is not in. Observed: a "Cemeteries of Amalo" record numbered
+        # "Book 2" out of a "Chronicles of Osreth" folder, which shelves it on
+        # top of that sub-series' real book 2.
+        series_agrees = derived_series or series_key(series_name) == series_key(self.series)
+        if (folder_wins or not self.volume) and series_agrees:
             self.volume = self.volume_prefix(number)
         # Now that the series name is known, strip a bare "(<Series>)" the
         # provider left in the title so the display + sort titles are clean.
@@ -576,10 +598,26 @@ class AlbumUpdateTool(UpdateTool):
             stripped = re.sub(pattern, '', self.title, flags=re.IGNORECASE).strip()
             if stripped:
                 self.title = stripped
-        log.warn(
-            'incipit album: no provider series; derived "%s, %s" from the '
-            'folder path for "%s"', series_name, self.volume, self.title
-        )
+        # Report what actually happened. This line used to claim "no provider
+        # series" unconditionally, so the two paths that keep the PROVIDER's
+        # name and fill only the number read as though the folder had supplied
+        # everything -- hiding the very disagreement worth seeing.
+        if derived_series:
+            log.warn(
+                'incipit album: series from the folder path -- "%s, %s" for "%s"',
+                self.series, self.volume, self.title
+            )
+        elif series_agrees:
+            log.warn(
+                'incipit album: kept provider series "%s"; folder supplied the '
+                'number "%s" for "%s"', self.series, self.volume, self.title
+            )
+        else:
+            log.warn(
+                'incipit album: folder series "%s" disagrees with provider '
+                'series "%s" -- keeping the provider series and IGNORING the '
+                'folder number for "%s"', series_name, self.series, self.title
+            )
 
     def set_metadata_sort_title(self):
         """
