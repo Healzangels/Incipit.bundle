@@ -60,7 +60,7 @@ fi
 # the capture spans version chars (digits, dots, and a semver-style -suffix) so a
 # tagged build like 1.3.95-rc1 still compares equal instead of a spurious FAIL.
 LAST_BANNER="$(grep -aE 'Incipit Audiobooks Agent v[0-9]' "$LOG" | tail -1 || true)"
-LOGGED="$(printf '%s' "$LAST_BANNER" | sed -n 's/.*Incipit Audiobooks Agent v\([0-9][0-9A-Za-z.-]*\).*/\1/p')"
+LOGGED="$(printf '%s' "$LAST_BANNER" | sed -n 's/.*Incipit Audiobooks Agent v\([0-9][0-9A-Za-z.]*\(-[0-9A-Za-z][0-9A-Za-z.]*\)*\).*/\1/p')"
 
 if [ "$LOGGED" = "$EXPECTED" ]; then
 	echo "OK: agent loaded cleanly -- Incipit Audiobooks Agent v$EXPECTED"
