@@ -229,6 +229,115 @@ def write_cover_sidecar(cover_path, image_bytes):
                 pass
 
 
+def promote_picked_cover(helper):
+    """
+        PART 2: a deliberate pick of an OFFERED online cover becomes the local
+        cover. With prefer_local_cover on, cover.jpg is the DEFAULT but the
+        operator can still PICK the online square/portrait we offer -- and a
+        forced Refresh should make that pick stick, by copying it INTO cover.jpg
+        so the local cover IS the pick and the rest of the pipeline asserts it
+        rather than fighting it.
+
+        Narrow by construction, so it can never clobber curated work:
+          - forced refresh + prefer_local_cover only;
+          - fires only when the LIVE selection is byte-identical to a cover WE
+            offered (helper.thumb / thumb_secondary). A custom upload dragged in
+            never matches -> untouched (backup_selected_poster preserves it); a
+            cover.jpg replaced on disk is not our offered cover -> untouched, so
+            the disk still wins;
+          - only when the pick DIFFERS from the current cover.jpg (steady state
+            does nothing);
+          - never the artist photo (the same poison check the backup uses).
+    """
+    if not (Prefs['prefer_local_cover'] and helper.force):
+        return
+    offered = []
+    for candidate_url in (helper.thumb, helper.thumb_secondary):
+        if candidate_url:
+            offered.append(candidate_url)
+    if not offered:
+        return
+    tag = 'incipit promote-pick'
+    # cover.jpg path (same resolution as the backup below).
+    try:
+        raw = helper.album_file_path()
+        if not raw:
+            return
+        path = urllib.unquote(raw).decode('utf8') if '%' in raw else raw
+        if '/' not in path:
+            return
+        cover_path = path.rsplit('/', 1)[0] + '/cover.jpg'
+    except Exception as e:
+        log.error('%s: path resolve failed (%s)', tag, e)
+        return
+    # Live selection + the artist poster (for the poison check), one round-trip.
+    try:
+        url = PMS + '/library/all?guid=' + urllib.quote(helper.metadata.guid)
+        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
+        if guid_lookup_is_ambiguous(text, tag):
+            return
+        m = re.search(r'thumb="([^"]*)"', text)
+        if not m:
+            return
+        thumb = m.group(1)
+        pm = re.search(r'parentThumb="([^"]*)"', text)
+        parent_thumb = pm.group(1) if pm else None
+    except Exception as e:
+        log.error('%s: could not resolve the selection (%s)', tag, e)
+        return
+    # Per-track collapse, keyed on the selection (see recent_work_memo).
+    if not should_run(tag, helper.metadata.guid, thumb, 600):
+        return
+    # The selected poster's bytes.
+    try:
+        turl = thumb if thumb.startswith('http') else PMS + thumb
+        selected = HTTP.Request(turl, timeout=8, cacheTime=0).content
+    except Exception as e:
+        log.error('%s: could not download the selection (%s)', tag, e)
+        return
+    if not selected:
+        return
+    # Current cover.jpg. A RAISED read fails closed (never overwrite a cover we
+    # could not see); a genuinely-absent file reads falsy and is fine to create.
+    try:
+        existing = Core.storage.load(cover_path)
+    except Exception as e:
+        log.error('%s: cover.jpg unreadable at %s (%s) -- skipping', tag, cover_path, e)
+        return
+    if existing and len(existing) == len(selected) and existing == selected:
+        mark_done(tag, helper.metadata.guid, thumb)
+        return
+    # Is the selection one of OUR offered covers? Only then is it a promotable
+    # pick; a custom upload or a replaced cover.jpg matches nothing here.
+    is_offered = False
+    for candidate_url in offered:
+        try:
+            resp = make_request(candidate_url)
+            offered_bytes = resp.content if resp else None
+        except Exception:
+            offered_bytes = None
+        if offered_bytes and len(offered_bytes) == len(selected) and offered_bytes == selected:
+            is_offered = True
+            break
+    if not is_offered:
+        return
+    # Poison guard: never make the artist photo the local cover, even on a pick.
+    if parent_thumb:
+        try:
+            aurl = parent_thumb if parent_thumb.startswith('http') else PMS + parent_thumb
+            artist_bytes = HTTP.Request(aurl, timeout=8, cacheTime=0).content
+        except Exception:
+            artist_bytes = None
+        if artist_bytes and len(artist_bytes) == len(selected) and artist_bytes == selected:
+            log.warn('%s: picked cover is the artist photo -- refusing to write it', tag)
+            mark_done(tag, helper.metadata.guid, thumb)
+            return
+    if write_cover_sidecar(cover_path, selected):
+        mark_done(tag, helper.metadata.guid, thumb)
+        log.warn('%s: promoted the picked online cover to %s (%s bytes) -- now local',
+                 tag, cover_path, len(selected))
+
+
 def backup_selected_poster(helper):
     """
         Mirror the poster Plex is CURRENTLY showing to cover.jpg next to the
@@ -1458,6 +1567,14 @@ class AudiobookAlbum(Agent.Album):
         # For books with no local cover, ours is still the only option -> used.
         prefer_local = Prefs['prefer_local_cover']
         primary_order = 1 if prefer_local else 0
+
+        # PART 2: a deliberate pick of an offered online cover becomes local.
+        # Runs BEFORE the local-cover block so, when the operator has picked the
+        # square/portrait we offer, it is copied into cover.jpg first and the
+        # block below then reads and asserts it. No-op unless prefer_local + force
+        # + the live selection byte-matches a cover WE offered (never a custom
+        # upload, never a hand-placed cover.jpg).
+        promote_picked_cover(helper)
 
         # LOCAL COVER (Elevated-policy attempt). Prior builds (1.3.23-1.3.27)
         # proved Proxy.LocalFile is REJECTED by the posters container and the
