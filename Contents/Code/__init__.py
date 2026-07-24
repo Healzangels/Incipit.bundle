@@ -175,18 +175,42 @@ def image_dimensions(data):
         if data[:2] != '\xff\xd8':
             return None
         # Walk the JPEG segments to the SOFn frame header, as measure_image does.
+        #
+        # STRICT walk: every step must land on a real marker. An earlier version
+        # resynced with `index += 1` when it found a non-0xff byte, which scans
+        # byte-by-byte into ENTROPY-CODED payload and happily accepts the first
+        # 0xff 0xc0..0xcf pair it finds there as a frame header -- returning some
+        # other number entirely (measured: 100x100 for a 1000x1600 image). Since
+        # the ONLY consumer decides whether to override the operator's cover, a
+        # confidently-wrong answer is far worse than none: give up instead, which
+        # returns None -> not portrait -> the local cover keeps its precedence.
         index = 2
         total = len(data)
         while index < total - 9:
             if data[index] != '\xff':
+                return None
+            marker = ord(data[index + 1])
+            # Padding fill bytes: a run of 0xff before the real marker byte.
+            if marker == 0xff:
                 index += 1
                 continue
-            marker = ord(data[index + 1])
             # SOFn frames carry the dimensions; skip the non-frame markers.
             if 0xc0 <= marker <= 0xcf and marker not in (0xc4, 0xc8, 0xcc):
                 height, width = struct.unpack('>HH', data[index + 5:index + 9])
                 return (int(width), int(height))
+            # Standalone markers carry no length payload to skip over.
+            if marker in (0xd8, 0xd9) or 0xd0 <= marker <= 0xd7:
+                index += 2
+                continue
+            # SOS (0xda) is followed by entropy-coded data, not another parseable
+            # segment -- the dimensions always precede it, so reaching it means we
+            # will not find a real SOFn.
+            if marker == 0xda:
+                return None
             seg = struct.unpack('>H', data[index + 2:index + 4])[0]
+            # A length below 2 cannot be a real segment and would stall the walk.
+            if seg < 2:
+                return None
             index += 2 + seg
     except Exception as e:
         log.warn('incipit cover: could not measure local cover (%s)', e)
@@ -1689,16 +1713,21 @@ class AudiobookAlbum(Agent.Album):
                         'incipit cover: local cover.jpg is PORTRAIT (print jacket?) '
                         '-- deferring to the square online cover as the default'
                     )
-                    cover_bytes = None
                     deferred_portrait_local = True
                 if cover_bytes:
                     try:
+                        # A DEFERRED portrait cover is still OFFERED, just not the
+                        # default: dropping it entirely left the operator unable to
+                        # pick their own art back, which is the very bug the
+                        # always-offer comment below records as already fixed.
                         helper.metadata.posters[local_key] = Proxy.Media(
-                            cover_bytes, sort_order=0
+                            cover_bytes,
+                            sort_order=1 if deferred_portrait_local else 0
                         )
-                        helper.metadata.posters.validate_keys([local_key])
-                        log.warn('incipit cover: LOCAL cover set as the default poster')
-                        local_set = True
+                        if not deferred_portrait_local:
+                            helper.metadata.posters.validate_keys([local_key])
+                            log.warn('incipit cover: LOCAL cover set as the default poster')
+                            local_set = True
                     except Exception as e:
                         log.error('incipit cover: Proxy.Media(local) failed (%s)', e)
 
@@ -1768,7 +1797,19 @@ class AudiobookAlbum(Agent.Album):
         # captures it to cover.jpg, so it survives a library rebuild). The old
         # backup-first order clobbered a freshly-dropped cover.jpg with the
         # previous selection before prefer_local could ever serve it.
-        if Prefs['backup_poster_to_cover'] and helper.force:
+        #
+        # NOT when we deferred a portrait local cover. That path deliberately
+        # leaves the ONLINE cover as the selection, and this mirror has no
+        # ownership test ("whoever chose the selection, it is what Plex shows"),
+        # so it would write the online bytes straight over the operator's
+        # cover.jpg -- destroying a hand-curated file on disk AND in Plex. The
+        # poison guard is first-write-only, so an existing cover is unprotected.
+        # Deferring is a DISPLAY preference; it must never edit the media folder.
+        if (
+            Prefs['backup_poster_to_cover']
+            and helper.force
+            and not deferred_portrait_local
+        ):
             backup_selected_poster(helper)
         # Rating.
         helper.set_metadata_rating()
