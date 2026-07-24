@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import struct
 import urllib
 # Import internal tools
 from _version import version
@@ -145,6 +146,68 @@ def local_cover_bytes(helper):
     except Exception as e:
         log.warn('incipit cover: Core.storage read failed (%s)', e)
     return None
+
+
+# How much TALLER than wide a local cover must be before it reads as a PRINT
+# scan rather than audiobook art. Plex music art is square, and every real
+# audiobook cover is square-ish, so a clearly portrait cover.jpg in a book folder
+# is almost always an upstream pipeline mistake (a print edition's jacket written
+# alongside a wrong-edition sidecar) rather than a deliberate pick. Deliberately
+# generous -- 1.15 lets a slightly-off square (a 1000x1100 rip) still count as
+# intended art, and only flags an unmistakable portrait (a 1600x2400 jacket).
+PORTRAIT_RATIO = 1.15
+
+
+def image_dimensions(data):
+    """
+        (width, height) for JPEG or PNG BYTES, or None when undeterminable.
+
+        Bytes rather than a URL: the local cover.jpg is already in memory here,
+        and measure_image (update_tools) fetches a URL and handles JPEG only.
+        Every failure returns None so an unreadable image simply keeps the
+        existing behaviour instead of changing which poster is used.
+    """
+    try:
+        if data[:8] == '\x89PNG\r\n\x1a\n':
+            # IHDR width/height are the two big-endian longs at offset 16.
+            width, height = struct.unpack('>II', data[16:24])
+            return (int(width), int(height))
+        if data[:2] != '\xff\xd8':
+            return None
+        # Walk the JPEG segments to the SOFn frame header, as measure_image does.
+        index = 2
+        total = len(data)
+        while index < total - 9:
+            if data[index] != '\xff':
+                index += 1
+                continue
+            marker = ord(data[index + 1])
+            # SOFn frames carry the dimensions; skip the non-frame markers.
+            if 0xc0 <= marker <= 0xcf and marker not in (0xc4, 0xc8, 0xcc):
+                height, width = struct.unpack('>HH', data[index + 5:index + 9])
+                return (int(width), int(height))
+            seg = struct.unpack('>H', data[index + 2:index + 4])[0]
+            index += 2 + seg
+    except Exception as e:
+        log.warn('incipit cover: could not measure local cover (%s)', e)
+    return None
+
+
+def local_cover_is_portrait(data):
+    """
+        True when the local cover is clearly TALLER than wide (a print jacket).
+
+        Only a confident yes: an unmeasurable image returns False, so the local
+        cover keeps its normal precedence unless we positively know it is
+        portrait.
+    """
+    dims = image_dimensions(data)
+    if not dims:
+        return False
+    width, height = dims
+    if width <= 0 or height <= 0:
+        return False
+    return (float(height) / float(width)) >= PORTRAIT_RATIO
 
 
 # Destination temp name for the sidecar write. Deliberately NOT "._"-prefixed:
@@ -1595,6 +1658,10 @@ class AudiobookAlbum(Agent.Album):
         # readable cover.jpg and NO poster at all on a normal incremental scan.
         # The local cover does not depend on the online one existing.
         local_set = False
+        # Set when a PORTRAIT local cover.jpg was skipped in favour of the square
+        # online cover, so the force-select below does not simply re-read the file
+        # and re-impose it, and the online cover keeps the default slot.
+        deferred_portrait_local = False
         # Hoisted so the bytes read below can be handed to select_local_cover
         # instead of it re-reading the same file in the same pass. Stays None
         # on every path that does not read, so the callee still falls back.
@@ -1610,6 +1677,20 @@ class AudiobookAlbum(Agent.Album):
                 local_set = True
             else:
                 cover_bytes = local_cover_bytes(helper)
+                # A clearly PORTRAIT cover.jpg is a print jacket, not audiobook
+                # art -- the signature of an upstream pipeline that matched a
+                # print edition (the same mismatch that writes a wrong-edition
+                # ASIN into the sidecar). Plex music art is square, and the API
+                # offers a real square cover, so defer to it rather than making
+                # the portrait scan the default. Square/near-square local covers
+                # (including every hand-curated one) are untouched.
+                if cover_bytes and helper.thumb and local_cover_is_portrait(cover_bytes):
+                    log.warn(
+                        'incipit cover: local cover.jpg is PORTRAIT (print jacket?) '
+                        '-- deferring to the square online cover as the default'
+                    )
+                    cover_bytes = None
+                    deferred_portrait_local = True
                 if cover_bytes:
                     try:
                         helper.metadata.posters[local_key] = Proxy.Media(
@@ -1635,8 +1716,12 @@ class AudiobookAlbum(Agent.Album):
             if helper.thumb not in helper.metadata.posters or helper.force:
                 thumb_data = make_request(helper.thumb)
                 if thumb_data is not None:
+                    # When a portrait local cover was deferred, this square cover
+                    # IS the default -- it must not keep the demoted slot the
+                    # prefer_local setting assigned before we measured the file.
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
-                        thumb_data, sort_order=primary_order
+                        thumb_data,
+                        sort_order=0 if deferred_portrait_local else primary_order
                     )
             # SELECT the online cover only when there is no local cover to be the
             # default. With a local cover set it is merely OFFERED, not selected;
@@ -1652,7 +1737,9 @@ class AudiobookAlbum(Agent.Album):
         # cover.jpg takes effect on Refresh Metadata even on an ALREADY-scanned
         # book -- the posters-container path above only wins on a fresh scan.
         # SMB-safe (writes to Plex's metadata store, not the media folder).
-        if Prefs['prefer_local_cover'] and helper.force:
+        # Skipped when a portrait local cover was deferred: re-reading it here
+        # would re-impose the print jacket the block above deliberately declined.
+        if Prefs['prefer_local_cover'] and helper.force and not deferred_portrait_local:
             select_local_cover(helper, cover_bytes)
         # Back up the currently-selected poster to cover.jpg (opt-in). Runs
         # AFTER the select: select_local_cover is ownership-guarded (a user's
