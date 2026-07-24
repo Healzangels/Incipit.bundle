@@ -893,11 +893,21 @@ class AlbumSearchTool(SearchTool):
         except Exception as e:
             log.error('incipit media log failed: %s', e)
 
-        # Album duration (ms) = sum of the track part durations. In the legacy
-        # album media object `tracks` is a dict keyed by track index, so iterate
-        # its values (iterating the dict itself yields string keys). Each track
-        # exposes items -> parts, each part carrying its own duration; any
-        # missing link raises and is caught, leaving duration None.
+        # Album duration (ms) = sum of the track part durations -- but ONLY when
+        # EVERY part reports a real one. In the legacy album media object `tracks`
+        # is a dict keyed by track index, so iterate its values (iterating the dict
+        # itself yields string keys). Each track exposes items -> parts, each part
+        # carrying its own duration; any missing link raises and is caught, leaving
+        # duration None.
+        #
+        # Completeness matters on a MULTI-FILE book mid-analysis: Plex returns a
+        # real duration for the files it has analyzed and nothing (or its -1
+        # sentinel) for the rest. Summing only the analyzed parts yields a too-SHORT
+        # total, which then reads as a >5% (or >25%) runtime mismatch against the
+        # correct edition -- turning the duration veto, the main wrong-edition
+        # guard, ONTO the right match. A partial sum is worse than none, so if any
+        # part is missing or non-positive, withhold duration entirely and fall back
+        # to the safe title+author path (which cannot auto-apply on its own).
         duration = None
         try:
             tracks = self.media.tracks
@@ -906,21 +916,26 @@ class AlbumSearchTool(SearchTool):
             except Exception:
                 track_iter = tracks
             total = 0
+            complete = True
             for track in (track_iter or []):
                 for item in (track.items or []):
                     for part in (item.parts or []):
-                        # Sum each part independently: one malformed duration
-                        # (a non-integer string) must skip only that part, not
-                        # abort the whole album sum -- which would drop the
-                        # duration (None) and silently lose the duration veto,
-                        # the main wrong-edition guard.
+                        # Parts expose duration as a string; Plex reports -1 (or
+                        # nothing) for a not-yet-analyzed file. A malformed value
+                        # counts as missing, not zero, so it marks the sum partial.
+                        part_ms = 0
                         try:
                             if part.duration:
-                                # Parts expose duration as a string here.
-                                total += int(part.duration)
+                                part_ms = int(part.duration)
                         except Exception:
-                            continue
-            if total:
+                            part_ms = 0
+                        if part_ms > 0:
+                            total += part_ms
+                        else:
+                            complete = False
+            # Only trust the sum when no part was missing -- a partial (too-short)
+            # total would wrongly veto the correct edition.
+            if total and complete:
                 duration = total
         except Exception as e:
             log.error('incipit duration probe failed: %s', e)
