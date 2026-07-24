@@ -49,24 +49,6 @@
         "default": "true"
     },
     {
-        "id": "strip_series_from_author",
-        "label": "Strip a trailing series from author names: \"Author (Series)\" -> \"Author\"",
-        "type": "bool",
-        "default": "true"
-    },
-    {
-        "id": "match_artist_from_folder",
-        "label": "Recover the author from the folder path when the artist tag matches nothing (e.g. a narrator tagged as the artist)",
-        "type": "bool",
-        "default": "true"
-    },
-    {
-        "id": "title_from_folder_when_missing",
-        "label": "Recover the book title from the folder when the album tag is missing or \"[Unknown Album]\"",
-        "type": "bool",
-        "default": "true"
-    },
-    {
         "id": "series_from_folder_wins",
         "label": "Trust the folder for series + book number, even when the provider supplies one (fixes a series whose books disagree, e.g. sub-series vs parent series)",
         "type": "bool",

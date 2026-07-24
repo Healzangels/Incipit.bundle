@@ -550,9 +550,10 @@ class AlbumSearchTool(SearchTool):
     def folder_title(self):
         """
             A title recovered from the book folder, or None. Gated on the
-            title_from_folder_when_missing pref.
+            Always on: it only reads the folder when there is a filename to
+            read it from, and the caller only asks when the tag is unusable.
         """
-        if not (self.prefs['title_from_folder_when_missing'] and self.media.filename):
+        if not self.media.filename:
             return None
         try:
             path = urllib.unquote(self.media.filename).decode('utf8')
@@ -567,7 +568,7 @@ class AlbumSearchTool(SearchTool):
             tag is absent or Plex's "[Unknown Album]" placeholder, recover the
             title from the book folder (see folder_title_from_path) so a book
             with no album tag still matches instead of searching for the literal
-            "[Unknown Album]". Gated on the title_from_folder_when_missing pref.
+            "[Unknown Album]".
             Memoized so the recovery logs once. Falls back to the track-title
             tag, then whatever album value we have.
         """
@@ -722,17 +723,16 @@ class AlbumSearchTool(SearchTool):
         # appears in the file path, so it can NEVER override a correctly tagged
         # album. get_library_roots is blocked at search time, so confirm against
         # media.filename segments directly rather than deriving from the root.
-        if self.prefs['match_artist_from_folder']:
-            parent_author = self.parent_author_in_path(author)
-            if parent_author:
-                # warn-level so this correction is visible at the default log
-                # level (WARN): it means the ALBUMARTIST tag is wrong and was
-                # worked around -- a rare, actionable event, unlike routine info.
-                log.warn(
-                    'incipit album: tag author "%s" is not the on-disk author; '
-                    'using matched parent author "%s"', author, parent_author
-                )
-                author = parent_author
+        parent_author = self.parent_author_in_path(author)
+        if parent_author:
+            # warn-level so this correction is visible at the default log
+            # level (WARN): it means the ALBUMARTIST tag is wrong and was
+            # worked around -- a rare, actionable event, unlike routine info.
+            log.warn(
+                'incipit album: tag author "%s" is not the on-disk author; '
+                'using matched parent author "%s"', author, parent_author
+            )
+            author = parent_author
 
         if not author:
             try:
@@ -795,7 +795,7 @@ class AlbumSearchTool(SearchTool):
             "(Discworld)" tanks author-similarity and drags the whole match below
             the auto-match threshold.
         """
-        if author and self.prefs['strip_series_from_author']:
+        if author:
             return self.clear_series_text(author)
         return author or ''
 
@@ -1328,8 +1328,7 @@ class ArtistSearchTool(SearchTool):
         candidates = []
         for part in MULTI_AUTHOR_RE.split(source):
             cleaned = self.clear_contributor_text(part)
-            if self.prefs['strip_series_from_author']:
-                cleaned = self.clear_series_text(cleaned)
+            cleaned = self.clear_series_text(cleaned)
             cleaned = cleaned.strip()
             if cleaned and cleaned not in candidates:
                 candidates.append(cleaned)
@@ -1427,17 +1426,17 @@ class ArtistSearchTool(SearchTool):
                 )
 
         # Strip a trailing "(Series)" qualifier so a phantom "Author (Series)"
-        # artist matches the real author. Opt-out via the pref for anyone who
-        # would rather leave such artists unmatched.
-        if self.prefs['strip_series_from_author']:
-            series_cleaned = self.clear_series_text(self.media.artist)
-            if series_cleaned != self.media.artist:
-                log.info(
-                    'Stripped series qualifier from author: "%s" -> "%s"',
-                    self.media.artist,
-                    series_cleaned
-                )
-                self.media.artist = series_cleaned
+        # artist matches the real author. Unconditional: it only rewrites a name
+        # that CARRIES such a qualifier, and leaving one in place merely tanks
+        # author similarity -- there is no library for which keeping it is better.
+        series_cleaned = self.clear_series_text(self.media.artist)
+        if series_cleaned != self.media.artist:
+            log.info(
+                'Stripped series qualifier from author: "%s" -> "%s"',
+                self.media.artist,
+                series_cleaned
+            )
+            self.media.artist = series_cleaned
 
     def artist_path(self):
         """The decoded file path for this artist's album, or None. The artist

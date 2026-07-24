@@ -1064,14 +1064,12 @@ class AudiobookArtist(Agent.Artist):
         # API what this album is and recover its author -- but only trust an
         # author that is ALSO a folder in the file's path, so a wrong name can
         # never win. Runs ONLY on a genuine zero-result, so it can't change a
-        # match that already works. Opt out via the match_artist_from_folder pref.
+        # match that already works, so it runs unconditionally.
         # Genuine zero-result ONLY ([], not None): a None is a transport blip
         # from the loop above, and firing a second (recovery) search on a blip
         # is wasted work -- and contradicts this block's "genuine zero-result"
         # contract. `result is not None` excludes the blip; `not result` keeps [].
-        if result is not None and not result and (
-            search_helper.prefs['match_artist_from_folder']
-        ):
+        if result is not None and not result:
             recovered_author = self.recover_author_from_book(
                 search_helper, candidates
             )
