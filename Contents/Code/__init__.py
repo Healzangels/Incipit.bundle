@@ -1714,8 +1714,27 @@ class AudiobookAlbum(Agent.Album):
         # it and a later Refresh mirrors that pick back to cover.jpg.
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
-                thumb_data = make_request(helper.thumb)
-                if thumb_data is not None:
+                thumb_data = fetch_url_bytes(helper.thumb)
+                # Offering an online cover that is byte-identical to the local
+                # cover.jpg just lists the SAME picture twice in the picker (Plex
+                # keys each source separately, so one image can appear under our
+                # online key, our local key, our upload, and Local Media Assets'
+                # own entries). Skip the redundant one. Re-evaluated on every
+                # refresh against the CURRENT file, so replacing cover.jpg with a
+                # different image makes the online cover an option again -- the
+                # alternative stays available exactly when it is actually an
+                # alternative.
+                if (
+                    thumb_data is not None
+                    and local_set
+                    and cover_bytes
+                    and thumb_data == cover_bytes
+                ):
+                    log.info(
+                        'incipit cover: online cover is byte-identical to '
+                        'cover.jpg -- not offering a duplicate'
+                    )
+                elif thumb_data is not None:
                     # When a portrait local cover was deferred, this square cover
                     # IS the default -- it must not keep the demoted slot the
                     # prefer_local setting assigned before we measured the file.
