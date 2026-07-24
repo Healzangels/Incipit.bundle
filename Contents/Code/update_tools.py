@@ -1,6 +1,7 @@
 # Import internal tools
 from logging import Logging
 from region_tools import RegionTool
+from search_tools import quote_param
 import re
 import struct
 import StringIO
@@ -159,11 +160,23 @@ class UpdateTool:
         """
         # Get the current region
         self.region_override = self.get_preferred_region()
+        # For an author, pass the known name so the API can still fetch a portrait
+        # and bio from Goodreads when the Audible ASIN is dead or region-locked --
+        # there is then no page to scrape, and without a name nothing can be looked
+        # up. A wrong/empty name is harmless: the API's name gate declines to fill
+        # rather than attaching the wrong person.
+        query = None
+        if self.content_type == 'authors' and self.metadata and self.metadata.title:
+            query = 'name=' + quote_param(self.metadata.title)
         # Set the region helper
         region_helper = RegionTool(
-            region=self.region_override, content_type=self.content_type, id=self.extract_asin_from_id())
+            region=self.region_override, content_type=self.content_type,
+            id=self.extract_asin_from_id(), query=query)
 
-        update_url = region_helper.get_id_url()
+        if query:
+            update_url = region_helper.get_id_url_with_query()
+        else:
+            update_url = region_helper.get_id_url()
         log.debug('Update URL: ' + update_url)
         return update_url
 
