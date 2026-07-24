@@ -902,6 +902,28 @@ def select_hardcover_author_art(helper):
     )
 
 
+def select_sole_author_art(helper):
+    """
+        Force-select the ONE author image we have, for an already-scanned artist.
+
+        The container can only set a selection on a FRESH scan, so on a Refresh an
+        artist keeps whatever Plex persisted. That is fine when there are two
+        images -- the default (the Audible photo) is the better pick for most
+        authors, which is why anything else is opt-in via authors_prefer_hardcover.
+        But when the API returns a portrait and NO alternative (`imageAlt` empty),
+        there is no taste question left: the choice is that portrait or the blank
+        placeholder. Measured on JD Franx and Graham McNeill, whose portraits come
+        from Goodreads/Hardcover and who have no Audible photo at all -- a Refresh
+        ran the UNPIN direction and left them with no poster at all.
+
+        Same tag as the pin direction so the two keep sharing their memo.
+    """
+    converge_author_art(
+        helper, helper.thumb, helper.thumb_secondary,
+        'incipit author-art-select'
+    )
+
+
 def offer_secondary_author_poster(helper, valid_posters):
     """
         Add the Audible `imageAlt` to the artist's poster container as a
@@ -1374,6 +1396,10 @@ class AudiobookArtist(Agent.Artist):
         if helper.force:
             if prefer_hardcover:
                 select_hardcover_author_art(helper)
+            elif helper.thumb and not helper.thumb_secondary:
+                # Exactly one image exists, so there is nothing to defer TO: the
+                # unpin below would leave the artist with no poster at all.
+                select_sole_author_art(helper)
             else:
                 # Not pinned. If it WAS pinned before, the portrait we
                 # uploaded (or the container selected on a fresh scan) is
