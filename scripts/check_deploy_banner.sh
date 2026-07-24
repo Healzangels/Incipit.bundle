@@ -21,21 +21,30 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through a symlink so VERSION_FILE points at the real bundle tree even
+# when the script is invoked via a PATH symlink (readlink -f is GNU/unRAID; fall
+# back to the raw path on a platform without it).
+SCRIPT_SRC="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
 VERSION_FILE="$SCRIPT_DIR/../Contents/Code/_version.py"
 
 DEFAULT_LOG="/mnt/user/appdata/plex/Logs/PMS Plugin Logs/com.plexapp.agents.incipit.log"
 LOG="${1:-${INCIPIT_PLEX_LOG:-$DEFAULT_LOG}}"
 
-# Expected version, read straight from the bundle being deployed -- so the check
-# tracks the code, never a hardcoded number that would drift.
-EXPECTED="$(sed -n 's/.*version *= *"\([^"]*\)".*/\1/p' "$VERSION_FILE")"
-if [ -z "$EXPECTED" ]; then
-	echo "FAIL: could not read version from $VERSION_FILE" >&2
+# Read the expected version from the bundle being deployed, so the check tracks
+# the code rather than a hardcoded number. Guard existence FIRST: without it, a
+# missing file makes `sed` fail and `set -e` aborts before the friendly message.
+if [ ! -f "$VERSION_FILE" ]; then
+	echo "FAIL: version file not found: $VERSION_FILE" >&2
 	exit 2
 fi
-
-BANNER="Incipit Audiobooks Agent v$EXPECTED"
+# Anchor to the exact `version = "..."` line (so a future schema_version/comment
+# can't match) and take the first hit only.
+EXPECTED="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$VERSION_FILE" | head -1)"
+if [ -z "$EXPECTED" ]; then
+	echo "FAIL: could not parse version from $VERSION_FILE" >&2
+	exit 2
+fi
 
 if [ ! -f "$LOG" ]; then
 	echo "FAIL: plugin log not found: $LOG" >&2
@@ -43,18 +52,21 @@ if [ ! -f "$LOG" ]; then
 	exit 2
 fi
 
-# The most recent banner the agent logged, whatever version it names.
+# The most recent banner line the agent logged, and the version it names. Compare
+# the parsed version by EXACT equality -- a substring/prefix match would let
+# v1.3.9 pass against a stale v1.3.95 banner, the very silent-death this catches.
 LAST_BANNER="$(grep -a 'Incipit Audiobooks Agent v' "$LOG" | tail -1 || true)"
+LOGGED="$(printf '%s' "$LAST_BANNER" | sed -n 's/.*Incipit Audiobooks Agent v\([0-9][0-9.]*\).*/\1/p')"
 
-if printf '%s' "$LAST_BANNER" | grep -qF "$BANNER"; then
-	echo "OK: agent loaded cleanly -- $BANNER"
+if [ "$LOGGED" = "$EXPECTED" ]; then
+	echo "OK: agent loaded cleanly -- Incipit Audiobooks Agent v$EXPECTED"
 	echo "  $LAST_BANNER"
 	exit 0
 fi
 
-echo "FAIL: expected banner not found -- '$BANNER'" >&2
-if [ -n "$LAST_BANNER" ]; then
-	echo "  last banner names a DIFFERENT version (stale load / silent sandbox death?):" >&2
+echo "FAIL: expected banner not found -- 'Incipit Audiobooks Agent v$EXPECTED'" >&2
+if [ -n "$LOGGED" ]; then
+	echo "  last banner names a DIFFERENT version: v$LOGGED (stale load / silent sandbox death?)" >&2
 	echo "  $LAST_BANNER" >&2
 else
 	echo "  no Incipit banner in the log at all -- plugin never loaded, or wrong log file." >&2
