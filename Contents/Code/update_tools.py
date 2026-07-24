@@ -165,9 +165,23 @@ class UpdateTool:
         # there is then no page to scrape, and without a name nothing can be looked
         # up. A wrong/empty name is harmless: the API's name gate declines to fill
         # rather than attaching the wrong person.
+        # The name is read from MEDIA, not metadata: at update time Plex passes
+        # the tagged artist name on `media.title` while `metadata.title` is the
+        # field the agent FILLS IN -- it is still blank here, so keying off it
+        # silently sent no name at all (measured live: every agent request arrived
+        # as /authors/<asin>?region=us). Fall back to metadata.title for any path
+        # that has already populated it.
         query = None
-        if self.content_type == 'authors' and self.metadata and self.metadata.title:
-            query = 'name=' + quote_param(self.metadata.title)
+        if self.content_type == 'authors':
+            name = None
+            try:
+                name = self.media.title
+            except Exception:
+                name = None
+            if not name and self.metadata:
+                name = self.metadata.title
+            if name:
+                query = 'name=' + quote_param(name)
         # Set the region helper
         region_helper = RegionTool(
             region=self.region_override, content_type=self.content_type,
