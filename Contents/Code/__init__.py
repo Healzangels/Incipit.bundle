@@ -415,7 +415,7 @@ def promote_picked_cover(helper):
             artist_bytes = HTTP.Request(aurl, timeout=8, cacheTime=0).content
         except Exception:
             artist_bytes = None
-        if artist_bytes and len(artist_bytes) == len(selected) and artist_bytes == selected:
+        if selection_is_artist_art(artist_bytes, selected):
             log.warn('%s: picked cover is the artist photo -- refusing to write it', tag)
             mark_done(tag, helper.metadata.guid, thumb)
             return
@@ -578,7 +578,7 @@ def backup_selected_poster(helper):
             log.error('incipit poster-backup: could not read artist poster for the '
                       'poison check (%s) -- skipping this write to be safe', e)
             return
-        if artist_bytes and len(artist_bytes) == len(selected) and artist_bytes == selected:
+        if selection_is_artist_art(artist_bytes, selected):
             log.warn('incipit poster-backup: first cover would be the inherited ARTIST '
                      'poster (byte-identical) -- refusing so the book is not poisoned; '
                      'a real cover will mirror once selected')
@@ -687,6 +687,29 @@ def read_poster_state(guid, tag):
     except Exception as e:
         log.error('%s: poster state read failed (%s)', tag, e)
         return None
+
+
+def selection_is_artist_art(artist_bytes, selected):
+    """
+        True when `selected` IS the artist photo -- plain, or our own padded
+        re-select of it.
+
+        The pad matters: upload_and_select_poster re-POSTs image+RESELECT_PAD to
+        force a re-selection when the plain bytes already exist de-selected. So a
+        poisoned album can end up selected as artist_photo+PAD, which an exact
+        byte comparison does NOT recognise -- and the guard then waves the poison
+        through. Measured on Kyle Mills / "Fade", whose selected poster was
+        byte-for-byte the author photo plus the 20-byte pad.
+    """
+    if not artist_bytes or not selected:
+        return False
+    if len(artist_bytes) == len(selected) and artist_bytes == selected:
+        return True
+    try:
+        _, _, padded = padded_variants(artist_bytes)
+    except Exception:
+        return False
+    return len(padded) == len(selected) and padded == selected
 
 
 def selection_is_agent_owned(selected_key, owned_shas):
