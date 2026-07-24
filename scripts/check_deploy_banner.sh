@@ -55,8 +55,12 @@ fi
 # The most recent banner line the agent logged, and the version it names. Compare
 # the parsed version by EXACT equality -- a substring/prefix match would let
 # v1.3.9 pass against a stale v1.3.95 banner, the very silent-death this catches.
-LAST_BANNER="$(grep -a 'Incipit Audiobooks Agent v' "$LOG" | tail -1 || true)"
-LOGGED="$(printf '%s' "$LAST_BANNER" | sed -n 's/.*Incipit Audiobooks Agent v\([0-9][0-9.]*\).*/\1/p')"
+# The grep requires a digit after "v" so it matches only real version banners (not
+# an "Agent version ..." line) and LAST_BANNER stays meaningful for the diagnostic;
+# the capture spans version chars (digits, dots, and a semver-style -suffix) so a
+# tagged build like 1.3.95-rc1 still compares equal instead of a spurious FAIL.
+LAST_BANNER="$(grep -aE 'Incipit Audiobooks Agent v[0-9]' "$LOG" | tail -1 || true)"
+LOGGED="$(printf '%s' "$LAST_BANNER" | sed -n 's/.*Incipit Audiobooks Agent v\([0-9][0-9A-Za-z.-]*\).*/\1/p')"
 
 if [ "$LOGGED" = "$EXPECTED" ]; then
 	echo "OK: agent loaded cleanly -- Incipit Audiobooks Agent v$EXPECTED"
