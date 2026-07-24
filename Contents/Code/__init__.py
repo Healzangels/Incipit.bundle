@@ -1504,19 +1504,29 @@ class AudiobookAlbum(Agent.Album):
                     except Exception as e:
                         log.error('incipit cover: Proxy.Media(local) failed (%s)', e)
 
-        if not local_set and helper.thumb:
+        # The online cover (native square Apple, else the provider portrait) is
+        # ALWAYS offered as a pickable option -- even when a local cover.jpg is
+        # the default (prefer_local). prefer_local was only ever meant to make the
+        # local cover the DEFAULT, not the ONLY option: the whole block used to be
+        # gated on `not local_set`, so a book whose migrated cover.jpg is a
+        # portrait print cover never even LISTED its square audiobook cover (The
+        # Skin Map, The Spirit Well). Now the local cover keeps the selection
+        # (validate_keys above) while the online cover rides at a lower priority
+        # (primary_order = 1 when preferring local), so the operator can switch to
+        # it and a later Refresh mirrors that pick back to cover.jpg.
+        if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
                 thumb_data = make_request(helper.thumb)
                 if thumb_data is not None:
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=primary_order
                     )
-            # Prune to our single primary so a stale earlier poster can't stay
-            # the default -- but NOT when preferring local, so a not-yet-readable
-            # local cover keeps its pickable slot. (validate_keys only touches
-            # our metadata:// posters; a user's upload:// pick is never evicted.)
+            # SELECT the online cover only when there is no local cover to be the
+            # default. With a local cover set it is merely OFFERED, not selected;
+            # validate_keys only touches our metadata:// posters, so a user's
+            # upload:// pick is never evicted.
             if (
-                not prefer_local
+                not local_set
                 and helper.thumb in helper.metadata.posters
             ):
                 helper.metadata.posters.validate_keys([helper.thumb])
