@@ -18,9 +18,13 @@ READ-ONLY BY DESIGN
     "fix" has destroyed curated art here before -- so the output is a worklist
     for a human, not an action. There is deliberately no --fix flag.
 
-USAGE
-    python3 poison_sweep.py --url http://10.0.1.99:32400 --token XXXX --section 33
-    (--token also read from PLEX_TOKEN; --section defaults to the artist library)
+USAGE (on the Plex box, where Preferences.xml and the media mount both exist)
+    python3 poison_sweep.py --path-to /mnt/remotes/10.0.1.98_data
+
+    The token comes from Plex's own Preferences.xml by default, so it never has
+    to be typed onto a command line; --token or PLEX_TOKEN override it. Without
+    --path-to only the SELECTED poster is checked, which is not where the poison
+    lives -- see the disk-check note in main().
 """
 
 import argparse
@@ -125,6 +129,23 @@ def cover_bytes_on_disk(plex_path, path_from, path_to):
         return None
 
 
+def token_from_preferences(path):
+    """
+    The server's own Plex token, read from Preferences.xml.
+
+    Saves pasting a credential onto a command line, where it lands in shell
+    history and scrollback. The file is root/plex-readable only, which is
+    exactly who runs this on the Plex box. Returns '' when it is not readable
+    -- e.g. running from a workstation -- so --token and PLEX_TOKEN still work.
+    """
+    try:
+        with open(path) as fh:
+            m = re.search(r'PlexOnlineToken="([^"]+)"', fh.read())
+        return m.group(1) if m else ''
+    except Exception:
+        return ''
+
+
 def main():
     ap = argparse.ArgumentParser(description='Report albums whose poster is the artist photo.')
     ap.add_argument('--url', default='http://10.0.1.99:32400', help='Plex base URL')
@@ -145,14 +166,17 @@ def main():
                     help='the same tree as seen from HERE, e.g. '
                          '/mnt/remotes/10.0.1.98_data on the Plex box, or '
                          '/mnt/user/data on the media box. Enables the disk check.')
+    ap.add_argument('--prefs', default='/mnt/user/appdata/plex/Preferences.xml',
+                    help='Plex Preferences.xml, read for the token when none is given')
     args = ap.parse_args()
 
-    if not args.token:
-        print('need --token or PLEX_TOKEN', file=sys.stderr)
+    token = args.token or token_from_preferences(args.prefs)
+    if not token:
+        print('need --token, PLEX_TOKEN, or a readable %s' % args.prefs, file=sys.stderr)
         return 2
 
     base = args.url.rstrip('/')
-    artists = directories(api(base, '/library/sections/%s/all' % args.section, args.token, type='8'))
+    artists = directories(api(base, '/library/sections/%s/all' % args.section, token, type='8'))
     if args.limit:
         artists = artists[: args.limit]
     print('scanning %d artists in section %s\n' % (len(artists), args.section))
@@ -169,22 +193,22 @@ def main():
     no_cover = 0
 
     for i, (artist_rk, artist_name) in enumerate(artists, 1):
-        art = thumb_bytes(base, artist_rk, args.token)
+        art = thumb_bytes(base, artist_rk, token)
         if not art:
             # No artist photo means nothing to be poisoned BY.
             no_artist_art += 1
             continue
         albums = directories(
-            api(base, '/library/metadata/%s/children' % artist_rk, args.token)
+            api(base, '/library/metadata/%s/children' % artist_rk, token)
         )
         for album_rk, album_title in albums:
             scanned += 1
             kinds = []
-            kind = classify(thumb_bytes(base, album_rk, args.token), art)
+            kind = classify(thumb_bytes(base, album_rk, token), art)
             if kind:
                 kinds.append('SELECTED/' + kind)
             if args.path_to:
-                plex_path = part_file(base, album_rk, args.token)
+                plex_path = part_file(base, album_rk, token)
                 if plex_path:
                     raw = cover_bytes_on_disk(
                         plex_path, args.path_from, args.path_to)
