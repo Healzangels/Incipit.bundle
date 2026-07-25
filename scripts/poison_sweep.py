@@ -29,6 +29,7 @@ USAGE (on the Plex box, where Preferences.xml and the media mount both exist)
 
 import argparse
 import hashlib
+import html
 import os
 import re
 import sys
@@ -99,12 +100,14 @@ def part_file(base, album_rk, token):
     m = re.search(r'<Part\b[^>]*\bfile="([^"]*)"', xml)
     if not m:
         return None
-    # Plex XML-escapes the path; only & and the quote forms can appear here.
-    path = m.group(1)
-    for esc, raw in (('&amp;', '&'), ('&quot;', '"'), ('&apos;', "'"),
-                     ('&lt;', '<'), ('&gt;', '>')):
-        path = path.replace(esc, raw)
-    return path
+    # Plex XML-escapes the path, and NOT only with the named entities: it emits
+    # NUMERIC character references for the apostrophe -- "Hell&#39;s Wardens",
+    # "Gaunt&#39;s Ghosts". A hand-rolled table of &amp;/&quot;/&apos;/&lt;/&gt;
+    # therefore left every path containing an apostrophe mangled, the folder was
+    # never found, and 148 of 1418 albums silently went unchecked on the live
+    # run. html.unescape handles named and numeric alike; a literal '&' in a
+    # filename arrives as "&amp;" and round-trips correctly through it.
+    return html.unescape(m.group(1))
 
 
 def cover_on_disk(plex_path, path_from, path_to):
