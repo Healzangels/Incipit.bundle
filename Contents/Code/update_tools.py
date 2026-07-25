@@ -110,6 +110,42 @@ def series_key(name):
 FOLDER_NUMBER_RE = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,2})?)\s*[-._\s]\s*\S')
 
 
+# Co-author separators, mirroring search_tools.MULTI_AUTHOR_RE: comma,
+# ampersand, semicolon, slash, or the word "and". Whitespace around "and"/"&"
+# keeps it from splitting inside a name ("Rand", "Anderson").
+AUTHOR_SPLIT_RE = re.compile(
+    r'\s*,\s*|\s+&\s+|\s+and\s+|\s*;\s*|\s*/\s*', re.IGNORECASE
+)
+
+
+def author_name_variants(name):
+    """
+        Every spelling of a credited-author string that a folder could use: the
+        whole string, plus each co-author inside it.
+
+        Providers disagree about how to credit a co-written book. Audible lists
+        the authors separately, but Apple returns ONE combined string
+        ("TheFirstDefier & JF Brink") -- which can never equal a folder segment,
+        so the <Author>/<Series>/<NN - Book> anchor below refused to match and
+        the folder fallback bailed out. That bail lands on exactly the records
+        that need the fallback most: an Apple record carries no seriesPrimary at
+        all, so the folder is the ONLY source of series/volume. Measured live on
+        "Defiance of the Fall, Book 10", which ended up with no series in its
+        sort title and fell out of its own series on the shelf, while every
+        Audible-matched sibling sorted correctly.
+
+        Widening the anchor cannot mis-tag a differently-organised library: the
+        names added are all genuinely credited authors, and the numbered-folder
+        and series-folder checks still have to pass.
+    """
+    out = []
+    for part in [name] + AUTHOR_SPLIT_RE.split(name):
+        cleaned = part.strip().lower()
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    return out
+
+
 def series_from_path_segments(segments, author_names):
     """
         Derive (series_name, number) for the common audiobook layout
@@ -592,7 +628,12 @@ class AlbumUpdateTool(UpdateTool):
         for person in (self.author or []):
             name = person.get('name') if isinstance(person, dict) else None
             if name:
-                author_names.append(name.strip().lower())
+                # Variants, not the bare string: a provider that credits both
+                # co-authors in ONE field would otherwise never match the
+                # single-author folder (see author_name_variants).
+                for variant in author_name_variants(name):
+                    if variant not in author_names:
+                        author_names.append(variant)
         series_name, number = series_from_path_segments(
             path.split('/'), author_names
         )
