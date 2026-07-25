@@ -107,26 +107,35 @@ def part_file(base, album_rk, token):
     return path
 
 
-def cover_bytes_on_disk(plex_path, path_from, path_to):
+def cover_on_disk(plex_path, path_from, path_to):
     """
-    The book folder's cover.jpg bytes, or None.
+    (bytes, status) for the book folder's cover.jpg.
 
-    plex_path is the file path as PLEX reports it (inside its container, e.g.
-    /data/media/...). path_from/path_to rewrite that prefix into a path visible
-    from wherever this script is running -- the media is on a different box than
-    Plex here, so the two views never match by accident.
+    status is 'ok'; 'no-cover' -- the folder is there and simply has no
+    cover.jpg, a real gap in the library; or 'no-folder' -- the rewritten path
+    does not exist at all, i.e. --path-from/--path-to are wrong for this book.
+
+    These were one counter in the first version, and 150 of them on the live run
+    left it unknowable whether the sweep had actually covered the library or had
+    silently skipped a tenth of it. A coverage number you cannot interpret is
+    worse than no number: it reads as "checked" either way.
+
+    plex_path is the path as PLEX reports it (inside its container, e.g.
+    /data/media/...); the media share and Plex are on different hosts here, so
+    the two views never line up by accident.
     """
     if '/' not in plex_path:
-        return None
-    host_path = plex_path
-    if path_from and host_path.startswith(path_from):
-        host_path = path_to + host_path[len(path_from):]
-    cover = host_path.rsplit('/', 1)[0] + '/cover.jpg'
+        return None, 'no-folder'
+    host = plex_path
+    if path_from and host.startswith(path_from):
+        host = path_to + host[len(path_from):]
+    folder = host.rsplit('/', 1)[0]
     try:
-        with open(cover, 'rb') as fh:
-            return fh.read()
+        with open(folder + '/cover.jpg', 'rb') as fh:
+            return fh.read(), 'ok'
     except Exception:
-        return None
+        pass
+    return None, ('no-cover' if os.path.isdir(folder) else 'no-folder')
 
 
 def token_from_preferences(path):
@@ -190,7 +199,8 @@ def main():
     poisoned = []
     scanned = 0
     no_artist_art = 0
-    no_cover = 0
+    unchecked = {'no-cover': 0, 'no-folder': 0}
+    samples = {'no-cover': [], 'no-folder': []}
 
     for i, (artist_rk, artist_name) in enumerate(artists, 1):
         art = thumb_bytes(base, artist_rk, token)
@@ -210,10 +220,12 @@ def main():
             if args.path_to:
                 plex_path = part_file(base, album_rk, token)
                 if plex_path:
-                    raw = cover_bytes_on_disk(
+                    raw, status = cover_on_disk(
                         plex_path, args.path_from, args.path_to)
-                    if raw is None:
-                        no_cover += 1
+                    if status != 'ok':
+                        unchecked[status] += 1
+                        if len(samples[status]) < 3:
+                            samples[status].append(plex_path)
                     else:
                         disk_kind = classify(raw, art)
                         if disk_kind:
@@ -229,7 +241,15 @@ def main():
     print('albums checked      : %d' % scanned)
     print('artists with no art : %d' % no_artist_art)
     if args.path_to:
-        print('cover.jpg unreadable: %d  (missing file, or the path rewrite is wrong)' % no_cover)
+        checked = scanned - unchecked['no-cover'] - unchecked['no-folder']
+        print('cover.jpg CHECKED   : %d of %d albums' % (checked, scanned))
+        print('  no cover.jpg      : %d  (folder found, file absent -- a real gap)'
+              % unchecked['no-cover'])
+        print('  folder NOT found  : %d  (--path-from/--path-to wrong for these)'
+              % unchecked['no-folder'])
+        for status in ('no-folder', 'no-cover'):
+            for pth in samples[status]:
+                print('      %-10s %s' % (status, pth))
     print('POISONED            : %d' % len(poisoned))
     if poisoned:
         on_disk = len([p for p in poisoned if 'DISK/' in p[3]])
