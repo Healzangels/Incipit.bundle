@@ -1099,6 +1099,23 @@ def select_sole_author_art(helper):
         artist keeps whatever Plex persisted. That is fine when there are two
         images -- the default (the Audible photo) is the better pick for most
         authors, which is why anything else is opt-in via authors_prefer_hardcover.
+
+        WHY THE AUDIBLE PHOTO IS THE DEFAULT WHEN THE API RANKS IT SECOND: the
+        API deliberately puts the more TRUSTWORTHY portrait in `image`
+        (Hardcover, because Audible's is often a book cover rather than a face --
+        Craig Alanson's is his ebook cover, measured 734x1080), and the leftover
+        in `imageAlt`. This container inverts that for DISPLAY: it offers both
+        and a two-key validate_keys selects the SECOND, because Audible's photos
+        are square and Plex's artist tiles are square, while Hardcover's are
+        often tall. Rank by trust there, choose by fit here. Neither side is a
+        bug; reading one without the other has cost real debugging time.
+
+        Consequence worth knowing: an artist scanned while only ONE image
+        existed keeps that stale selection forever, because the unpin direction
+        below refuses to touch a container key -- it cannot tell a stale
+        automatic pick from a deliberate one in the UI. Fix those by picking in
+        the UI; it sticks, since nothing here overrides a non-agent-upload.
+
         But when the API returns a portrait and NO alternative (`imageAlt` empty),
         there is no taste question left: the choice is that portrait or the blank
         placeholder. Measured on JD Franx and Graham McNeill, whose portraits come
