@@ -57,7 +57,7 @@ def apply_http_cache_time():
         HTTP.CacheTime = CACHE_1WEEK
 
 
-def search_cache_time():
+def search_cache_time(manual=False):
     # Search responses cache for an hour, unlike ASIN data lookups (a week).
     # Plex fires the SAME album search once per track during a scan — a
     # multi-part book means dozens of identical searches, and with no caching
@@ -65,7 +65,20 @@ def search_cache_time():
     # initial scans crawl. An hour makes every repeat free within a scan while
     # still surfacing API-side matching improvements the same day. The dev
     # toggle keeps forcing fully fresh searches.
-    if Prefs['dev_disable_http_cache']:
+    #
+    # A MANUAL search never caches. Fix Match is a human saying "the automatic
+    # answer is wrong", so the one thing it must not do is replay the automatic
+    # answer -- yet the dialog's auto-fired list sends the SAME URL the scan
+    # sent, so it was a guaranteed cache hit and showed the ranking from up to
+    # an hour ago. Measured live on Defiance of the Fall Book 10: the dialog
+    # listed a stale pre-fix body (Apple's series-less record at 76, the correct
+    # ASIN-pinned Audible edition absent) while the very same URL answered 1.0 /
+    # score 100 when actually fetched. Picking from that list pins the wrong
+    # record, and an Apple record carries no seriesPrimary -- which is how the
+    # album ended up with no sort title at all. The cache exists for a SCAN's
+    # per-track fan-out; a manual search is one user-initiated request, so
+    # skipping it costs a single round-trip and buys a current answer.
+    if manual or Prefs['dev_disable_http_cache']:
         return 0
     return CACHE_1HOUR
 
@@ -1204,7 +1217,9 @@ class AudiobookArtist(Agent.Artist):
             log.debug('artist recovery: no book search url (no title or API base)')
             return None
         try:
-            request = str(make_request(book_url, cache_time=search_cache_time()))
+            request = str(make_request(
+                book_url, cache_time=search_cache_time(helper.manual)
+            ))
         except Exception as err:
             log.error('artist recovery book search failed: %s', err)
             return None
@@ -1240,7 +1255,9 @@ class AudiobookArtist(Agent.Artist):
         # retry loop can tell "this request errored" from "this author genuinely
         # had no results" and not fall through to the wrong author on a blip.
         try:
-            request = str(make_request(search_url, cache_time=search_cache_time()))
+            request = str(make_request(
+                search_url, cache_time=search_cache_time(helper.manual)
+            ))
         except Exception as err:
             log.error("Author search request failed: %s", err)
             return None
@@ -1595,7 +1612,9 @@ class AudiobookAlbum(Agent.Album):
         query = helper.build_search_args()
         search_url = helper.build_url(query)
         try:
-            request = str(make_request(search_url, cache_time=search_cache_time()))
+            request = str(make_request(
+                search_url, cache_time=search_cache_time(helper.manual)
+            ))
         except Exception as err:
             log.error("Book search request failed: %s", err)
             return None
@@ -1932,9 +1951,10 @@ def make_request(url, cache_time=None):
         Makes and returns an HTTP request.
         Retries 4 times, increasing  time between each retry.
         cache_time controls the plugin HTTP cache: SEARCH calls pass
-        search_cache_time() (1h, or 0 with the dev toggle) so per-track
-        re-searches during a scan are free; ASIN data lookups use the default
-        week-long cache, since those records are stable.
+        search_cache_time(manual) (1h for a scan, 0 for a manual Fix Match or
+        with the dev toggle) so per-track re-searches during a scan are free
+        while a human-driven search always gets a current answer; ASIN data
+        lookups use the default week-long cache, since those records are stable.
     """
     headers = incipit_headers(url)
     # sleep=0 ONLY for our own local, allowlisted API — the framework's per-fetch
