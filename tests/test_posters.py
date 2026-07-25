@@ -365,6 +365,25 @@ class PortraitDeferralMirror(unittest.TestCase):
         self.assertEqual(len(self.writes), 1)
         self.assertEqual(self.writes[0][1], self.PICKED)
 
+    def test_a_pick_mirrors_even_when_the_disk_bytes_were_once_uploaded(self):
+        # Bridgeman's live state, 2026-07-25 16:26. Portrait deferred, the
+        # operator picked an agent METADATA poster, and the disk file's own
+        # bytes sit in a DE-selected upload left by the pre-1.3.112 flows. The
+        # v1.3.114 review guard read that as "curated file needs protecting"
+        # and blocked the very mirror the pick required -- but it could not
+        # tell a deliberate pick of an agent poster from an automatic re-seat,
+        # and the automatic cases are already covered: a re-match's default is
+        # either the local cover (byte-identical, unchanged-skip) or the
+        # portrait book's online default (refused above). The guard only ever
+        # fired on human picks, so it is gone.
+        sha, sha_padded, unused = AG.padded_variants(self.PORTRAIT)
+        AG.read_poster_state = lambda guid, tag: (
+            '103831', 'metadata://posters/com.plexapp.agents.incipit_pick',
+            ['upload://posters/' + sha], None)
+        AG.backup_selected_poster(self._helper(), portrait_deferred=True)
+        self.assertEqual(len(self.writes), 1, 'the pick must still reach cover.jpg')
+        self.assertEqual(self.writes[0][1], self.PICKED)
+
 
 if __name__ == '__main__':
     unittest.main()

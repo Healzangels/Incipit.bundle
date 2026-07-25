@@ -632,44 +632,22 @@ def backup_selected_poster(helper, portrait_deferred=False):
                      'book is not poisoned; a real cover will mirror once selected',
                      'a new cover.jpg' if not existing else 'the existing cover.jpg')
             return
-    # THE STAND-DOWN'S OTHER EDGE (v1.3.114). select_local_cover no longer
-    # re-asserts a cover.jpg whose upload sits de-selected -- and if the
-    # selection got there NOT by a person's pick (a Fix Match / re-match can
-    # re-seat an agent metadata poster), the ownership-blind mirror below would
-    # then overwrite the curated file with it. So when the disk file's own
-    # upload is provably KNOWN to Plex yet de-selected, and the thing selected
-    # is an agent metadata poster rather than anyone's upload, refuse the
-    # mirror and say why. A USER upload stays mirrorable (a person chose it,
-    # that is the documented convergence), and poison repair is unaffected:
-    # poisoned cover.jpg bytes were mirrored from inherited art, never uploaded
-    # to the album, so they appear in no upload key and this check passes.
-    # Costs one localhost round-trip, only on a real would-be overwrite.
-    if existing:
-        pstate = read_poster_state(helper.metadata.guid, 'incipit poster-backup')
-        if pstate is not None:
-            prk, sel_key, pkeys, pparent = pstate
-            try:
-                esha, esha_padded, epadded = padded_variants(existing)
-            except Exception:
-                esha = None
-                esha_padded = None
-            curated_deselected = False
-            if esha and sel_key:
-                for k in pkeys:
-                    if (esha in k or esha_padded in k) and (
-                            esha not in sel_key and esha_padded not in sel_key):
-                        curated_deselected = True
-            if curated_deselected and sel_key and 'metadata://' in sel_key:
-                log.warn(
-                    'incipit poster-backup: cover.jpg\'s own upload sits '
-                    'de-selected on rk %s while an agent poster is selected -- '
-                    'not mirroring over the curated file; pick the poster you '
-                    'want in the UI and the mirror will follow', prk
-                )
-                return
+    # NO de-selected-upload guard here, and that is a decision with a history:
+    # v1.3.114 added one (refuse to mirror an agent METADATA selection while
+    # the disk file's own upload sat de-selected, on the theory that a Fix
+    # Match could re-seat an agent poster with no human involved). Its first
+    # live firing -- Joseph Bridgeman, 2026-07-25 16:26 -- was a person's
+    # deliberate pick of an agent-offered poster, the single most common way a
+    # poster is chosen, and the guard blocked the mirror that pick needed. The
+    # guard could not tell those cases apart, and the automatic ones it feared
+    # are covered without it: a re-match's default selection is either the
+    # local cover (byte-identical to disk, caught by the unchanged-skip above)
+    # or a portrait book's online default (refused by the portrait branch
+    # above), and inherited artist art is refused by the poison guard below.
+    #
     # Whoever chose the selection, it is what Plex shows, so it is what the
-    # sidecar mirrors -- no ownership test beyond the curated-file check above.
-    # The byte checks earlier already mean this only fires on a real change.
+    # sidecar mirrors. The byte checks above already mean this only fires on a
+    # real change.
     if write_cover_sidecar(cover_path, selected):
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.warn('incipit poster-backup: saved -> %s (%s bytes)', cover_path, len(selected))
