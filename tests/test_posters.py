@@ -2,10 +2,12 @@
 Poster identity and the caching decisions around it.
 
 "Is this image the artist's photo?" is the question the whole poison machinery
-turns on, and it has to answer correctly for the PADDED form too -- the agent
-re-POSTs image+RESELECT_PAD to force a re-selection, so a poisoned album that
-has been through one cycle wears 20 extra bytes. An exact-byte comparison
-missed that for months (found live on Kyle Mills / "Fade").
+turns on, and it has to answer correctly for the PADDED form too. The agent no
+longer MINTS pads for book covers (v1.3.112 -- see DeliberateDeselection below)
+but albums touched before that are still wearing image+RESELECT_PAD copies, so
+a poisoned album that went through one pre-112 cycle carries 20 extra bytes. An
+exact-byte comparison missed that for months (found live on Kyle Mills /
+"Fade").
 """
 
 import os
@@ -114,10 +116,6 @@ class WorkMemo(unittest.TestCase):
         self.assertTrue(AG.should_run('tag', 'guid', 'token', 0))
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class DeliberateDeselection(unittest.TestCase):
     """
     A cover Plex already OFFERS but is not selecting was de-selected on purpose.
@@ -135,9 +133,14 @@ class DeliberateDeselection(unittest.TestCase):
     been spent, leaving the agent out of levers -- so the same action gave
     opposite results and the fix looked random.
 
-    Only the FIRST rung is a legitimate job: a new book whose cover.jpg Plex has
-    never seen. If Plex already lists it, standing down is what lets
-    backup_selected_poster mirror the operator's choice to disk instead.
+    Only the FIRST rung is a legitimate job for a BOOK: a new album whose
+    cover.jpg Plex has never seen. If Plex already lists it, standing down is
+    what lets backup_selected_poster mirror the operator's choice to disk.
+
+    AUTHOR art is the exception (pref_asserted below): there the de-selector is
+    the AGENT's own unpin, not a person, and the operator's wish is expressed by
+    the authors_prefer_hardcover pref itself -- so the pad lever survives for
+    that caller alone. Without it, pin->unpin->re-pin wedged the pref forever.
     """
 
     def setUp(self):
@@ -145,8 +148,16 @@ class DeliberateDeselection(unittest.TestCase):
         self.real = AG.HTTP.Request
 
         def recorder(url, **kwargs):
+            # Records and SUCCEEDS, so tests can assert the success path
+            # (mark_done / return True) actually runs -- a raising recorder was
+            # swallowed by the plugin's `except Exception` and proved nothing
+            # past the call itself.
             self.posts.append((url, kwargs))
-            raise AssertionError('the agent must not POST in this test')
+
+            class FakeResponse(object):
+                content = 'ok'
+
+            return FakeResponse()
 
         AG.HTTP.Request = recorder
         AG.recent_work_memo.clear()
@@ -178,9 +189,11 @@ class DeliberateDeselection(unittest.TestCase):
 
     def test_a_cover_plex_has_never_seen_is_still_uploaded(self):
         # The rung that must survive: a new book, nothing of ours in the list.
-        AG.upload_and_select_poster(
+        result = AG.upload_and_select_poster(
             'guid-c', COVER, 'test', state=self._state([], selected=None))
+        self.assertTrue(result, 'a successful POST must report success')
         self.assertEqual(len(self.posts), 1, 'the birth case must still upload')
+        self.assertIn(('test', 'guid-c'), AG.recent_work_memo)
 
     def test_an_already_selected_cover_is_a_no_op(self):
         sha, _padded, _bytes = AG.padded_variants(COVER)
@@ -188,3 +201,69 @@ class DeliberateDeselection(unittest.TestCase):
             'guid-d', COVER, 'test', state=self._state([sha], selected=sha))
         self.assertTrue(result)
         self.assertEqual(self.posts, [])
+
+
+class PrefAssertedReselect(unittest.TestCase):
+    """
+    The author-pin caller must still be able to RE-select its own de-selected
+    upload -- the agent's own unpin is what de-selected it, so reading that as
+    an operator choice wedged authors_prefer_hardcover permanently after one
+    pin->unpin round trip.
+    """
+
+    def setUp(self):
+        self.posts = []
+        self.real = AG.HTTP.Request
+
+        def recorder(url, **kwargs):
+            self.posts.append((url, kwargs))
+
+            class FakeResponse(object):
+                content = 'ok'
+
+            return FakeResponse()
+
+        AG.HTTP.Request = recorder
+        AG.recent_work_memo.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real
+        AG.recent_work_memo.clear()
+
+    def _state(self, keys, selected='upload://posters/something-else'):
+        return ('101', selected, keys, None)
+
+    def test_a_pref_reassert_posts_the_padded_copy(self):
+        # Re-pin: the portrait's plain bytes exist de-selected. The pref speaks
+        # for the operator, so the pad lever fires -- new content to the store,
+        # identical pixels, which re-selects.
+        sha, _padded, _bytes = AG.padded_variants(ARTIST)
+        result = AG.upload_and_select_poster(
+            'guid-p', ARTIST, 'test', state=self._state([sha]),
+            pref_asserted=True)
+        self.assertTrue(result)
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.posts[0][1]['data'], ARTIST + PAD,
+                         'the re-select must be the padded copy, not a no-op re-POST')
+
+    def test_a_pref_reassert_out_of_levers_stands_down(self):
+        # Both variants already exist de-selected: the one-level pad budget is
+        # spent, and minting deeper pads would grow without bound.
+        sha, sha_padded, _bytes = AG.padded_variants(ARTIST)
+        result = AG.upload_and_select_poster(
+            'guid-q', ARTIST, 'test', state=self._state([sha, sha_padded]),
+            pref_asserted=True)
+        self.assertFalse(result)
+        self.assertEqual(self.posts, [])
+
+    def test_books_still_stand_down_without_the_flag(self):
+        # The default is unchanged: a book's de-selected cover is a choice.
+        sha, _padded, _bytes = AG.padded_variants(COVER)
+        result = AG.upload_and_select_poster(
+            'guid-r', COVER, 'test', state=self._state([sha]))
+        self.assertFalse(result)
+        self.assertEqual(self.posts, [])
+
+
+if __name__ == '__main__':
+    unittest.main()

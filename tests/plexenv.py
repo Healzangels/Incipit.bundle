@@ -121,8 +121,20 @@ def _make_framework():
         Language=types.SimpleNamespace(English='en', German='de', French='fr')
     )
 
+    class LivePlexCall(BaseException):
+        """
+        Raised when a test reaches a live Plex call.
+
+        BaseException on purpose: every HTTP.Request/Core.storage call site in
+        the plugin sits inside `except Exception`, which catches AssertionError
+        -- so the old guard was silently converted into the plugin's normal
+        error path and a test could go green having exercised nothing but the
+        error handler. BaseException escapes every one of those handlers (the
+        plugin has no bare `except:`) and surfaces as a loud unittest error.
+        """
+
     def _unavailable(*_a, **_kw):
-        raise AssertionError(
+        raise LivePlexCall(
             'this test touched a live Plex call; keep unit tests to pure functions'
         )
 

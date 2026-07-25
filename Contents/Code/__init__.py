@@ -599,10 +599,44 @@ def backup_selected_poster(helper):
                      'book is not poisoned; a real cover will mirror once selected',
                      'a new cover.jpg' if not existing else 'the existing cover.jpg')
             return
+    # THE STAND-DOWN'S OTHER EDGE (v1.3.114). select_local_cover no longer
+    # re-asserts a cover.jpg whose upload sits de-selected -- and if the
+    # selection got there NOT by a person's pick (a Fix Match / re-match can
+    # re-seat an agent metadata poster), the ownership-blind mirror below would
+    # then overwrite the curated file with it. So when the disk file's own
+    # upload is provably KNOWN to Plex yet de-selected, and the thing selected
+    # is an agent metadata poster rather than anyone's upload, refuse the
+    # mirror and say why. A USER upload stays mirrorable (a person chose it,
+    # that is the documented convergence), and poison repair is unaffected:
+    # poisoned cover.jpg bytes were mirrored from inherited art, never uploaded
+    # to the album, so they appear in no upload key and this check passes.
+    # Costs one localhost round-trip, only on a real would-be overwrite.
+    if existing:
+        pstate = read_poster_state(helper.metadata.guid, 'incipit poster-backup')
+        if pstate is not None:
+            prk, sel_key, pkeys, pparent = pstate
+            try:
+                esha, esha_padded, epadded = padded_variants(existing)
+            except Exception:
+                esha = None
+                esha_padded = None
+            curated_deselected = False
+            if esha and sel_key:
+                for k in pkeys:
+                    if (esha in k or esha_padded in k) and (
+                            esha not in sel_key and esha_padded not in sel_key):
+                        curated_deselected = True
+            if curated_deselected and sel_key and 'metadata://' in sel_key:
+                log.warn(
+                    'incipit poster-backup: cover.jpg\'s own upload sits '
+                    'de-selected on rk %s while an agent poster is selected -- '
+                    'not mirroring over the curated file; pick the poster you '
+                    'want in the UI and the mirror will follow', prk
+                )
+                return
     # Whoever chose the selection, it is what Plex shows, so it is what the
-    # sidecar mirrors -- no ownership test, and no posters round-trip to make
-    # one. The two byte checks above already mean this only fires on a real
-    # change.
+    # sidecar mirrors -- no ownership test beyond the curated-file check above.
+    # The byte checks earlier already mean this only fires on a real change.
     if write_cover_sidecar(cover_path, selected):
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.warn('incipit poster-backup: saved -> %s (%s bytes)', cover_path, len(selected))
@@ -812,7 +846,8 @@ def selection_is_agent_owned(selected_key, owned_shas):
     return False
 
 
-def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
+def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
+                             pref_asserted=False):
     """
         Make `image_bytes` the SELECTED Plex poster for the item with `guid`,
         via the trusted local Plex API (Elevated policy -> no token needed).
@@ -827,13 +862,21 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
         content; re-POSTing an existing upload is a no-op; the agent's PUT is
         downgraded to GET.
 
-        So this can only ADD a poster Plex does not already hold. It used to go
-        further -- when our bytes existed as a DE-selected upload it re-POSTed
-        them with the RESELECT_PAD suffix, new content to the store with
-        identical pixels, which re-selects. That lever is gone (v1.3.112): the
-        only thing that de-selects our cover is a person choosing another
-        poster, so re-selecting it overrode them. A de-selected cover now ends
-        the attempt and backup_selected_poster mirrors their choice to disk.
+        By default this only ADDS a poster Plex does not already hold. When our
+        bytes exist as a DE-selected upload, the v1.3.112 premise applies: for a
+        BOOK, only a person choosing another poster produces that state, so we
+        stand down and backup_selected_poster mirrors their choice to disk.
+
+        `pref_asserted=True` is the one exception, for AUTHOR art. There the
+        premise is false: the agent's own unpin (authors_prefer_hardcover
+        removed) is what de-selects the pinned upload, so on re-pin the
+        de-selected copy is the agent's doing, not a person's -- and the
+        operator's wish is expressed BY the pref. That caller keeps the
+        RESELECT_PAD lever: re-POST image+PAD, new content with identical
+        pixels, which re-selects. One level only; when both variants already
+        exist de-selected the budget is spent and we stand down loudly.
+        Without this, one pin->unpin round trip wedged the pref permanently
+        (v1.3.113 regression, caught in review).
 
         `token` keys the per-track memo (callers pass a cheap identity like the
         image URL or the cover sha); `state` is an optional precomputed
@@ -867,13 +910,16 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
     # whole artist update). set() IS available; the blocklist is irregular, so
     # find in-repo precedent before using any builtin here.
     have_plain = False
+    have_padded = False
     for k in keys:
         if sha in k:
             have_plain = True
-    if have_plain:
-        # Plex ALREADY offers this cover and is not selecting it. Nothing but a
-        # deliberate de-selection produces that state: on a new book our bytes
-        # are not in the list at all, which is the upload below.
+        if sha_padded in k:
+            have_padded = True
+    if have_plain and not pref_asserted:
+        # Plex ALREADY offers this image and is not selecting it. For a BOOK,
+        # nothing but a deliberate de-selection produces that state: on a new
+        # album our bytes are not in the list at all, which is the upload below.
         #
         # This used to answer by re-POSTing a byte-PADDED copy -- new content to
         # the store, identical pixels -- because that re-selects. Measured live
@@ -890,23 +936,35 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
         # Standing down is what lets backup_selected_poster mirror that choice
         # into cover.jpg, which converges in ONE refresh instead of two.
         log.info(
-            '%s: cover.jpg is offered on rk %s but de-selected -- treating that '
-            'as a deliberate choice and leaving the selection alone', tag, rk
+            '%s: this image is offered on rk %s but de-selected -- treating '
+            'that as a deliberate choice and leaving the selection alone',
+            tag, rk
         )
         mark_done(tag, guid, memo_token)
         return False
-    post_bytes = image_bytes
+    if have_plain and pref_asserted and have_padded:
+        # The pref wants this image back but both variants already sit
+        # de-selected: the one-level pad budget is spent, and minting deeper
+        # pads would grow the store without bound. Loud, because the pref is
+        # now unenforceable without a manual UI pick.
+        log.warn(
+            '%s: image and its padded variant both exist de-selected on rk %s; '
+            'out of re-select levers -- pick it in the UI', tag, rk
+        )
+        mark_done(tag, guid, memo_token)
+        return False
+    # pref_asserted with the plain copy de-selected: the agent's own unpin put
+    # it there, so re-select via the pad -- new content, identical pixels.
+    reselect = have_plain and pref_asserted
+    post_bytes = padded_bytes if reselect else image_bytes
     content_type = 'image/png' if image_bytes[:4] == '\x89PNG' else 'image/jpeg'
     try:
         up = PMS + '/library/metadata/' + rk + '/posters'
         HTTP.Request(up, data=post_bytes,
                      headers={'Content-Type': content_type}, timeout=8)
-        # Only ever a plain upload now: the padded re-select rung was removed
-        # above, so this can only be reached when Plex does not have our bytes.
-        # The old ", PADDED re-select" suffix was left unreachable here, which
-        # reads in both the source and a log grep as though the lever survives.
-        log.warn('%s: uploaded + selected (rk %s, %s bytes, %s)',
-                 tag, rk, len(post_bytes), content_type)
+        log.warn('%s: uploaded + selected (rk %s, %s bytes, %s%s)',
+                 tag, rk, len(post_bytes), content_type,
+                 ', PADDED pref re-select' if reselect else '')
         mark_done(tag, guid, memo_token)
         return True
     except Exception as e:
@@ -1000,8 +1058,13 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
         target_bytes = fetch_url_bytes(target_url)
     if not target_bytes:
         return
+    # pref_asserted: for author art the de-selected copy is the agent's OWN
+    # doing (the opposite-direction pin/unpin uploaded something else), so the
+    # v1.3.112 "a de-selection is a person's choice" stand-down misreads it and
+    # wedges the pref after one round trip. The ownership gate above has already
+    # established no USER upload is being overridden.
     upload_and_select_poster(guid, target_bytes, tag, token=target_url,
-                             state=state)
+                             state=state, pref_asserted=True)
 
 
 def select_hardcover_author_art(helper):
