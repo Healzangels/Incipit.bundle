@@ -619,7 +619,7 @@ PMS = 'http://127.0.0.1:32400'
 # recognize the padded upload as ours/selected instead of padding again and
 # accumulating a new upload per refresh. One pad level = exactly one extra
 # re-select per image; a further flip hits the old boundary and logs.
-RESELECT_PAD = '\nincipit-reselect-v1'
+RESELECT_PAD = b'\nincipit-reselect-v1'
 
 
 def padded_variants(image_bytes):
