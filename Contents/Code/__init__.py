@@ -713,12 +713,13 @@ def selection_is_artist_art(artist_bytes, selected):
         True when `selected` IS the artist photo -- plain, or our own padded
         re-select of it.
 
-        The pad matters: upload_and_select_poster re-POSTs image+RESELECT_PAD to
-        force a re-selection when the plain bytes already exist de-selected. So a
-        poisoned album can end up selected as artist_photo+PAD, which an exact
-        byte comparison does NOT recognise -- and the guard then waves the poison
-        through. Measured on Kyle Mills / "Fade", whose selected poster was
-        byte-for-byte the author photo plus the 20-byte pad.
+        The pad matters, and still does even though upload_and_select_poster no
+        longer MINTS one: it used to re-POST image+RESELECT_PAD to force a
+        re-selection when the plain bytes already existed de-selected, so albums
+        touched before that changed are still carrying padded posters. An exact
+        byte comparison does not recognise them and the guard then waves the
+        poison through. Measured on Kyle Mills / "Fade", whose selected poster
+        was byte-for-byte the author photo plus the 20-byte pad.
     """
     if not artist_bytes or not selected:
         return False
@@ -862,23 +863,35 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
     # whole artist update). set() IS available; the blocklist is irregular, so
     # find in-repo precedent before using any builtin here.
     have_plain = False
-    have_padded = False
     for k in keys:
         if sha in k:
             have_plain = True
-        if sha_padded in k:
-            have_padded = True
-    if have_plain and have_padded:
-        # Both variants exist and neither is selected: the one-extra-level pad
-        # budget is spent. Stable state -- mark it so the pass collapses.
-        log.warn(
-            '%s: image and its padded variant both exist de-selected on rk %s; '
-            'out of in-agent re-select levers -- pick it in the UI, or use '
-            'select_cover_poster.py', tag, rk
+    if have_plain:
+        # Plex ALREADY offers this cover and is not selecting it. Nothing but a
+        # deliberate de-selection produces that state: on a new book our bytes
+        # are not in the list at all, which is the upload below.
+        #
+        # This used to answer by re-POSTing a byte-PADDED copy -- new content to
+        # the store, identical pixels -- because that re-selects. Measured live
+        # on Will Wight (Soulsmith, Blackflame, Skysworn, 2026-07-25): three
+        # hand-picked posters were replaced by the file on disk, each logged at
+        # exactly 20 bytes over it, and backup_selected_poster then skipped
+        # because the selection was "our own padded re-select". A second attempt
+        # appeared to work only because the one-level pad budget was already
+        # spent -- so the same action gave opposite results and the fix looked
+        # random. The docstring called the pad the one lever unverified by live
+        # test; this was its first real occurrence, and it took the operator's
+        # choice away.
+        #
+        # Standing down is what lets backup_selected_poster mirror that choice
+        # into cover.jpg, which converges in ONE refresh instead of two.
+        log.info(
+            '%s: cover.jpg is offered on rk %s but de-selected -- treating that '
+            'as a deliberate choice and leaving the selection alone', tag, rk
         )
         mark_done(tag, guid, memo_token)
         return False
-    post_bytes = padded_bytes if have_plain else image_bytes
+    post_bytes = image_bytes
     content_type = 'image/png' if image_bytes[:4] == '\x89PNG' else 'image/jpeg'
     try:
         up = PMS + '/library/metadata/' + rk + '/posters'

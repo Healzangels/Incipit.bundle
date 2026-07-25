@@ -116,3 +116,75 @@ class WorkMemo(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DeliberateDeselection(unittest.TestCase):
+    """
+    A cover Plex already OFFERS but is not selecting was de-selected on purpose.
+
+    The escalation ladder in upload_and_select_poster had three rungs: post the
+    cover when Plex does not have it; post a byte-padded copy when Plex has it
+    but has it de-selected; give up when both copies exist de-selected. The
+    middle rung is the operator picking a different poster and the agent
+    overriding them on the next refresh.
+
+    Measured live on Will Wight (Soulsmith/Blackflame/Skysworn, 2026-07-25):
+    each showed "uploaded + selected (... PADDED re-select)" at 14:01 with byte
+    counts exactly 20 over the file on disk, and the hand-picked poster was
+    gone. A second attempt at 14:10 "worked" only because the pad had already
+    been spent, leaving the agent out of levers -- so the same action gave
+    opposite results and the fix looked random.
+
+    Only the FIRST rung is a legitimate job: a new book whose cover.jpg Plex has
+    never seen. If Plex already lists it, standing down is what lets
+    backup_selected_poster mirror the operator's choice to disk instead.
+    """
+
+    def setUp(self):
+        self.posts = []
+        self.real = AG.HTTP.Request
+
+        def recorder(url, **kwargs):
+            self.posts.append((url, kwargs))
+            raise AssertionError('the agent must not POST in this test')
+
+        AG.HTTP.Request = recorder
+        AG.recent_work_memo.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real
+        AG.recent_work_memo.clear()
+
+    def _state(self, keys, selected='upload://posters/something-else'):
+        # (rk, selected_key, keys, parent_thumb)
+        return ('101', selected, keys, None)
+
+    def test_an_offered_but_deselected_cover_is_left_alone(self):
+        sha, _padded, _bytes = AG.padded_variants(COVER)
+        result = AG.upload_and_select_poster(
+            'guid-a', COVER, 'test', state=self._state([sha]))
+        self.assertFalse(result)
+        self.assertEqual(self.posts, [], 'must not re-upload a padded copy')
+        # mark_done separates STANDING DOWN from an upload that merely failed:
+        # the failure path deliberately does not mark, so a blip retries.
+        self.assertIn(('test', 'guid-a'), AG.recent_work_memo)
+
+    def test_both_variants_deselected_still_stands_down(self):
+        sha, sha_padded, _bytes = AG.padded_variants(COVER)
+        result = AG.upload_and_select_poster(
+            'guid-b', COVER, 'test', state=self._state([sha, sha_padded]))
+        self.assertFalse(result)
+        self.assertEqual(self.posts, [])
+
+    def test_a_cover_plex_has_never_seen_is_still_uploaded(self):
+        # The rung that must survive: a new book, nothing of ours in the list.
+        AG.upload_and_select_poster(
+            'guid-c', COVER, 'test', state=self._state([], selected=None))
+        self.assertEqual(len(self.posts), 1, 'the birth case must still upload')
+
+    def test_an_already_selected_cover_is_a_no_op(self):
+        sha, _padded, _bytes = AG.padded_variants(COVER)
+        result = AG.upload_and_select_poster(
+            'guid-d', COVER, 'test', state=self._state([sha], selected=sha))
+        self.assertTrue(result)
+        self.assertEqual(self.posts, [])
