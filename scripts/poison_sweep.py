@@ -28,37 +28,16 @@ USAGE (on the Plex box, where Preferences.xml and the media mount both exist)
 """
 
 import argparse
-import hashlib
 import html
 import os
 import re
 import sys
-import urllib.parse
-import urllib.request
+
+import plexlib
 
 # Must match RESELECT_PAD in Contents/Code/__init__.py -- the suffix the agent
 # appends to re-POST pixel-identical bytes as "new content" so Plex re-selects.
 RESELECT_PAD = b'\nincipit-reselect-v1'
-
-TIMEOUT = 30
-
-
-def fetch(url):
-    """Raw bytes for a Plex URL, or None."""
-    try:
-        with urllib.request.urlopen(url, timeout=TIMEOUT) as r:
-            return r.read()
-    except Exception as e:
-        print('    ! fetch failed: %s' % e, file=sys.stderr)
-        return None
-
-
-def api(base, path, token, **params):
-    """XML text for a Plex API path."""
-    params['X-Plex-Token'] = token
-    url = '%s%s?%s' % (base, path, urllib.parse.urlencode(params))
-    data = fetch(url)
-    return data.decode('utf-8', 'replace') if data else ''
 
 
 def directories(xml):
@@ -70,11 +49,6 @@ def directories(xml):
         if rk:
             out.append((rk.group(1), (title.group(1) if title else '?')))
     return out
-
-
-def thumb_bytes(base, rk, token):
-    """The item's CURRENT poster bytes, or None when it has none."""
-    return fetch('%s/library/metadata/%s/thumb?X-Plex-Token=%s' % (base, rk, token))
 
 
 def classify(album, artist):
@@ -96,7 +70,7 @@ def classify(album, artist):
 
 def part_file(base, album_rk, token):
     """The first media file path for an album, as PLEX sees it, or None."""
-    xml = api(base, '/library/metadata/%s/children' % album_rk, token)
+    xml = plexlib.api_text(base, '/library/metadata/%s/children' % album_rk, token)
     m = re.search(r'<Part\b[^>]*\bfile="([^"]*)"', xml)
     if not m:
         return None
@@ -141,28 +115,9 @@ def cover_on_disk(plex_path, path_from, path_to):
     return None, ('no-cover' if os.path.isdir(folder) else 'no-folder')
 
 
-def token_from_preferences(path):
-    """
-    The server's own Plex token, read from Preferences.xml.
-
-    Saves pasting a credential onto a command line, where it lands in shell
-    history and scrollback. The file is root/plex-readable only, which is
-    exactly who runs this on the Plex box. Returns '' when it is not readable
-    -- e.g. running from a workstation -- so --token and PLEX_TOKEN still work.
-    """
-    try:
-        with open(path) as fh:
-            m = re.search(r'PlexOnlineToken="([^"]+)"', fh.read())
-        return m.group(1) if m else ''
-    except Exception:
-        return ''
-
-
 def main():
     ap = argparse.ArgumentParser(description='Report albums whose poster is the artist photo.')
-    ap.add_argument('--url', default='http://10.0.1.99:32400', help='Plex base URL')
-    ap.add_argument('--token', default=os.environ.get('PLEX_TOKEN', ''), help='Plex token')
-    ap.add_argument('--section', default='33', help='library section key (artist library)')
+    plexlib.add_common_args(ap)
     ap.add_argument('--limit', type=int, default=0, help='stop after N artists (for a quick probe)')
     # Disk check. The SELECTION being clean does not mean the book is safe: the
     # poison lives in cover.jpg, and select_local_cover pushes cover.jpg back
@@ -178,17 +133,14 @@ def main():
                     help='the same tree as seen from HERE, e.g. '
                          '/mnt/remotes/10.0.1.98_data on the Plex box, or '
                          '/mnt/user/data on the media box. Enables the disk check.')
-    ap.add_argument('--prefs', default='/mnt/user/appdata/plex/Preferences.xml',
-                    help='Plex Preferences.xml, read for the token when none is given')
     args = ap.parse_args()
 
-    token = args.token or token_from_preferences(args.prefs)
+    token = plexlib.resolve_token(args)
     if not token:
-        print('need --token, PLEX_TOKEN, or a readable %s' % args.prefs, file=sys.stderr)
         return 2
 
     base = args.url.rstrip('/')
-    artists = directories(api(base, '/library/sections/%s/all' % args.section, token, type='8'))
+    artists = directories(plexlib.api_text(base, '/library/sections/%s/all' % args.section, token, type='8'))
     if args.limit:
         artists = artists[: args.limit]
     print('scanning %d artists in section %s\n' % (len(artists), args.section))
@@ -206,18 +158,18 @@ def main():
     samples = {'no-cover': [], 'no-folder': []}
 
     for i, (artist_rk, artist_name) in enumerate(artists, 1):
-        art = thumb_bytes(base, artist_rk, token)
+        art = plexlib.thumb_bytes(base, artist_rk, token)
         if not art:
             # No artist photo means nothing to be poisoned BY.
             no_artist_art += 1
             continue
         albums = directories(
-            api(base, '/library/metadata/%s/children' % artist_rk, token)
+            plexlib.api_text(base, '/library/metadata/%s/children' % artist_rk, token)
         )
         for album_rk, album_title in albums:
             scanned += 1
             kinds = []
-            kind = classify(thumb_bytes(base, album_rk, token), art)
+            kind = classify(plexlib.thumb_bytes(base, album_rk, token), art)
             if kind:
                 kinds.append('SELECTED/' + kind)
             if args.path_to:

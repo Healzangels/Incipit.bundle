@@ -29,14 +29,13 @@ USAGE (on the Plex box)
 
 import argparse
 import collections
-import os
 import re
 import sys
 import unicodedata
-import urllib.parse
-import urllib.request
-import xml.etree.ElementTree as ET
 
+import plexlib
+
+# The whole-library track fetch is a big response; give it room.
 TIMEOUT = 180
 
 # Runtime agreement below which two files are almost certainly the same
@@ -67,16 +66,6 @@ BLURB_RE = re.compile(
 AUDIO_EXT_RE = re.compile(r'\.([A-Za-z0-9]{2,4})$')
 
 
-def token_from_preferences(path):
-    """The server's own Plex token, or '' (see poison_sweep.py for the rationale)."""
-    try:
-        with open(path) as fh:
-            m = re.search(r'PlexOnlineToken="([^"]+)"', fh.read())
-        return m.group(1) if m else ''
-    except Exception:
-        return ''
-
-
 def fetch_albums(base, token):
     """
     ratingKey -> (guid, titleSort) for every album.
@@ -87,11 +76,8 @@ def fetch_albums(base, token):
     Miller's "Ascendant" are different books whose runtimes agree to 0.2%. One
     extra request buys certainty.
     """
-    url = '%s/library/sections/%s/all?%s' % (
-        base, ARGS.section, urllib.parse.urlencode(
-            {'type': '9', 'X-Plex-Token': token}))
-    with urllib.request.urlopen(url, timeout=TIMEOUT) as r:
-        root = ET.fromstring(r.read())
+    root = plexlib.api_xml(base, '/library/sections/%s/all' % ARGS.section, token,
+                           timeout=TIMEOUT, type='9')
     return {d.get('ratingKey'): ((d.get('guid') or '').replace(
                 'com.plexapp.agents.incipit://', ''), d.get('titleSort') or '')
             for d in root}
@@ -105,11 +91,8 @@ def fetch_tracks(base, token):
     Part children inline, so the per-album fan-out that made the poison sweep
     slow is not needed here.
     """
-    url = '%s/library/sections/%s/all?%s' % (
-        base, ARGS.section, urllib.parse.urlencode(
-            {'type': '10', 'X-Plex-Token': token}))
-    with urllib.request.urlopen(url, timeout=TIMEOUT) as r:
-        return ET.fromstring(r.read())
+    return plexlib.api_xml(base, '/library/sections/%s/all' % ARGS.section, token,
+                           timeout=TIMEOUT, type='10')
 
 
 def norm_title(s):
@@ -145,15 +128,11 @@ def foreign_reasons(name):
 def main():
     global ARGS
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
-    ap.add_argument('--url', default='http://127.0.0.1:32400', help='Plex base URL')
-    ap.add_argument('--token', default=os.environ.get('PLEX_TOKEN', ''))
-    ap.add_argument('--section', default='33', help='library section key')
-    ap.add_argument('--prefs', default='/mnt/user/appdata/plex/Preferences.xml')
+    plexlib.add_common_args(ap)
     ARGS = ap.parse_args()
 
-    token = ARGS.token or token_from_preferences(ARGS.prefs)
+    token = plexlib.resolve_token(ARGS)
     if not token:
-        print('need --token, PLEX_TOKEN, or a readable %s' % ARGS.prefs, file=sys.stderr)
         return 2
 
     base = ARGS.url.rstrip('/')
