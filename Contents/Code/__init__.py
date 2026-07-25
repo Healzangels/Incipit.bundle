@@ -571,19 +571,25 @@ def backup_selected_poster(helper):
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.info('incipit poster-backup: selection is our padded re-select of '
                  'this cover, skip'); return
-    # POISON GUARD (first write only). A fresh book with no poster of its own
-    # shows its ARTIST's art, and the first metadata pass fires before a real
-    # cover is selected -- so the "current selection" is the inherited author
-    # photo, and mirroring THAT seeds cover.jpg with it (10 books hit this on the
-    # last rebuild). Gate strictly on `not existing`: this is the ONE moment the
-    # poison can be born, and skipping it costs nothing because there is no cover
-    # to preserve. A book that already has a cover.jpg is past this window and
-    # takes the normal mirror above -- so an inherited-looking thumb stamp can
-    # never false-skip a real cover (the ground truth, not a version heuristic,
-    # decides). Compare the SELECTED bytes to the artist's actual poster bytes;
-    # identical means we are about to write the author photo, so refuse and let a
-    # later pass -- once a real cover is selected -- write the true one.
-    if not existing and parent_thumb:
+    # POISON GUARD. A fresh book with no poster of its own shows its ARTIST's
+    # art, and the first metadata pass fires before a real cover is selected --
+    # so the "current selection" is the inherited author photo, and mirroring
+    # THAT seeds cover.jpg with it (10 books hit this on the last rebuild).
+    #
+    # This used to be gated on `not existing`, i.e. the first write only, on the
+    # theory that the birth moment was the only one worth guarding. It is not.
+    # The selection can BECOME the artist photo at any time -- most easily via
+    # select_local_cover pushing an already-poisoned cover.jpg back into Plex --
+    # and mirroring that over a good cover.jpg destroys curated art, which is the
+    # one outcome this bundle must never produce. Byte-identity with the artist's
+    # own poster is ground truth, not a version heuristic, so there is no
+    # false-skip risk in applying it to every write: the ONLY thing refused is a
+    # cover that IS the author photo, which is never a legitimate book cover.
+    #
+    # Fails closed when the artist poster cannot be read -- a skipped mirror
+    # retries on the next refresh (no mark_done below), whereas a wrong write is
+    # permanent.
+    if parent_thumb:
         try:
             aurl = parent_thumb if parent_thumb.startswith('http') else PMS + parent_thumb
             artist_bytes = HTTP.Request(aurl, timeout=8, cacheTime=0).content
@@ -592,9 +598,10 @@ def backup_selected_poster(helper):
                       'poison check (%s) -- skipping this write to be safe', e)
             return
         if selection_is_artist_art(artist_bytes, selected):
-            log.warn('incipit poster-backup: first cover would be the inherited ARTIST '
-                     'poster (byte-identical) -- refusing so the book is not poisoned; '
-                     'a real cover will mirror once selected')
+            log.warn('incipit poster-backup: the selection is the inherited ARTIST '
+                     'poster (byte-identical) -- refusing to mirror it to %s, so the '
+                     'book is not poisoned; a real cover will mirror once selected',
+                     'a new cover.jpg' if not existing else 'the existing cover.jpg')
             return
     # Whoever chose the selection, it is what Plex shows, so it is what the
     # sidecar mirrors -- no ownership test, and no posters round-trip to make
@@ -723,6 +730,37 @@ def selection_is_artist_art(artist_bytes, selected):
     except Exception:
         return False
     return len(padded) == len(selected) and padded == selected
+
+
+def artist_poster_bytes(guid, tag):
+    """
+        The ARTIST's currently-selected poster bytes for the item with `guid`,
+        or None on any failure.
+
+        `parentThumb` rides along in the same /library/all response the other
+        poster paths already read, so recognising inherited art costs one
+        localhost round-trip plus the image itself -- and only on the paths that
+        are about to CHANGE a selection or write to disk, never on a converged
+        refresh. None means "could not tell", and every caller treats that as
+        "do not claim poison", so an SMB blip can never manufacture a false
+        positive that blocks a legitimate cover.
+    """
+    try:
+        url = PMS + '/library/all?guid=' + urllib.quote(guid)
+        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
+        if guid_lookup_is_ambiguous(text, tag):
+            return None
+        # capital-T parentThumb, so a lowercase thumb= match can't collide.
+        pm = re.search(r'parentThumb="([^"]*)"', text)
+        if not pm or not pm.group(1):
+            return None
+        purl = pm.group(1)
+        if not purl.startswith('http'):
+            purl = PMS + purl
+        return HTTP.Request(purl, timeout=8, cacheTime=0).content
+    except Exception as e:
+        log.error('%s: could not read the artist poster (%s)', tag, e)
+        return None
 
 
 def selection_is_agent_owned(selected_key, owned_shas):
@@ -1048,6 +1086,41 @@ def select_local_cover(helper, cover_bytes=None):
         log.info('%s: selection is a user upload -- leaving it', tag)
         mark_done(tag, guid, sha)
         return
+    # POISON GUARD (select side). cover.jpg on disk can itself BE the artist
+    # photo -- that is what "poisoned" means -- and this function's whole job is
+    # to force cover.jpg to become the selection, padding the bytes to defeat
+    # Plex's de-duplication when it has to. So on a poisoned book it does not
+    # merely fail to help: it actively re-poisons the album, overwriting a good
+    # poster the operator had just picked by hand.
+    #
+    # Measured live on Brian Jacques / "Mattimeo": the operator selected a real
+    # cover, hit Refresh Metadata, and this path re-uploaded the 12,575-byte
+    # author photo as a 12,595-byte padded re-select and re-selected it. A
+    # second refresh 79 seconds later "worked" only because should_run's 90s
+    # window happened to suppress this call -- so the same action gave opposite
+    # results and the fix looked random.
+    #
+    # The existing guard in backup_selected_poster only stops poison being
+    # WRITTEN to disk for the first time; nothing stopped poison already on disk
+    # being pushed back into Plex. Refuse, and let backup_selected_poster mirror
+    # whatever is legitimately selected over the bad cover.jpg -- which is
+    # exactly what the accidental second refresh did.
+    #
+    # Skipped on a book that has already converged (cover.jpg IS the selection),
+    # which is the overwhelmingly common case: there is nothing to push, so the
+    # read would be pure cost and "a converged library does no work on refresh"
+    # would stop being true.
+    converged = bool(selected_key) and (sha in selected_key or sha_padded in selected_key)
+    if not converged:
+        artist_bytes = artist_poster_bytes(guid, tag)
+        if selection_is_artist_art(artist_bytes, cover_bytes):
+            # Memoised on the cover's own sha, so a repaired cover.jpg re-runs
+            # immediately rather than waiting out the TTL.
+            mark_done(tag, guid, sha)
+            log.warn('%s: cover.jpg IS the artist photo (byte-identical) -- refusing '
+                     'to select it, so the book is not re-poisoned; the current '
+                     'selection stands and will mirror to disk', tag)
+            return
     upload_and_select_poster(guid, cover_bytes, tag, token=sha, state=state)
 
 
