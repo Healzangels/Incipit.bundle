@@ -825,11 +825,15 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
 
         Live findings that shape the logic: POST /posters selects only NEW
         content; re-POSTing an existing upload is a no-op; the agent's PUT is
-        downgraded to GET. When our bytes already exist as a DE-selected
-        upload, re-POST with the deterministic RESELECT_PAD suffix -- new
-        content to the store, identical pixels -- which re-selects. (The pad
-        trick is the one unverified-by-live-test lever here; its WARN line
-        makes the first real occurrence auditable.)
+        downgraded to GET.
+
+        So this can only ADD a poster Plex does not already hold. It used to go
+        further -- when our bytes existed as a DE-selected upload it re-POSTed
+        them with the RESELECT_PAD suffix, new content to the store with
+        identical pixels, which re-selects. That lever is gone (v1.3.112): the
+        only thing that de-selects our cover is a person choosing another
+        poster, so re-selecting it overrode them. A de-selected cover now ends
+        the attempt and backup_selected_poster mirrors their choice to disk.
 
         `token` keys the per-track memo (callers pass a cheap identity like the
         image URL or the cover sha); `state` is an optional precomputed
@@ -897,9 +901,12 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
         up = PMS + '/library/metadata/' + rk + '/posters'
         HTTP.Request(up, data=post_bytes,
                      headers={'Content-Type': content_type}, timeout=8)
-        log.warn('%s: uploaded + selected (rk %s, %s bytes, %s%s)',
-                 tag, rk, len(post_bytes), content_type,
-                 ', PADDED re-select' if have_plain else '')
+        # Only ever a plain upload now: the padded re-select rung was removed
+        # above, so this can only be reached when Plex does not have our bytes.
+        # The old ", PADDED re-select" suffix was left unreachable here, which
+        # reads in both the source and a log grep as though the lever survives.
+        log.warn('%s: uploaded + selected (rk %s, %s bytes, %s)',
+                 tag, rk, len(post_bytes), content_type)
         mark_done(tag, guid, memo_token)
         return True
     except Exception as e:
