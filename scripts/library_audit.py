@@ -77,6 +77,26 @@ def token_from_preferences(path):
         return ''
 
 
+def fetch_albums(base, token):
+    """
+    ratingKey -> (guid, titleSort) for every album.
+
+    The guid is what actually settles a duplicate: two rows with the SAME guid
+    are the same edition, full stop. Runtime agreement is only a proxy, and it
+    produces false positives -- Craig Alanson's "Ascendant" and Michael R.
+    Miller's "Ascendant" are different books whose runtimes agree to 0.2%. One
+    extra request buys certainty.
+    """
+    url = '%s/library/sections/%s/all?%s' % (
+        base, ARGS.section, urllib.parse.urlencode(
+            {'type': '9', 'X-Plex-Token': token}))
+    with urllib.request.urlopen(url, timeout=TIMEOUT) as r:
+        root = ET.fromstring(r.read())
+    return {d.get('ratingKey'): ((d.get('guid') or '').replace(
+                'com.plexapp.agents.incipit://', ''), d.get('titleSort') or '')
+            for d in root}
+
+
 def fetch_tracks(base, token):
     """
     Every TRACK in the section, with its file, size and runtime.
@@ -136,7 +156,9 @@ def main():
         print('need --token, PLEX_TOKEN, or a readable %s' % ARGS.prefs, file=sys.stderr)
         return 2
 
-    root = fetch_tracks(ARGS.url.rstrip('/'), token)
+    base = ARGS.url.rstrip('/')
+    meta = fetch_albums(base, token)
+    root = fetch_tracks(base, token)
 
     # album ratingKey -> {artist, title, parts[(file,size,duration)]}
     albums = {}
@@ -159,11 +181,13 @@ def main():
         a['path'] = a['parts'][0][0] if a['parts'] else ''
     print('albums: %d   tracks: %d\n' % (len(albums), sum(len(a['parts']) for a in albums.values())))
 
-    def line(rk, a, indent='   '):
+    def line(rk, a, indent='   ', guid=False):
         rel = re.sub(r'^.*?/audiobooks[^/]*/', '', a['path'])
         print('%srk=%-7s %-20s %5.1f h  %7.1f MB  %-9s %s'
               % (indent, rk, a['artist'][:20], hours(a['dur']), a['size'] / 1e6,
                  '+'.join(a['exts']), rel[:78]))
+        if guid:
+            print('%s%s guid: %s' % (indent, ' ' * 8, meta.get(rk, ('?', ''))[0]))
 
     # ---- 1. duplicate titles, ACROSS artists ------------------------------
     print('=' * 100)
@@ -177,14 +201,22 @@ def main():
         group = sorted(dupes[key], key=lambda x: -x[1]['dur'])
         print('\n  "%s"  x%d' % (group[0][1]['title'][:60], len(group)))
         for rk, a in group:
-            line(rk, a)
-        durs = [a['dur'] for _, a in group if a['dur']]
-        if len(durs) > 1 and max(durs):
-            spread = (max(durs) - min(durs)) / float(max(durs))
-            if spread <= SAME_RUNTIME_TOLERANCE:
-                print('      -> runtimes agree (%.1f%%): almost certainly the SAME recording' % (spread * 100))
-            else:
-                print('      -> runtimes differ by %.0f%%: probably DIFFERENT books sharing a title' % (spread * 100))
+            line(rk, a, guid=True)
+        # The guid decides when we have it: same guid == same edition, and
+        # DIFFERENT guids mean two real books however close their runtimes are.
+        guids = {meta.get(rk, ('?', ''))[0] for rk, _ in group}
+        if len(guids) == 1 and '?' not in guids:
+            print('      -> SAME guid: definitively one edition held twice')
+        elif len(guids) == len(group):
+            print('      -> DIFFERENT guids: separate books that share a title, not duplicates')
+        else:
+            durs = [a['dur'] for _, a in group if a['dur']]
+            if len(durs) > 1 and max(durs):
+                spread = (max(durs) - min(durs)) / float(max(durs))
+                verdict = ('runtimes agree (%.1f%%): likely the SAME recording' % (spread * 100)
+                           if spread <= SAME_RUNTIME_TOLERANCE
+                           else 'runtimes differ by %.0f%%: probably DIFFERENT books' % (spread * 100))
+                print('      -> guids inconclusive; %s' % verdict)
     print('\n  duplicate title groups: %d' % len(dupes))
 
     # ---- 2. mixed formats -------------------------------------------------
