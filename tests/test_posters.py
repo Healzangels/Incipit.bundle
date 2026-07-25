@@ -265,5 +265,106 @@ class PrefAssertedReselect(unittest.TestCase):
         self.assertEqual(self.posts, [])
 
 
+class PortraitDeferralMirror(unittest.TestCase):
+    """
+    A portrait cover.jpg must not disable the mirror for the whole book.
+
+    The gate used to skip backup_selected_poster entirely whenever the local
+    cover was portrait-deferred, to stop the agent's AUTOMATIC online-cover
+    default from overwriting the operator's file. Right fear, wrong scope: it
+    also swallowed every DELIBERATE pick -- measured live on Nick Jones /
+    "The Unexpected Gift of Joseph Bridgeman" (2026-07-25), where a hand-picked
+    poster plus Refresh Metadata changed nothing on disk, silently, because the
+    old cover.jpg happened to be a print jacket.
+
+    The distinguishing fact: the agent only ever auto-selects the ONLINE cover
+    it deferred to. Any other selection was a human act. So the mirror now runs
+    on portrait books too, and skips only when the selection is byte-identical
+    to that deferred default (fail-closed when the default can't be fetched).
+    This is the third repair path this flag has silently suppressed (poison
+    repair in v1.3.108, now the mirror) -- prefer narrowing it over gating on it.
+    """
+
+    ONLINE = b'\xff\xd8\xff\xe0 the square online cover'
+    PICKED = b'\xff\xd8\xff\xe0 the poster the operator picked'
+    PORTRAIT = b'\xff\xd8\xff\xe0 old portrait print jacket'
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        self.writes = []
+        self.saved = (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
+                      AG.fetch_url_bytes, AG.read_poster_state)
+        self.selected_bytes = self.PICKED
+        self.online_bytes = self.ONLINE
+        outer = self
+
+        def router(url, **kwargs):
+            class FakeResponse(object):
+                content = ''
+            reply = FakeResponse()
+            if '/library/all' in url:
+                reply.content = ('<MediaContainer size="1">'
+                                 '<Directory ratingKey="55" '
+                                 'thumb="/library/metadata/55/thumb/1"/>'
+                                 '</MediaContainer>')
+            elif '/thumb/' in url:
+                reply.content = outer.selected_bytes
+            return reply
+
+        AG.HTTP.Request = router
+        AG.Core.storage.load = lambda path: outer.PORTRAIT
+        AG.write_cover_sidecar = (
+            lambda path, data: outer.writes.append((path, data)) or True)
+        AG.fetch_url_bytes = lambda url: outer.online_bytes
+        # F13 curated-file guard: no poster state -> the guard stands aside,
+        # which is this book's real shape (a deferred portrait was never
+        # uploaded, so there is no upload key to protect).
+        AG.read_poster_state = lambda guid, tag: None
+
+    def tearDown(self):
+        (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
+         AG.fetch_url_bytes, AG.read_poster_state) = self.saved
+        AG.recent_work_memo.clear()
+
+    def _helper(self):
+        class FakeMetadata(object):
+            guid = 'com.plexapp.agents.incipit://TESTBRIDGE_us'
+
+        class FakeHelper(object):
+            metadata = FakeMetadata()
+            thumb = 'https://images.example/online-cover.jpg'
+            force = True
+
+            def album_file_path(self):
+                return '/data/media/x/1 - Book/file.m4b'
+
+        return FakeHelper()
+
+    def test_a_deliberate_pick_is_mirrored_despite_the_portrait(self):
+        # The Bridgeman case: portrait on disk, operator picked a different
+        # poster. The old gate skipped the mirror wholesale; the pick must land.
+        AG.backup_selected_poster(self._helper(), portrait_deferred=True)
+        self.assertEqual(len(self.writes), 1, 'the pick must reach cover.jpg')
+        self.assertEqual(self.writes[0][1], self.PICKED)
+
+    def test_the_deferred_default_is_still_never_mirrored(self):
+        # The danger the gate existed for: the agent's own automatic online
+        # default must not overwrite the operator's portrait file.
+        self.selected_bytes = self.ONLINE
+        AG.backup_selected_poster(self._helper(), portrait_deferred=True)
+        self.assertEqual(self.writes, [])
+
+    def test_an_unreadable_default_fails_closed(self):
+        # Cannot tell a pick from the default -> do not guess with a write.
+        self.online_bytes = None
+        AG.backup_selected_poster(self._helper(), portrait_deferred=True)
+        self.assertEqual(self.writes, [])
+
+    def test_a_normal_book_still_mirrors_without_the_flag(self):
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(len(self.writes), 1)
+        self.assertEqual(self.writes[0][1], self.PICKED)
+
+
 if __name__ == '__main__':
     unittest.main()

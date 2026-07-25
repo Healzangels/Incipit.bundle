@@ -430,11 +430,19 @@ def promote_picked_cover(helper):
                  tag, cover_path, len(selected))
 
 
-def backup_selected_poster(helper):
+def backup_selected_poster(helper, portrait_deferred=False):
     """
         Mirror the poster Plex is CURRENTLY showing to cover.jpg next to the
         book, so every item ends up with one and it survives a library rebuild
         (the fresh scan re-serves it via prefer_local_cover).
+
+        `portrait_deferred` says the update pass declined to make the local
+        portrait cover.jpg the default. The mirror still runs -- a deliberate
+        pick must land on disk (measured live on Nick Jones / Joseph Bridgeman:
+        a hand-picked poster changed nothing, silently, because the whole
+        mirror used to be gated off for portrait books). What it must NOT do is
+        write the agent's own deferred-to ONLINE default over the operator's
+        file, so that one selection -- and only that one -- is refused below.
 
         THE RULE (operator's model): cover.jpg is a faithful mirror of the
         current selection, whoever chose it -- a hand-picked upload, the
@@ -563,6 +571,31 @@ def backup_selected_poster(helper):
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.info('incipit poster-backup: selection is our padded re-select of '
                  'this cover, skip'); return
+    # PORTRAIT DEFERRAL. The update pass declined to default to the local
+    # portrait cover.jpg and made the ONLINE cover the default instead -- with
+    # no human involved. Mirroring that automatic default would overwrite the
+    # operator's file, which is why this mirror used to be skipped WHOLESALE for
+    # portrait books. Wrong scope: it also swallowed every deliberate pick. The
+    # agent only ever auto-selects the online cover it deferred to, so that is
+    # the ONE selection refused here; anything else was a human act and mirrors.
+    # selection_is_artist_art is reused for the comparison because it IS the
+    # comparison: byte identity, plain or our padded form. Fails closed when the
+    # online default cannot be fetched -- a guess must not become a write.
+    if portrait_deferred and existing:
+        online = fetch_url_bytes(helper.thumb) if helper.thumb else None
+        if online is None:
+            log.error('incipit poster-backup: portrait cover.jpg deferred and the '
+                      'online default could not be read -- cannot tell a pick from '
+                      'the default, skipping so the file is not overwritten by a guess')
+            return
+        if selection_is_artist_art(online, selected):
+            log.info('incipit poster-backup: portrait cover.jpg deferred and the '
+                     'selection is the online default we deferred to -- not '
+                     'mirroring the automatic choice over the operator\'s file')
+            return
+        log.warn('incipit poster-backup: portrait cover.jpg deferred but the '
+                 'selection is NOT the deferred default -- honoring it as a '
+                 'deliberate pick')
     # POISON GUARD. A fresh book with no poster of its own shows its ARTIST's
     # art, and the first metadata pass fires before a real cover is selected --
     # so the "current selection" is the inherited author photo, and mirroring
@@ -2139,19 +2172,15 @@ class AudiobookAlbum(Agent.Album):
         # backup-first order clobbered a freshly-dropped cover.jpg with the
         # previous selection before prefer_local could ever serve it.
         #
-        # NOT when we deferred a portrait local cover. That path deliberately
-        # leaves the ONLINE cover as the selection, and this mirror has no
-        # ownership test ("whoever chose the selection, it is what Plex shows"),
-        # so it would write the online bytes straight over the operator's
-        # cover.jpg -- destroying a hand-curated file on disk AND in Plex. The
-        # poison guard is first-write-only, so an existing cover is unprotected.
-        # Deferring is a DISPLAY preference; it must never edit the media folder.
-        if (
-            Prefs['backup_poster_to_cover']
-            and helper.force
-            and not deferred_portrait_local
-        ):
-            backup_selected_poster(helper)
+        # The portrait deferral no longer gates the mirror off wholesale -- that
+        # swallowed every deliberate pick on a portrait book (measured live on
+        # Joseph Bridgeman: hand-picked poster, Refresh, nothing on disk, no log).
+        # The flag is passed down instead, and backup_selected_poster refuses
+        # exactly ONE selection: the online default the deferral itself made,
+        # which is the only selection that can occur without a human act.
+        if Prefs['backup_poster_to_cover'] and helper.force:
+            backup_selected_poster(helper,
+                                   portrait_deferred=deferred_portrait_local)
         # Rating.
         helper.set_metadata_rating()
 
