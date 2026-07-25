@@ -578,6 +578,50 @@ class AlbumUpdateTool(UpdateTool):
         log.debug('incipit series-from-path: no file path in update media')
         return None
 
+    def folder_series_wins(self):
+        """
+            Whether the FOLDER should override a provider that supplied BOTH a
+            series name and a position.
+
+            Global pref first, then a per-author allow-list. The list exists
+            because folder quality varies WITHIN one library, so this cannot be
+            a single switch:
+
+              * Katherine Addison's Chronicles of Osreth came back from one
+                provider under TWO names -- the parent for books 1 and 3, a
+                "...: The Cemeteries of Amalo Trilogy" sub-series for the two in
+                between, whose numbering restarts at 1. The shelf ended up with
+                two Book 1s. Her folders have it right: 1, 1.1, 2, 3, 4.
+              * Glen Cook's twelve books sort correctly today PRECISELY because
+                the provider wins: his folders carry three different series
+                names and reuse numbers (two "1 -", two "2 -"). Turning the
+                global pref on would fix Addison by fragmenting Cook.
+
+            Matched on the folded name key, so spacing, punctuation and accents
+            in the pref do not decide it -- same treatment the folder anchor
+            gets, and the same shape as authors_prefer_hardcover.
+        """
+        if bool(self.prefs['series_from_folder_wins']):
+            return True
+        listed = (self.prefs['series_from_folder_authors'] or '').strip()
+        if not listed:
+            return False
+        wanted = []
+        for entry in listed.split(','):
+            key = name_key(entry)
+            if key and key not in wanted:
+                wanted.append(key)
+        if not wanted:
+            return False
+        for person in (self.author or []):
+            person_name = person.get('name') if isinstance(person, dict) else None
+            if not person_name:
+                continue
+            for variant in author_name_variants(person_name):
+                if variant in wanted:
+                    return True
+        return False
+
     def derive_series_from_path(self):
         """
             Fill a MISSING series (name + book number) from the on-disk folder
@@ -604,7 +648,7 @@ class AlbumUpdateTool(UpdateTool):
         # the shelf. So keep going when either half is missing, and fill only
         # the half the provider left empty -- unless the operator has asked for
         # the folder to win outright, in which case run even with both present.
-        folder_wins = bool(self.prefs['series_from_folder_wins'])
+        folder_wins = self.folder_series_wins()
         if self.series and self.volume and not folder_wins:
             return
         raw = self.album_file_path()

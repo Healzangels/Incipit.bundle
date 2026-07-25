@@ -48,25 +48,40 @@ CODE = os.path.join(os.path.dirname(HERE), 'Contents', 'Code')
 MODULE_ORDER = ('_version', 'logging', 'region_tools', 'search_tools', 'update_tools')
 
 
-class FakePrefs(dict):
-    """Prefs[...] with the DefaultPrefs values the pure paths read."""
+def _default_prefs():
+    """
+    The shipped defaults, read from Contents/DefaultPrefs.json.
 
-    DEFAULTS = {
-        'logging_level': 'INFO',
-        'dev_disable_http_cache': False,
-        'series_from_folder_wins': False,
-        'prefer_local_cover': True,
-        'backup_poster_to_cover': True,
-        'strip_series_from_author': True,
-        'prefer_sidecar_metadata': True,
-        'api_base_url': 'http://127.0.0.1:3737',
-        'authors_prefer_hardcover': '',
-    }
+    Loaded from the real file rather than hand-copied so the two cannot drift.
+    A hand-maintained copy immediately did: a pref added to the JSON was missing
+    here, and three unrelated tests started raising KeyError -- which reads as a
+    product bug and is not one. It also makes the harness faithful in the other
+    direction: code that reads a pref never declared in DefaultPrefs.json now
+    raises here, exactly as it would in Plex.
+    """
+    import json
+    path = os.path.join(os.path.dirname(CODE), 'DefaultPrefs.json')
+    out = {}
+    with open(path) as handle:
+        for entry in json.load(handle):
+            value = entry.get('default', '')
+            if entry.get('type') == 'bool':
+                value = str(value).lower() == 'true'
+            out[entry['id']] = value
+    return out
+
+
+class FakePrefs(dict):
+    """Prefs[...] backed by the shipped DefaultPrefs.json."""
+
+    DEFAULTS = _default_prefs()
 
     def __getitem__(self, key):
         if key in self:
             return dict.__getitem__(self, key)
-        return self.DEFAULTS.get(key, '')
+        # KeyError on an undeclared pref, deliberately: Plex would return None
+        # and the bug would surface later as odd behaviour instead of here.
+        return self.DEFAULTS[key]
 
 
 def _strip_diacritics(value):
@@ -117,8 +132,19 @@ def _make_framework():
                                                                save=_unavailable))
     Proxy = types.SimpleNamespace(Media=lambda data, **kw: ('media', len(data or b'')),
                                   Preview=lambda *a, **kw: None)
-    Log = types.SimpleNamespace(Debug=lambda *a, **kw: None, Info=lambda *a, **kw: None,
-                                Warn=lambda *a, **kw: None, Error=lambda *a, **kw: None)
+    # Plex's Log is BOTH callable and a namespace -- logging.py uses `Log(msg)`
+    # for info/warn and `Log.Debug`/`Log.Error` for the rest. A plain namespace
+    # raised "not callable" from inside the code under test, which reads as a
+    # product bug and is not one.
+    class _Log(object):
+        def __call__(self, *a, **kw):
+            return None
+        Debug = staticmethod(lambda *a, **kw: None)
+        Info = staticmethod(lambda *a, **kw: None)
+        Warn = staticmethod(lambda *a, **kw: None)
+        Error = staticmethod(lambda *a, **kw: None)
+
+    Log = _Log()
     Agent = types.SimpleNamespace(Artist=type('Artist', (object,), {}),
                                   Album=type('Album', (object,), {}))
     Datetime = types.SimpleNamespace(ParseDate=_unavailable)

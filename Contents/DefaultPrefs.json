@@ -79,6 +79,12 @@
         "default": "false"
     },
     {
+        "id": "series_from_folder_authors",
+        "label": "Authors whose FOLDER tree decides series + book number, even when the provider supplies both (comma-separated, e.g. \"Katherine Addison\"). Use for a series the provider splits into sub-series with restarting numbers. Leave empty unless a series looks scrambled -- for most authors the provider is more consistent than the folders.",
+        "type": "text",
+        "default": ""
+    },
+    {
         "id": "authors_prefer_hardcover",
         "label": "Authors to show the Hardcover portrait for instead of the Audible photo (comma-separated, e.g. \"Craig Alanson, Robert Jordan\"). Every other author uses the Audible photo. Applies on a fresh scan.",
         "type": "text",
