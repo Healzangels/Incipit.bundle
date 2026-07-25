@@ -11,16 +11,46 @@ log = Logging()
 
 asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
 region_regex = re.compile(r'(?<=\[)[A-Za-z]{2}(?=\])')
-NAME_KEY_STRIP_RE = re.compile(r'[^a-z0-9]+')
+# THE name-comparison key for the whole bundle. Lives here because both
+# __init__ and update_tools already import from this module, and neither can
+# import the other without a cycle -- so this is the one place all three can
+# share, and there is no longer a second spelling to drift from.
+#
+# \W with re.UNICODE, NOT the older [^a-z0-9]: that class DELETED accented
+# letters rather than folding them, so "Jose Saramago" (an ASCII folder on an
+# SMB share) and "Jos\xe9 Saramago" (the tag) keyed to 'josesaramago' vs
+# 'jossaramago' and never matched -- silently disabling folder_author_confirmed,
+# the root-free swap-correction gate. A fully non-Latin name folded to '' and
+# was permanently dead there.
+NAME_KEY_STRIP_RE = re.compile(r'[\W_]+', re.UNICODE)
 
 
 def name_key(value):
     """
         Punctuation/space/case-insensitive key for comparing two person names,
-        so "J.K. Rowling", "J. K. Rowling" and "JK Rowling" all compare equal.
+        so "J.K. Rowling", "J. K. Rowling" and "JK Rowling" all compare equal,
+        and so do "Jose Saramago" and its accented spelling.
+
+        StripDiacritics FOLDS rather than deletes, and the word-char strip keeps unicode
+        word characters, so a Cyrillic or CJK name yields a real key instead of
+        collapsing to ''.
+
+        The `folded.strip()` test is load-bearing: StripDiacritics is the
+        NFKD -> encode('ASCII','ignore') idiom, so a MULTI-WORD non-Latin name
+        folds to nothing but its spaces -- a two-word Cyrillic name becomes ' ', which is TRUTHY.
+        A bare `if folded:` therefore replaced the name with a space and returned
+        '', and every caller that treats '' as "no name" bailed. A single-token
+        name folds to '' (falsy) and kept the original, which is why the hole
+        stayed hidden.
     """
     if not value:
         return ''
+    try:
+        folded = String.StripDiacritics(value)
+        if folded and folded.strip():
+            value = folded
+    except Exception:
+        pass
     try:
         return NAME_KEY_STRIP_RE.sub('', value.lower())
     except Exception:

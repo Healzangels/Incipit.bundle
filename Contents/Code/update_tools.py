@@ -1,7 +1,7 @@
 # Import internal tools
 from logging import Logging
 from region_tools import RegionTool
-from search_tools import quote_param
+from search_tools import MULTI_AUTHOR_RE, name_key, quote_param
 import re
 import struct
 import StringIO
@@ -110,45 +110,8 @@ def series_key(name):
 FOLDER_NUMBER_RE = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,2})?)\s*[-._\s]\s*\S')
 
 
-# Co-author separators, mirroring search_tools.MULTI_AUTHOR_RE: comma,
-# ampersand, semicolon, slash, or the word "and". Whitespace around "and"/"&"
-# keeps it from splitting inside a name ("Rand", "Anderson").
-AUTHOR_SPLIT_RE = re.compile(
-    r'\s*,\s*|\s+&\s+|\s+and\s+|\s*;\s*|\s*/\s*', re.IGNORECASE
-)
-
-
-# Fold a person's name to a comparison key. Mirrors author_pref_key in
-# __init__.py -- same problem, same recipe -- kept local because importing back
-# from __init__ would be circular.
-NAME_KEY_STRIP_RE = re.compile(r'[\W_]+', re.UNICODE)
-
-
-def author_key(name):
-    """
-        Comparison key for two spellings of one author's name: case-, spacing-,
-        punctuation- and diacritic-insensitive.
-
-        The folder anchor below compared raw lowercased strings, so the library
-        folder "James S.A. Corey" never equalled the credited "James S. A.
-        Corey" -- one space -- and The Expanse's own book 10 lost its series
-        sort title while all nineteen siblings kept theirs. Punctuation and
-        spacing vary constantly between a provider's credit and a folder name;
-        the identity does not.
-
-        StripDiacritics folds rather than deletes, so "José"/"Jose" agree, and
-        the \\W strip keeps unicode word characters so a fully non-Latin name
-        does not collapse to '' (both traps are documented on author_pref_key).
-    """
-    if not name:
-        return ''
-    try:
-        folded = String.StripDiacritics(name)
-        if folded:
-            name = folded
-    except Exception:
-        pass
-    return NAME_KEY_STRIP_RE.sub('', name.lower())
+# Generational/honorific tails that survive a comma split but name nobody.
+NAME_SUFFIX_KEYS = ('jr', 'sr', 'ii', 'iii', 'iv', 'phd', 'md', 'esq')
 
 
 def author_name_variants(name):
@@ -172,8 +135,14 @@ def author_name_variants(name):
         and series-folder checks still have to pass.
     """
     out = []
-    for part in [name] + AUTHOR_SPLIT_RE.split(name):
-        cleaned = author_key(part)
+    for part in [name] + MULTI_AUTHOR_RE.split(name):
+        cleaned = name_key(part)
+        # A generational suffix is not an author. "Martin Luther King, Jr."
+        # split on the comma and contributed 'jr', which is neither a credited
+        # name nor something a folder is called -- contradicting the claim
+        # below and offering a one-token key that could anchor by accident.
+        if cleaned in NAME_SUFFIX_KEYS:
+            continue
         if cleaned and cleaned not in out:
             out.append(cleaned)
     return out
@@ -192,8 +161,14 @@ def series_from_path_segments(segments, author_names):
         number, or a shallow path -- yields (None, None) so libraries that use a
         different convention are never mis-tagged.
 
-        `author_names` is a list of folded credited-author keys (author_key),
-        so a folder's spacing and punctuation never decide the anchor.
+        `author_names` is a list of folded credited-author keys (name_key),
+        so a folder's spacing and punctuation never decide the anchor. The
+        FOLDER is expanded the same way, because the mismatch runs in both
+        directions: a provider may credit "TheFirstDefier & JF Brink" against a
+        <TheFirstDefier> folder, and a library may equally file <TheFirstDefier
+        & JF Brink> against two separately-credited authors. Widening only the
+        provider side fixed the first and left the second bailing on exactly
+        the records the fallback exists for.
     """
     clean = [s.strip() for s in segments if s and s.strip()]
     # Need <author>/<series>/<book folder>/<file>.
@@ -205,11 +180,15 @@ def series_from_path_segments(segments, author_names):
     number = FOLDER_NUMBER_RE.match(book_folder)
     if not number:
         return (None, None)
-    # Anchor: the folder two levels above the file must be the author.
-    if not author_names or author_key(author_folder) not in author_names:
+    # Anchor: the folder two levels above the file must be the author -- in
+    # ANY of the spellings either side uses for a co-written credit.
+    if not author_names:
+        return (None, None)
+    folder_keys = author_name_variants(author_folder)
+    if not [k for k in folder_keys if k in author_names]:
         return (None, None)
     # The series folder must be a real name, not a number or the author again.
-    if re.match(r'^\d+$', series_folder) or author_key(series_folder) in author_names:
+    if re.match(r'^\d+$', series_folder) or name_key(series_folder) in author_names:
         return (None, None)
     return (series_folder, number.group(1))
 
@@ -677,14 +656,17 @@ class AlbumUpdateTool(UpdateTool):
                 'authors=%s', path, author_names
             )
             return
+        # The provider's own series name, captured BEFORE the assignment below
+        # overwrites it. Without this the log line that exists to surface a
+        # disagreement could only print the folder's name -- i.e. it could not
+        # show what it replaced, which was the one thing it was for.
+        provider_series = self.series
         # A provider series NAME with no POSITION can never build a sort title:
         # set_metadata_sort_title needs both halves, so such a book sorts as a
         # bare title and drops out of its own series on the shelf. Keeping that
         # unusable name while refusing the folder's usable name+number pair is
         # the worst of both. So when the provider numbered nothing, take the
-        # folder's PAIR -- the name too, not just the number, because grafting
-        # the folder's index onto a DIFFERENT provider series name is exactly
-        # the mis-shelving the series_agrees guard below exists to prevent.
+        # folder's PAIR -- the name AND the number together.
         #
         # Live case: "Arcanum Unbounded" is credited to "The Mistborn Saga"
         # with no position, while the library files it at <Brandon
@@ -692,24 +674,27 @@ class AlbumUpdateTool(UpdateTool):
         # sort it; the folder's can.
         #
         # Bounded to books that TODAY have no sort series at all: a provider
-        # that supplied a position still wins outright (its self.volume is set,
-        # so this is false and the guard below runs unchanged), which is what
-        # keeps sibling sub-series like "Elantris, Book 2" out of their parent
-        # Cosmere shelf numbering.
-        unnumbered_provider_series = bool(self.series) and not self.volume
-        derived_series = folder_wins or not self.series or unnumbered_provider_series
+        # that supplied a position returns at the top of this method, so it
+        # never reaches here -- which is what keeps a sub-series like
+        # "Elantris, Book 2" out of its parent Cosmere shelf numbering.
+        unnumbered_provider_series = bool(provider_series) and not self.volume
+        # ALWAYS true by the time we get here: the early return above only lets
+        # through cases where the provider lacked a series, lacked a position,
+        # or the operator asked for the folder to win. It is spelled out rather
+        # than dropped because the three reasons are what the log distinguishes.
+        #
+        # A previous version carried a `series_agrees` cross-check here, meant
+        # to stop the folder's NUMBER being grafted onto a series name the
+        # provider supplied. That case cannot arise now -- whenever we take the
+        # number we have also taken the folder's NAME, so the pair is coherent
+        # by construction -- and leaving the check in place made it dead code
+        # that read as live protection, with two log branches that could never
+        # print. Restore it only alongside a path that keeps the provider's
+        # name, and compare against provider_series, not self.series.
+        derived_series = folder_wins or not provider_series or unnumbered_provider_series
         if derived_series:
             self.series = series_name
-        # Only take the folder's NUMBER when that number belongs to the series
-        # actually being stored. When the provider supplied the series name and
-        # we kept it, the folder may file this book under a DIFFERENT series --
-        # a parent series, or a sibling sub-series -- and grafting the folder's
-        # index onto the provider's name yields a book number from a series the
-        # book is not in. Observed: a "Cemeteries of Amalo" record numbered
-        # "Book 2" out of a "Chronicles of Osreth" folder, which shelves it on
-        # top of that sub-series' real book 2.
-        series_agrees = derived_series or series_key(series_name) == series_key(self.series)
-        if (folder_wins or not self.volume) and series_agrees:
+        if folder_wins or not self.volume:
             self.volume = self.volume_prefix(number)
         # Now that the series name is known, strip a bare "(<Series>)" the
         # provider left in the title so the display + sort titles are clean.
@@ -720,35 +705,25 @@ class AlbumUpdateTool(UpdateTool):
             stripped = re.sub(pattern, '', self.title, flags=re.IGNORECASE).strip()
             if stripped:
                 self.title = stripped
-        # Report what actually happened. This line used to claim "no provider
-        # series" unconditionally, so the two paths that keep the PROVIDER's
-        # name and fill only the number read as though the folder had supplied
-        # everything -- hiding the very disagreement worth seeing.
+        # Report what actually happened, naming the series that was REPLACED
+        # when there was one.
         if unnumbered_provider_series and not folder_wins:
-            # Named separately from the plain folder-derived case: this one
-            # REPLACED a series the provider did supply, so the disagreement (if
-            # any) is worth seeing rather than reading as "the provider had
-            # nothing".
-            log.warn(
-                'incipit album: provider series had no book number -- using the '
-                'folder pair "%s, %s" for "%s"',
-                self.series, self.volume, self.title
-            )
-        elif derived_series:
+            if series_key(series_name) == series_key(provider_series):
+                log.warn(
+                    'incipit album: provider series "%s" had no book number -- '
+                    'took the folder number "%s" for "%s"',
+                    provider_series, self.volume, self.title
+                )
+            else:
+                log.warn(
+                    'incipit album: provider series "%s" had no book number -- '
+                    'REPLACED it with the folder pair "%s, %s" for "%s"',
+                    provider_series, self.series, self.volume, self.title
+                )
+        else:
             log.warn(
                 'incipit album: series from the folder path -- "%s, %s" for "%s"',
                 self.series, self.volume, self.title
-            )
-        elif series_agrees:
-            log.warn(
-                'incipit album: kept provider series "%s"; folder supplied the '
-                'number "%s" for "%s"', self.series, self.volume, self.title
-            )
-        else:
-            log.warn(
-                'incipit album: folder series "%s" disagrees with provider '
-                'series "%s" -- keeping the provider series and IGNORING the '
-                'folder number for "%s"', series_name, self.series, self.title
             )
 
     def set_metadata_sort_title(self):

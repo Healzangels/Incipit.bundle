@@ -8,7 +8,7 @@ import urllib
 # Import internal tools
 from _version import version
 from logging import Logging
-from search_tools import AlbumSearchTool, ArtistSearchTool, ScoreTool
+from search_tools import AlbumSearchTool, ArtistSearchTool, ScoreTool, name_key
 from time import sleep, time
 from update_tools import AlbumUpdateTool, ArtistUpdateTool
 
@@ -23,24 +23,16 @@ log = Logging()
 
 def author_pref_key(value):
     """
-        Normalize an author name for `authors_prefer_hardcover` matching:
-        case-, whitespace-, punctuation- AND diacritic-insensitive, so
-        "J. R. R. Tolkien"/"j r r tolkien" and "José Saramago"/"Jose Saramago"
-        each resolve to one key. The old [^a-z0-9] strip DELETED accented
-        letters ('José' -> 'jos' vs 'Jose' -> 'jose' -- keys never matched, the
-        pin silently never fired for any non-ASCII author) and collapsed fully
-        non-Latin names to ''. StripDiacritics folds instead of deleting, and
-        the \\W strip keeps unicode word characters (CJK/Cyrillic names work).
+        Normalize an author name for `authors_prefer_hardcover` matching.
+
+        Delegates to search_tools.name_key, which is the single implementation
+        for the whole bundle. This used to be a private copy of the same recipe;
+        the copy drifted (a third spelling in search_tools still deleted accents
+        instead of folding them) and carried a whitespace hole that turned any
+        MULTI-WORD non-Latin name into an empty key. One implementation, one
+        place to fix.
     """
-    if not value:
-        return ''
-    try:
-        folded = String.StripDiacritics(value)
-        if folded:
-            value = folded
-    except Exception:
-        pass
-    return re.sub(r'[\W_]+', '', value.lower(), flags=re.UNICODE)
+    return name_key(value)
 
 
 def apply_http_cache_time():
@@ -589,13 +581,17 @@ def backup_selected_poster(helper):
     # Fails closed when the artist poster cannot be read -- a skipped mirror
     # retries on the next refresh (no mark_done below), whereas a wrong write is
     # permanent.
+    # Through the shared helper, which memoises per guid: without it a forced
+    # refresh of a multi-part book downloaded the same artist photo once per
+    # track, and twice per track whenever the display path checked it too.
+    # parent_thumb is already in hand, so this costs no extra lookup.
     if parent_thumb:
-        try:
-            aurl = parent_thumb if parent_thumb.startswith('http') else PMS + parent_thumb
-            artist_bytes = HTTP.Request(aurl, timeout=8, cacheTime=0).content
-        except Exception as e:
+        artist_bytes, known = artist_poster_bytes(
+            helper.metadata.guid, 'incipit poster-backup', parent_thumb
+        )
+        if not known:
             log.error('incipit poster-backup: could not read artist poster for the '
-                      'poison check (%s) -- skipping this write to be safe', e)
+                      'poison check -- skipping this write to be safe')
             return
         if selection_is_artist_art(artist_bytes, selected):
             log.warn('incipit poster-backup: the selection is the inherited ARTIST '
@@ -703,7 +699,10 @@ def read_poster_state(guid, tag):
             keys.append(pk)
             if p.get('selected'):
                 selected_key = pk
-        return (rk, selected_key, keys)
+        # parentThumb rides along in the SAME response, so hand it back rather
+        # than making a caller re-fetch this document to scrape one attribute.
+        pm = re.search(r'parentThumb="([^"]*)"', text)
+        return (rk, selected_key, keys, (pm.group(1) if pm else None))
     except Exception as e:
         log.error('%s: poster state read failed (%s)', tag, e)
         return None
@@ -732,35 +731,57 @@ def selection_is_artist_art(artist_bytes, selected):
     return len(padded) == len(selected) and padded == selected
 
 
-def artist_poster_bytes(guid, tag):
-    """
-        The ARTIST's currently-selected poster bytes for the item with `guid`,
-        or None on any failure.
+# Per-guid cache for the artist poster, because update() runs once per TRACK
+# and helper.force defeats the container re-read guard -- so without this a
+# forced refresh of a 27-part book paid a /library/all round-trip PLUS a full
+# artist-image download on every track, 54 requests to answer one question 27
+# times identically. Values are (bytes_or_None, known, stamp); the TTL bounds
+# staleness the same way recent_work_memo does.
+artist_art_memo = {}
+ARTIST_ART_TTL = 600
 
-        `parentThumb` rides along in the same /library/all response the other
-        poster paths already read, so recognising inherited art costs one
-        localhost round-trip plus the image itself -- and only on the paths that
-        are about to CHANGE a selection or write to disk, never on a converged
-        refresh. None means "could not tell", and every caller treats that as
-        "do not claim poison", so an SMB blip can never manufacture a false
-        positive that blocks a legitimate cover.
+
+def artist_poster_bytes(guid, tag, parent_thumb=None):
     """
+        (artist_poster_bytes_or_None, known) for the item with `guid`.
+
+        TWO pieces of information, because collapsing them is a security hole in
+        the poison guards: `None` alone cannot distinguish "this item genuinely
+        has no artist art" from "I could not tell", and a caller that treats the
+        second as the first proceeds to overwrite a poster on the strength of a
+        timed-out request. `known` is False ONLY for a failure; callers that
+        WRITE must refuse when it is False, callers that merely display may
+        proceed.
+
+        `parent_thumb` lets a caller that already holds the value skip the
+        lookup entirely -- read_poster_state and backup_selected_poster both
+        parse it out of a response they already fetched.
+    """
+    hit = artist_art_memo.get(guid)
+    if hit and (time() - hit[2]) < ARTIST_ART_TTL:
+        return (hit[0], hit[1])
     try:
-        url = PMS + '/library/all?guid=' + urllib.quote(guid)
-        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
-        if guid_lookup_is_ambiguous(text, tag):
-            return None
-        # capital-T parentThumb, so a lowercase thumb= match can't collide.
-        pm = re.search(r'parentThumb="([^"]*)"', text)
-        if not pm or not pm.group(1):
-            return None
-        purl = pm.group(1)
+        purl = parent_thumb
+        if not purl:
+            url = PMS + '/library/all?guid=' + urllib.quote(guid)
+            text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
+            if guid_lookup_is_ambiguous(text, tag):
+                return (None, False)
+            # capital-T parentThumb, so a lowercase thumb= match can't collide.
+            pm = re.search(r'parentThumb="([^"]*)"', text)
+            purl = pm.group(1) if pm else None
+        if not purl:
+            # Resolved cleanly; this artist simply has no poster. KNOWN.
+            artist_art_memo[guid] = (None, True, time())
+            return (None, True)
         if not purl.startswith('http'):
             purl = PMS + purl
-        return HTTP.Request(purl, timeout=8, cacheTime=0).content
+        data = HTTP.Request(purl, timeout=8, cacheTime=0).content
+        artist_art_memo[guid] = (data, True, time())
+        return (data, True)
     except Exception as e:
         log.error('%s: could not read the artist poster (%s)', tag, e)
-        return None
+        return (None, False)
 
 
 def selection_is_agent_owned(selected_key, owned_shas):
@@ -831,7 +852,7 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None):
         state = read_poster_state(guid, tag)
     if state is None:
         return False
-    rk, selected_key, keys = state
+    rk, selected_key, keys, parent_thumb = state
     if selected_key and (sha in selected_key or sha_padded in selected_key):
         log.info('%s: already the selected poster, skip', tag)
         mark_done(tag, guid, memo_token)
@@ -909,7 +930,7 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
     state = read_poster_state(guid, tag)
     if state is None:
         return
-    rk, selected_key, keys = state
+    rk, selected_key, keys, parent_thumb = state
     # Strict mode (the unpin direction): act only on a selection this agent
     # demonstrably UPLOADED. A metadata:// container key is ambiguous by
     # construction -- the container may have defaulted to it, or the user may
@@ -1081,7 +1102,7 @@ def select_local_cover(helper, cover_bytes=None):
     state = read_poster_state(guid, tag)
     if state is None:
         return
-    rk, selected_key, keys = state
+    rk, selected_key, keys, parent_thumb = state
     if not selection_is_agent_owned(selected_key, [sha, sha_padded]):
         log.info('%s: selection is a user upload -- leaving it', tag)
         mark_done(tag, guid, sha)
@@ -1112,7 +1133,21 @@ def select_local_cover(helper, cover_bytes=None):
     # would stop being true.
     converged = bool(selected_key) and (sha in selected_key or sha_padded in selected_key)
     if not converged:
-        artist_bytes = artist_poster_bytes(guid, tag)
+        artist_bytes, known = artist_poster_bytes(guid, tag, parent_thumb)
+        # FAIL CLOSED. This path force-selects cover.jpg over whatever the
+        # operator picked, so "could not tell" must not read as "not poison":
+        # artist_poster_bytes returns None on a timed-out localhost call, an
+        # ambiguous guid mid-rebuild or a 404 parentThumb, and treating that as
+        # a clean bill of health re-uploaded the padded author photo and
+        # re-selected it -- the Mattimeo failure, reachable from a single blip.
+        # backup_selected_poster's twin guard has always failed closed for the
+        # same reason ("a wrong write is permanent"); this one is the MORE
+        # destructive of the two, because it overwrites a selection in Plex.
+        # No mark_done: a transient failure must retry, not be suppressed.
+        if not known:
+            log.error('%s: could not read the artist poster -- NOT selecting '
+                      'cover.jpg, so a blip cannot re-poison the album', tag)
+            return
         if selection_is_artist_art(artist_bytes, cover_bytes):
             # Memoised on the cover's own sha, so a repaired cover.jpg re-runs
             # immediately rather than waiting out the TTL.
@@ -1835,8 +1870,12 @@ class AudiobookAlbum(Agent.Album):
         # instead of it re-reading the same file in the same pass. Stays None
         # on every path that does not read, so the callee still falls back.
         cover_bytes = None
+        # Hoisted out of the prefer_local branch: the container-membership check
+        # further down runs under `if helper.thumb:`, which is NOT nested inside
+        # it, so leaving the assignment there was a NameError whenever the pref
+        # was off.
+        local_key = 'incipit-local-cover'
         if prefer_local:
-            local_key = 'incipit-local-cover'
             # Per-track guard: Plex calls update() once PER TRACK, so a
             # multi-part book would re-read the (up to ~1MB) cover.jpg on every
             # track. Skip the re-read once our poster is already in this pass's
@@ -1846,50 +1885,72 @@ class AudiobookAlbum(Agent.Album):
                 local_set = True
             else:
                 cover_bytes = local_cover_bytes(helper)
+                # POISON FIRST, independent of shape and of whether the record
+                # has an online cover.
+                #
+                # This check used to sit INSIDE the portrait branch on the
+                # premise that "an author photo is portrait by definition". It
+                # is not: Audible author art is frequently square, and a
+                # Hardcover/OpenLibrary book-level match has no online cover at
+                # all (helper.thumb falsy) -- the case the block below is
+                # deliberately written to survive. In either, poisoned_local
+                # stayed False and the author photo was handed sort_order=0 plus
+                # validate_keys, i.e. Plex was TOLD to make it the default
+                # poster. Gating a byte-identity fact behind an aspect-ratio
+                # heuristic made the repair work for tall author photos and not
+                # square ones, which reads as random.
+                if cover_bytes:
+                    artist_bytes, known = artist_poster_bytes(
+                        helper.metadata.guid, 'incipit cover'
+                    )
+                    if selection_is_artist_art(artist_bytes, cover_bytes):
+                        # ...unless the artist's art IS this book's own cover.
+                        # For a one-book author Audible/Hardcover routinely serve
+                        # the book cover AS the author image, so byte-identity
+                        # says nothing about poison -- and acting on it would let
+                        # the mirror below replace a hand-curated cover.jpg with
+                        # the online copy. Comparing against the online cover
+                        # settles it with data already in hand.
+                        online = fetch_url_bytes(helper.thumb) if helper.thumb else None
+                        if online and selection_is_artist_art(artist_bytes, online):
+                            log.info(
+                                'incipit cover: cover.jpg matches the artist art, but '
+                                'so does the ONLINE cover -- this is the book\'s own '
+                                'art, not poison; leaving it alone'
+                            )
+                        else:
+                            poisoned_local = True
+                            log.warn(
+                                'incipit cover: local cover.jpg is the ARTIST photo -- '
+                                'not offering it as the default, and allowing the '
+                                'selected poster to mirror back over it'
+                            )
+                    elif not known:
+                        # Could not tell. Display-only decision, so proceed as
+                        # before rather than demoting a possibly-fine cover --
+                        # but say so, because the WRITE paths fail closed on the
+                        # same signal and the asymmetry should be visible.
+                        log.error(
+                            'incipit cover: could not read the artist poster; '
+                            'cannot check cover.jpg for poison this pass'
+                        )
                 # A clearly PORTRAIT cover.jpg is a print jacket, not audiobook
                 # art -- the signature of an upstream pipeline that matched a
                 # print edition (the same mismatch that writes a wrong-edition
                 # ASIN into the sidecar). Plex music art is square, and the API
                 # offers a real square cover, so defer to it rather than making
                 # the portrait scan the default. Square/near-square local covers
-                # (including every hand-curated one) are untouched.
-                if cover_bytes and helper.thumb and local_cover_is_portrait(cover_bytes):
-                    # ...unless the "portrait cover" IS the author photo. Author
-                    # portraits are portrait by definition, so a POISONED
-                    # cover.jpg always trips this branch -- and deferring sets
-                    # deferred_portrait_local, which suppresses
-                    # backup_selected_poster entirely. The suppression exists to
-                    # stop a display preference from overwriting a hand-curated
-                    # print jacket, and that is right; but there is nothing to
-                    # preserve in a file that is the artist's photo, and the
-                    # skip is precisely what stops the operator's newly chosen
-                    # poster from ever mirroring back over the poison.
-                    #
-                    # Measured live on John French / "Horusian Wars: Incarnation"
-                    # and Cixin Liu / "The Dark Forest": both had a real cover
-                    # selected in Plex and both kept the padded author photo on
-                    # disk through repeated forced refreshes, because this branch
-                    # deferred and the mirror never ran.
-                    if selection_is_artist_art(
-                        artist_poster_bytes(helper.metadata.guid, 'incipit cover'),
-                        cover_bytes
-                    ):
-                        # A separate flag, NOT deferred_portrait_local: this file
-                        # must still lose the default slot (it is the author
-                        # photo), but the mirror has to run so the operator's
-                        # chosen poster can overwrite it.
-                        poisoned_local = True
-                        log.warn(
-                            'incipit cover: local cover.jpg is the ARTIST photo, not a '
-                            'print jacket -- not offering it as the default, and '
-                            'allowing the selected poster to mirror back over it'
-                        )
-                    else:
-                        log.warn(
-                            'incipit cover: local cover.jpg is PORTRAIT (print jacket?) '
-                            '-- deferring to the square online cover as the default'
-                        )
-                        deferred_portrait_local = True
+                # (including every hand-curated one) are untouched. Never for a
+                # file already judged poison: that one must not be preserved.
+                if (
+                    cover_bytes and helper.thumb and not poisoned_local
+                    and local_cover_is_portrait(cover_bytes)
+                ):
+                    log.warn(
+                        'incipit cover: local cover.jpg is PORTRAIT (print jacket?) '
+                        '-- deferring to the square online cover as the default'
+                    )
+                    deferred_portrait_local = True
                 if cover_bytes:
                     try:
                         # A DEFERRED portrait cover is still OFFERED, just not the
@@ -1957,7 +2018,20 @@ class AudiobookAlbum(Agent.Album):
                 not local_set
                 and helper.thumb in helper.metadata.posters
             ):
-                helper.metadata.posters.validate_keys([helper.thumb])
+                # Keep the DEMOTED local cover in the container. A single-key
+                # validate_keys is a PRUNE (see the pin/unpin paths above), so
+                # passing only the online cover evicted the local entry added
+                # 60 lines earlier -- the one whose comment promises "a DEFERRED
+                # portrait cover is still OFFERED, just not the default:
+                # dropping it entirely left the operator unable to pick their
+                # own art back". It was being dropped entirely, which also made
+                # its sort_order=1 demotion dead code. The online cover still
+                # becomes the default by sort_order=0; validate_keys is what
+                # decides membership, not priority.
+                keep = [helper.thumb]
+                if local_key in helper.metadata.posters:
+                    keep.append(local_key)
+                helper.metadata.posters.validate_keys(keep)
 
         # Local cover, force-select via the trusted Plex API so a dropped/replaced
         # cover.jpg takes effect on Refresh Metadata even on an ALREADY-scanned
