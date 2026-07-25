@@ -1825,6 +1825,12 @@ class AudiobookAlbum(Agent.Album):
         # online cover, so the force-select below does not simply re-read the file
         # and re-impose it, and the online cover keeps the default slot.
         deferred_portrait_local = False
+        # Local cover.jpg IS the artist photo. Like a deferred portrait it must
+        # not take the default slot -- but UNLIKE one it is not worth preserving,
+        # so the poster mirror still runs and can overwrite it. Keeping the two
+        # apart is the whole point: sharing a flag is what left two books stuck
+        # with the author photo on disk through repeated forced refreshes.
+        poisoned_local = False
         # Hoisted so the bytes read below can be handed to select_local_cover
         # instead of it re-reading the same file in the same pass. Stays None
         # on every path that does not read, so the callee still falls back.
@@ -1848,11 +1854,42 @@ class AudiobookAlbum(Agent.Album):
                 # the portrait scan the default. Square/near-square local covers
                 # (including every hand-curated one) are untouched.
                 if cover_bytes and helper.thumb and local_cover_is_portrait(cover_bytes):
-                    log.warn(
-                        'incipit cover: local cover.jpg is PORTRAIT (print jacket?) '
-                        '-- deferring to the square online cover as the default'
-                    )
-                    deferred_portrait_local = True
+                    # ...unless the "portrait cover" IS the author photo. Author
+                    # portraits are portrait by definition, so a POISONED
+                    # cover.jpg always trips this branch -- and deferring sets
+                    # deferred_portrait_local, which suppresses
+                    # backup_selected_poster entirely. The suppression exists to
+                    # stop a display preference from overwriting a hand-curated
+                    # print jacket, and that is right; but there is nothing to
+                    # preserve in a file that is the artist's photo, and the
+                    # skip is precisely what stops the operator's newly chosen
+                    # poster from ever mirroring back over the poison.
+                    #
+                    # Measured live on John French / "Horusian Wars: Incarnation"
+                    # and Cixin Liu / "The Dark Forest": both had a real cover
+                    # selected in Plex and both kept the padded author photo on
+                    # disk through repeated forced refreshes, because this branch
+                    # deferred and the mirror never ran.
+                    if selection_is_artist_art(
+                        artist_poster_bytes(helper.metadata.guid, 'incipit cover'),
+                        cover_bytes
+                    ):
+                        # A separate flag, NOT deferred_portrait_local: this file
+                        # must still lose the default slot (it is the author
+                        # photo), but the mirror has to run so the operator's
+                        # chosen poster can overwrite it.
+                        poisoned_local = True
+                        log.warn(
+                            'incipit cover: local cover.jpg is the ARTIST photo, not a '
+                            'print jacket -- not offering it as the default, and '
+                            'allowing the selected poster to mirror back over it'
+                        )
+                    else:
+                        log.warn(
+                            'incipit cover: local cover.jpg is PORTRAIT (print jacket?) '
+                            '-- deferring to the square online cover as the default'
+                        )
+                        deferred_portrait_local = True
                 if cover_bytes:
                     try:
                         # A DEFERRED portrait cover is still OFFERED, just not the
@@ -1861,9 +1898,9 @@ class AudiobookAlbum(Agent.Album):
                         # always-offer comment below records as already fixed.
                         helper.metadata.posters[local_key] = Proxy.Media(
                             cover_bytes,
-                            sort_order=1 if deferred_portrait_local else 0
+                            sort_order=1 if (deferred_portrait_local or poisoned_local) else 0
                         )
-                        if not deferred_portrait_local:
+                        if not (deferred_portrait_local or poisoned_local):
                             helper.metadata.posters.validate_keys([local_key])
                             log.warn('incipit cover: LOCAL cover set as the default poster')
                             local_set = True
@@ -1903,12 +1940,14 @@ class AudiobookAlbum(Agent.Album):
                         'cover.jpg -- not offering a duplicate'
                     )
                 elif thumb_data is not None:
-                    # When a portrait local cover was deferred, this square cover
-                    # IS the default -- it must not keep the demoted slot the
+                    # When the local cover was deferred (portrait print jacket)
+                    # or refused (it is the artist photo), this square cover IS
+                    # the default -- it must not keep the demoted slot the
                     # prefer_local setting assigned before we measured the file.
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data,
-                        sort_order=0 if deferred_portrait_local else primary_order
+                        sort_order=0 if (deferred_portrait_local or poisoned_local)
+                        else primary_order
                     )
             # SELECT the online cover only when there is no local cover to be the
             # default. With a local cover set it is merely OFFERED, not selected;
@@ -1926,7 +1965,13 @@ class AudiobookAlbum(Agent.Album):
         # SMB-safe (writes to Plex's metadata store, not the media folder).
         # Skipped when a portrait local cover was deferred: re-reading it here
         # would re-impose the print jacket the block above deliberately declined.
-        if Prefs['prefer_local_cover'] and helper.force and not deferred_portrait_local:
+        # Skipped for a poisoned local cover too -- select_local_cover refuses the
+        # artist photo on its own, but not asking saves two round trips and keeps
+        # the reason in one place.
+        if (
+            Prefs['prefer_local_cover'] and helper.force
+            and not deferred_portrait_local and not poisoned_local
+        ):
             select_local_cover(helper, cover_bytes)
         # Back up the currently-selected poster to cover.jpg (opt-in). Runs
         # AFTER the select: select_local_cover is ownership-guarded (a user's
