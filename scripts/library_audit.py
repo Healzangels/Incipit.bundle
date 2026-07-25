@@ -205,10 +205,21 @@ def main():
         # The guid decides when we have it: same guid == same edition, and
         # DIFFERENT guids mean two real books however close their runtimes are.
         guids = {meta.get(rk, ('?', ''))[0] for rk, _ in group}
+        sizes = {a['size'] for _, a in group}
         if len(guids) == 1 and '?' not in guids:
             print('      -> SAME guid: definitively one edition held twice')
+        elif len(sizes) == 1 and 0 not in sizes:
+            # A differing guid says only that PLEX matched the two rows to
+            # different records -- which it readily does when one copy sits in a
+            # "[Dramatized Adaptation]" folder and the other does not. Byte-
+            # identical size is about the file itself, and two genuinely
+            # different books never agree to the byte. Measured on Oathbringer:
+            # two guids (B0718Z5K4C, B01N7ZEWLO), one 807,500,000-byte file.
+            print('      -> IDENTICAL byte size: one FILE in two places, however '
+                  'Plex matched them')
         elif len(guids) == len(group):
-            print('      -> DIFFERENT guids: separate books that share a title, not duplicates')
+            print('      -> DIFFERENT guids and sizes: separate books that share a '
+                  'title, not duplicates')
         else:
             durs = [a['dur'] for _, a in group if a['dur']]
             if len(durs) > 1 and max(durs):
