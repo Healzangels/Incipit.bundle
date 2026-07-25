@@ -89,12 +89,62 @@ def classify(album, artist):
     return None
 
 
+def part_file(base, album_rk, token):
+    """The first media file path for an album, as PLEX sees it, or None."""
+    xml = api(base, '/library/metadata/%s/children' % album_rk, token)
+    m = re.search(r'<Part\b[^>]*\bfile="([^"]*)"', xml)
+    if not m:
+        return None
+    # Plex XML-escapes the path; only & and the quote forms can appear here.
+    path = m.group(1)
+    for esc, raw in (('&amp;', '&'), ('&quot;', '"'), ('&apos;', "'"),
+                     ('&lt;', '<'), ('&gt;', '>')):
+        path = path.replace(esc, raw)
+    return path
+
+
+def cover_bytes_on_disk(plex_path, path_from, path_to):
+    """
+    The book folder's cover.jpg bytes, or None.
+
+    plex_path is the file path as PLEX reports it (inside its container, e.g.
+    /data/media/...). path_from/path_to rewrite that prefix into a path visible
+    from wherever this script is running -- the media is on a different box than
+    Plex here, so the two views never match by accident.
+    """
+    if '/' not in plex_path:
+        return None
+    host_path = plex_path
+    if path_from and host_path.startswith(path_from):
+        host_path = path_to + host_path[len(path_from):]
+    cover = host_path.rsplit('/', 1)[0] + '/cover.jpg'
+    try:
+        with open(cover, 'rb') as fh:
+            return fh.read()
+    except Exception:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(description='Report albums whose poster is the artist photo.')
     ap.add_argument('--url', default='http://10.0.1.99:32400', help='Plex base URL')
     ap.add_argument('--token', default=os.environ.get('PLEX_TOKEN', ''), help='Plex token')
     ap.add_argument('--section', default='33', help='library section key (artist library)')
     ap.add_argument('--limit', type=int, default=0, help='stop after N artists (for a quick probe)')
+    # Disk check. The SELECTION being clean does not mean the book is safe: the
+    # poison lives in cover.jpg, and select_local_cover pushes cover.jpg back
+    # into Plex on refresh -- so a book with a good selection and a poisoned
+    # cover.jpg re-poisons itself the next time it is refreshed. Brian Jacques /
+    # "Mattimeo" was exactly that, and this sweep could not see it: its
+    # selection was a real cover at the time.
+    # Off unless --path-to is given, because the media share is not mounted on
+    # every box this runs from (see the two-host split in the runbook).
+    ap.add_argument('--path-from', default='/data',
+                    help='path prefix as PLEX reports it (default: /data)')
+    ap.add_argument('--path-to', default='',
+                    help='the same tree as seen from HERE, e.g. '
+                         '/mnt/remotes/10.0.1.98_data on the Plex box, or '
+                         '/mnt/user/data on the media box. Enables the disk check.')
     args = ap.parse_args()
 
     if not args.token:
@@ -107,9 +157,16 @@ def main():
         artists = artists[: args.limit]
     print('scanning %d artists in section %s\n' % (len(artists), args.section))
 
+    if args.path_to:
+        print('disk check ON: %s -> %s' % (args.path_from, args.path_to))
+    else:
+        print('disk check OFF (pass --path-to to also check each cover.jpg; '
+              'a clean SELECTION does not mean a clean cover.jpg)')
+
     poisoned = []
     scanned = 0
     no_artist_art = 0
+    no_cover = 0
 
     for i, (artist_rk, artist_name) in enumerate(artists, 1):
         art = thumb_bytes(base, artist_rk, args.token)
@@ -122,26 +179,50 @@ def main():
         )
         for album_rk, album_title in albums:
             scanned += 1
+            kinds = []
             kind = classify(thumb_bytes(base, album_rk, args.token), art)
             if kind:
-                poisoned.append((artist_name, album_title, album_rk, kind))
-                print('  POISONED [%s] %s -- %s (rk %s)' % (kind, artist_name, album_title, album_rk))
+                kinds.append('SELECTED/' + kind)
+            if args.path_to:
+                plex_path = part_file(base, album_rk, args.token)
+                if plex_path:
+                    raw = cover_bytes_on_disk(
+                        plex_path, args.path_from, args.path_to)
+                    if raw is None:
+                        no_cover += 1
+                    else:
+                        disk_kind = classify(raw, art)
+                        if disk_kind:
+                            kinds.append('DISK/' + disk_kind)
+            if kinds:
+                label = '+'.join(kinds)
+                poisoned.append((artist_name, album_title, album_rk, label))
+                print('  POISONED [%s] %s -- %s (rk %s)' % (label, artist_name, album_title, album_rk))
         if i % 25 == 0:
             print('  ... %d/%d artists, %d albums checked' % (i, len(artists), scanned))
 
     print('\n' + '=' * 72)
     print('albums checked      : %d' % scanned)
     print('artists with no art : %d' % no_artist_art)
+    if args.path_to:
+        print('cover.jpg unreadable: %d  (missing file, or the path rewrite is wrong)' % no_cover)
     print('POISONED            : %d' % len(poisoned))
     if poisoned:
-        plain = len([p for p in poisoned if p[3] == 'PLAIN'])
-        padded = len([p for p in poisoned if p[3] == 'PADDED'])
-        print('  plain: %d   padded: %d  (padded were invisible to the pre-1.3.103 guard)' % (plain, padded))
+        on_disk = len([p for p in poisoned if 'DISK/' in p[3]])
+        padded = len([p for p in poisoned if 'PADDED' in p[3]])
+        print('  padded forms: %d  (invisible to the pre-1.3.103 guard)' % padded)
+        if args.path_to:
+            print('  poisoned cover.jpg ON DISK: %d  <- these re-poison themselves '
+                  'on the next refresh' % on_disk)
         print('\nworklist:')
         for artist_name, album_title, album_rk, kind in poisoned:
-            print('  %-7s %-28s %-38s rk=%s' % (kind, artist_name[:28], album_title[:38], album_rk))
+            print('  %-22s %-26s %-34s rk=%s' % (
+                kind, artist_name[:26], album_title[:34], album_rk))
         print('\nTo repair: replace the book folder\'s cover.jpg with real art, then')
         print('Refresh Metadata on that album. Nothing is changed by this script.')
+        print('From v1.3.107 the agent refuses to select a cover.jpg that IS the')
+        print('artist photo, so a DISK hit no longer overwrites a good selection --')
+        print('but the file on disk is still wrong until you replace it.')
     return 0
 
 
