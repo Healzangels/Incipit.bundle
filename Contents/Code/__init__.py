@@ -1151,6 +1151,70 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
                              state=state, pref_asserted=True)
 
 
+def correct_portrait_selection(helper, cover_bytes, square_bytes):
+    """
+        Move a book OFF a print-jacket cover.jpg that won a fresh scan.
+
+        The portrait deferral (local_cover_is_portrait) decides cover.jpg is a
+        print jacket and declines to make it the default -- but it expresses that
+        through the posters CONTAINER, which only wins on a FRESH scan. When the
+        square online cover was not yet in hand at scan time (an unresolved match,
+        a CDN blip) the jacket gets selected and NO later refresh can move it: the
+        deferral fires correctly on every subsequent pass and is powerless.
+
+        Measured live 2026-07-25: 3 of 1403 albums sat frozen on a portrait while
+        their own container already held a square 2400x2400 -- Enemy of the State,
+        The Ghost, Extraction. The Ghost's own UPLOAD was the portrait, which is
+        the proof the deferral had not fired on the pass that selected it.
+
+        The upload lever CAN move a persisted selection, so use it -- but only on
+        proof. FAILS CLOSED, the deliberate opposite of the duplicate guard in
+        upload_and_select_poster: that one merely declines to write, this one
+        OVERWRITES a selection, so "could not read it" must never license the
+        write. Two facts must hold first:
+
+          - the selection is OURS (a container poster, or an upload carrying the
+            jacket's own sha -- the agent's earlier select_local_cover). A
+            hand-uploaded poster is never touched.
+          - the selected bytes ARE the measured print jacket. Anything else means
+            somebody already moved this book, and it is left alone.
+
+        Does nothing without a square to offer: for a book whose every cover is a
+        jacket (measured on four Adrian McKinty titles, whose only square is the
+        embedded art Local Media Assets contributes and which this agent cannot
+        select) the jacket is the best art we hold.
+    """
+    if not cover_bytes or not square_bytes:
+        return
+    tag = 'incipit portrait-fix'
+    guid = helper.metadata.guid
+    state = read_poster_state(guid, tag)
+    if state is None:
+        return
+    rk, selected_key, keys, parent_thumb = state
+    try:
+        sha, sha_padded, _ = padded_variants(cover_bytes)
+    except Exception as e:
+        log.error('%s: could not hash the local cover (%s)', tag, e)
+        return
+    # The jacket's own shas count as ours: select_local_cover may have uploaded
+    # it on an earlier pass, and undoing our own act is the whole point.
+    if not selection_is_agent_owned(selected_key, [sha, sha_padded]):
+        log.info('%s: selection is a user upload -- leaving it', tag)
+        return
+    current, known = selected_poster_bytes(rk, selected_key, tag)
+    if not known:
+        log.error('%s: could not read the selected poster -- NOT overriding it, '
+                  'so a blip cannot take away a poster on rk %s', tag, rk)
+        return
+    if not same_image(cover_bytes, current):
+        log.info('%s: the selection is not the print jacket -- leaving it', tag)
+        return
+    log.warn('%s: rk %s is showing the PORTRAIT cover.jpg the deferral declined; '
+             'force-selecting the square online cover instead', tag, rk)
+    upload_and_select_poster(guid, square_bytes, tag, token=sha, state=state)
+
+
 def select_hardcover_author_art(helper):
     """
         Pin direction: make the Hardcover portrait (`thumb`) the selection for
@@ -2164,6 +2228,12 @@ class AudiobookAlbum(Agent.Album):
         # instead of it re-reading the same file in the same pass. Stays None
         # on every path that does not read, so the callee still falls back.
         cover_bytes = None
+        # Hoisted for the same reason as cover_bytes: correct_portrait_selection
+        # below needs the square online cover's BYTES, but the only assignment
+        # sits under `if helper.thumb:` -- so a book with no online image (the
+        # very case that comment set out to survive) left it unbound and raised
+        # NameError instead of simply having nothing to offer.
+        thumb_data = None
         # Hoisted out of the prefer_local branch: the container-membership check
         # further down runs under `if helper.thumb:`, which is NOT nested inside
         # it, so leaving the assignment there was a NameError whenever the pref
@@ -2341,6 +2411,19 @@ class AudiobookAlbum(Agent.Album):
             and not deferred_portrait_local and not poisoned_local
         ):
             select_local_cover(helper, cover_bytes)
+        # The MIRROR of that call. When the jacket was deferred, the container
+        # said "use the square" and Plex ignored it, because a container cannot
+        # move a selection it persisted on an earlier scan. Say it through the
+        # upload lever instead, which can -- otherwise the deferral is correct
+        # and powerless forever, which is exactly the 3 albums measured frozen
+        # on a portrait. Same force gate as its sibling: cover_bytes is only
+        # re-read on a real Refresh Metadata, so there is nothing to compare
+        # against on an incremental pass.
+        elif (
+            Prefs['prefer_local_cover'] and helper.force
+            and deferred_portrait_local and not poisoned_local
+        ):
+            correct_portrait_selection(helper, cover_bytes, thumb_data)
         # Back up the currently-selected poster to cover.jpg (opt-in). Runs
         # AFTER the select: select_local_cover is ownership-guarded (a user's
         # custom upload survives it), so what is selected HERE is the state

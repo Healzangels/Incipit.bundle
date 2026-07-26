@@ -623,3 +623,103 @@ class SelectionAlreadyShowsThisImage(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(len(self.posts), 1)
         self.assertEqual(self.reads, [], 'no selection means no read to make')
+
+
+class PrintJacketSelectionIsCorrected(unittest.TestCase):
+    """
+    A print-jacket cover.jpg that won a fresh scan must not be permanent.
+
+    The portrait deferral decides cover.jpg is a print jacket and declines to
+    make it the default -- but the posters CONTAINER only wins on a fresh scan,
+    so when the square online cover was not yet available at scan time (an
+    unresolved match, a CDN blip) the print jacket is selected and no later
+    refresh can move it. Measured live 2026-07-25: 3 of 1403 albums (Enemy of
+    the State, The Ghost, Extraction) were frozen on a portrait while their own
+    container already held a square 2400x2400. The Ghost's own UPLOAD was the
+    portrait, proving the deferral had not fired on the pass that selected it.
+
+    Fixing it needs the upload lever, which CAN move a persisted selection.
+
+    This one FAILS CLOSED, the opposite of the duplicate guard above: it
+    OVERRIDES a selection, so "could not read it" must never license a write.
+    Only a positive byte-match against the measured print jacket may act.
+    """
+
+    def setUp(self):
+        self.posts = []
+        self.real = AG.HTTP.Request
+        self.real_state = AG.read_poster_state
+        self.served = COVER          # what the selected poster returns
+        self.selected = ('metadata://posters/com.plexapp.agents.incipit_'
+                         '124a757ccdffc12d2dbe1a4bdf291e5c6bebf1cc')
+
+        def router(url, **kwargs):
+            if kwargs.get('data') is not None:
+                self.posts.append(kwargs['data'])
+
+                class Posted(object):
+                    content = 'ok'
+                return Posted()
+            if self.served is None:
+                raise IOError('poster read failed')
+
+            class Fetched(object):
+                content = self.served
+            return Fetched()
+
+        AG.HTTP.Request = router
+        AG.read_poster_state = lambda guid, tag: ('101', self.selected, [], None)
+        AG.recent_work_memo.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real
+        AG.read_poster_state = self.real_state
+        AG.recent_work_memo.clear()
+
+    def _helper(self):
+        class FakeHelper(object):
+            class metadata(object):
+                guid = 'guid-portrait'
+        return FakeHelper()
+
+    def test_a_print_jacket_selection_is_replaced_by_the_square(self):
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(len(self.posts), 1, 'the square must be uploaded + selected')
+        self.assertEqual(self.posts[0], ARTIST, 'it must post the SQUARE, not the jacket')
+
+    def test_our_own_upload_of_the_print_jacket_is_also_corrected(self):
+        # The Ghost: the agent had itself uploaded the portrait, so the
+        # selection is an upload:// carrying the jacket's own sha.
+        sha, _p, _b = AG.padded_variants(COVER)
+        self.selected = 'upload://posters/' + sha
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_a_foreign_upload_is_never_touched(self):
+        # A poster the operator uploaded by hand. Not ours to override.
+        self.selected = 'upload://posters/somebodyelsesposter'
+        self.served = b'\xff\xd8\xff\xe0 a poster the operator chose'
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(self.posts, [])
+
+    def test_an_unreadable_selection_fails_closed(self):
+        # Cannot prove the selection is the print jacket -> must not overwrite.
+        self.served = None
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(self.posts, [], 'a blip must never license an override')
+
+    def test_a_selection_that_is_not_the_print_jacket_is_left_alone(self):
+        # Somebody already moved this book to a different agent poster.
+        self.served = b'\xff\xd8\xff\xe0 some other agent cover'
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(self.posts, [])
+
+    def test_nothing_happens_without_a_square_to_offer(self):
+        # The McKinty case: every cover we hold is a jacket. Leave it be.
+        AG.correct_portrait_selection(self._helper(), COVER, None)
+        self.assertEqual(self.posts, [])
+
+    def test_an_unreadable_poster_state_does_nothing(self):
+        AG.read_poster_state = lambda guid, tag: None
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(self.posts, [])
