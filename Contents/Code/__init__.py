@@ -336,6 +336,83 @@ COVER_STAGE_PREFIX = 'incipit-cover-'
 COVER_STAGE_SEQ = [0]
 
 
+def cover_mirror_mode():
+    """
+        'off' | 'seed' | 'curate' -- the DECLARED direction of truth for
+        cover.jpg (the Lambda.bundle pattern: one pref says which side wins,
+        and no code path infers it from ambiguous selection state).
+
+        WHY THIS EXISTS (2026-07-26): a rebuild overwrote 92 hand-curated
+        cover.jpg files. Both writers below inferred intent -- the mirror
+        assumed "whatever is selected is what the operator wants on disk", the
+        promote path assumed "the selection matches an offered online cover, so
+        a person must have picked it". During a scan both inferences are false:
+        the SCAN makes selections, thousands of them, with nobody choosing
+        anything. There were no backups of that share.
+
+          off    -- never write the media folder.
+          seed   -- (default) write cover.jpg only where NONE exists. Safe
+                    during any scan or rebuild; an existing file can never be
+                    replaced, whatever gets selected.
+          curate -- Plex is truth for this session: the operator is actively
+                    picking art and wants picks captured to disk. The mode is
+                    turned ON for a curation session and back off after.
+
+        The asymmetry is the design: forgetting to enable curate costs one
+        re-refresh after flipping it; the old design's forgetting cost
+        unrecoverable curated art. Unknown/legacy values resolve to 'seed' for
+        the same reason.
+    """
+    try:
+        raw = Prefs['cover_mirror_mode']
+    except Exception:
+        return 'seed'
+    if raw is None or raw is True or raw is False:
+        return 'seed'
+    text = str(raw).strip().lower()
+    if text.startswith('off'):
+        return 'off'
+    if text.startswith('curation'):
+        return 'curate'
+    return 'seed'
+
+
+# Storm guard state: guid -> time() of its last REPLACEMENT attempt (writes
+# that would overwrite an existing cover.jpg; seeds are never counted). Global
+# across update() calls, like recent_work_memo.
+mirror_replace_log = {}
+# No human replaces cover art on this many DISTINCT albums inside the window --
+# a pick-and-refresh cycle takes ~30-60s per book, so the sustained human
+# ceiling is ~2/min. Run 1's scan attempted dozens per minute. The threshold
+# sits between the two: curation sessions never feel it, a scan hits it in
+# seconds.
+MIRROR_STORM_LIMIT = 6
+MIRROR_STORM_WINDOW = 60
+
+
+def replacement_is_storm(guid):
+    """
+        True when replacement writes are arriving faster than any human picks.
+
+        The backstop for curate mode left on by mistake through a scan: caps
+        the damage at MIRROR_STORM_LIMIT files and turns everything after into
+        loud MIRROR STORM log lines (the scan logger alerts on that string).
+        Attempts are recorded even when refused, so a scan cannot ride the
+        window's edge. Same-guid repeats (a multi-part book's tracks) count
+        once -- only DISTINCT albums signal automation.
+    """
+    now = time()
+    for key in list(mirror_replace_log.keys()):
+        if now - mirror_replace_log[key] > MIRROR_STORM_WINDOW:
+            mirror_replace_log.pop(key, None)
+    others = 0
+    for key in mirror_replace_log:
+        if key != guid:
+            others += 1
+    mirror_replace_log[guid] = now
+    return others >= MIRROR_STORM_LIMIT
+
+
 def write_cover_sidecar(cover_path, image_bytes):
     """
         Write image_bytes to cover_path without ever creating a "._" file on
@@ -417,17 +494,26 @@ def promote_picked_cover(helper):
         so the local cover IS the pick and the rest of the pipeline asserts it
         rather than fighting it.
 
-        Narrow by construction, so it can never clobber curated work:
+        CURATE MODE ONLY (v1.3.125). This function's old safety argument --
+        "fires only when the live selection is byte-identical to a cover WE
+        offered, so it must be a deliberate pick" -- was FALSE during a scan:
+        the scan itself selects offered covers, thousands of times, with nobody
+        picking anything. On the 2026-07-26 rebuild that inference made this a
+        writer of automatic selections over hand-curated cover.jpg files, with
+        no matching log pattern in the damage sweep (its "promoted" line was
+        not "poster-backup: saved"). Whether a pick happened is now DECLARED by
+        cover_mirror_mode, never inferred from selection state.
+
+        Remaining narrowing, within curate mode:
           - forced refresh + prefer_local_cover only;
-          - fires only when the LIVE selection is byte-identical to a cover WE
-            offered (helper.thumb / thumb_secondary). A custom upload dragged in
-            never matches -> untouched (backup_selected_poster preserves it); a
-            cover.jpg replaced on disk is not our offered cover -> untouched, so
-            the disk still wins;
-          - only when the pick DIFFERS from the current cover.jpg (steady state
-            does nothing);
-          - never the artist photo (the same poison check the backup uses).
+          - only when the selection is byte-identical to a cover we offered (a
+            custom upload never matches; backup_selected_poster captures it);
+          - only when the pick DIFFERS from the current cover.jpg;
+          - never the artist photo (the same poison check the backup uses);
+          - storm-guarded, like every replacement writer.
     """
+    if cover_mirror_mode() != 'curate':
+        return
     if not (Prefs['prefer_local_cover'] and helper.force):
         return
     offered = []
@@ -511,6 +597,11 @@ def promote_picked_cover(helper):
             log.warn('%s: picked cover is the artist photo -- refusing to write it', tag)
             mark_done(tag, helper.metadata.guid, thumb)
             return
+    if existing and replacement_is_storm(helper.metadata.guid):
+        log.error('%s: MIRROR STORM -- %d+ distinct albums replacing cover.jpg '
+                  'within %ds is a scan, not a person; refusing to overwrite %s',
+                  tag, MIRROR_STORM_LIMIT, MIRROR_STORM_WINDOW, cover_path)
+        return
     if write_cover_sidecar(cover_path, selected):
         mark_done(tag, helper.metadata.guid, thumb)
         log.warn('%s: promoted the picked online cover to %s (%s bytes) -- now local',
@@ -551,13 +642,16 @@ def backup_selected_poster(helper):
         agent already refuses to DISPLAY such a file, so the operator sees it
         and can pick their own art -- and a deliberate pick still mirrors.
 
-        THE RULE (operator's model): cover.jpg is a faithful mirror of the
-        current selection, whoever chose it -- a hand-picked upload, the
-        container's Audible art, or a switch from the Audible cover to the
-        Hardcover one. Any change is captured on the next refresh. WHO selected
-        it is deliberately not consulted: the earlier ownership test meant a
-        book whose poster came from the agent never got a cover.jpg at all, and
-        swapping between two agent-supplied covers was invisible to disk.
+        THE RULE (v1.3.125, after the 2026-07-26 rebuild overwrote 92 curated
+        covers): the mirror's DIRECTION is declared by cover_mirror_mode, never
+        inferred. In 'seed' (the default) an existing cover.jpg is never
+        replaced -- only absent covers are written, so any scan is safe by
+        construction. In 'curate' the old rule applies: cover.jpg faithfully
+        mirrors the current selection, whoever chose it -- a hand-picked
+        upload, the container's Audible art, or a switch between two agent
+        covers -- because the operator has DECLARED that a person is choosing
+        right now. WHO selected a given poster is still never guessed from
+        selection state; that inference is what destroyed the 92.
 
         Writes only on an actual change: identical bytes are skipped, as is our
         own padded re-select of the same image (see RESELECT_PAD), so a
@@ -577,6 +671,9 @@ def backup_selected_poster(helper):
         cover.jpg. Byte-compare is a safe change-detector: /thumb serves the
         ORIGINAL bytes (verified identical to cover.jpg on an unchanged book).
     """
+    mode = cover_mirror_mode()
+    if mode == 'off':
+        return
     # Where cover.jpg lives for this book.
     try:
         raw = helper.album_file_path()
@@ -649,6 +746,17 @@ def backup_selected_poster(helper):
         log.error('incipit poster-backup: cover.jpg unreadable at %s (%s) -- '
                   'skipping, so an existing file is never blindly overwritten',
                   cover_path, e)
+        return
+    # SEED MODE: an existing file is never replaced, full stop -- and that is
+    # decidable right here, before paying for the selected poster's bytes on
+    # every track. Whether the selection matches or differs, the outcome is
+    # identical (no write), so the download would be pure cost. mark_done keeps
+    # the per-track collapse: this is a definite outcome for this selection.
+    if existing and mode != 'curate':
+        mark_done('poster-backup', helper.metadata.guid, thumb)
+        log.info('incipit poster-backup: cover.jpg exists and mode is seed-only '
+                 '-- not replacing it (switch the cover mirror to Curation to '
+                 'capture picks over existing files)')
         return
     # Now the expensive half: the selected poster's actual bytes.
     try:
@@ -738,8 +846,21 @@ def backup_selected_poster(helper):
     # to display. Do not re-derive the old reasoning from this paragraph.
     #
     # Whoever chose the selection, it is what Plex shows, so it is what the
-    # sidecar mirrors. The byte checks above already mean this only fires on a
-    # real change.
+    # sidecar mirrors -- in CURATE mode, where the operator has declared a
+    # person is choosing. The byte checks above already mean this only fires on
+    # a real change.
+    #
+    # Storm guard, replacements only (reaching here with `existing` means
+    # curate mode -- seed returned above). If curate is accidentally left on
+    # through a scan, this caps the damage at MIRROR_STORM_LIMIT files and
+    # makes every further attempt a loud, grep-able MIRROR STORM line.
+    if existing and replacement_is_storm(helper.metadata.guid):
+        log.error('incipit poster-backup: MIRROR STORM -- %d+ distinct albums '
+                  'replacing cover.jpg within %ds is a scan, not a person; '
+                  'refusing to overwrite %s (switch the cover mirror out of '
+                  'Curation during scans)',
+                  MIRROR_STORM_LIMIT, MIRROR_STORM_WINDOW, cover_path)
+        return
     if write_cover_sidecar(cover_path, selected):
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.warn('incipit poster-backup: saved -> %s (%s bytes)', cover_path, len(selected))
@@ -2586,8 +2707,13 @@ class AudiobookAlbum(Agent.Album):
         # on disk, no log). It then refused just the deferred-to online default
         # -- but that refusal only ever protected a file the agent had itself
         # measured as a print jacket and refused to display, so v1.3.121 dropped
-        # it and the parameter with it. Whatever is selected now reaches disk.
-        if Prefs['backup_poster_to_cover'] and helper.force:
+        # it and the parameter with it.
+        #
+        # What reaches disk is now governed by cover_mirror_mode (v1.3.125, the
+        # gate lives inside the function): seed-only by default, so a scan can
+        # SEED absent covers but never replace an existing one; full mirroring
+        # only in declared Curation sessions.
+        if helper.force:
             backup_selected_poster(helper)
         # Rating.
         helper.set_metadata_rating()

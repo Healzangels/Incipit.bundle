@@ -289,6 +289,11 @@ class PortraitDeferralMirror(unittest.TestCase):
     This is the third repair path that flag silently suppressed (poison repair
     in v1.3.108, then the mirror twice) -- the standing lesson is to narrow such
     a gate rather than widen what it covers.
+
+    These tests run in CURATE mode (declared in setUp): replacement mirroring is
+    the curation-session behaviour, and since v1.3.125 the default mode is
+    seed-only, where none of these writes may happen at all (CoverMirrorModes
+    pins that side).
     """
 
     ONLINE = b'\xff\xd8\xff\xe0 the square online cover'
@@ -328,6 +333,9 @@ class PortraitDeferralMirror(unittest.TestCase):
         # that merely returned a value could not tell us the call was gone.
         AG.fetch_url_bytes = (
             lambda url: outer.online_fetches.append(url) or outer.online_bytes)
+        AG.Prefs['cover_mirror_mode'] = (
+            'Curation (the selected poster replaces cover.jpg)')
+        AG.mirror_replace_log.clear()
         # F13 curated-file guard: no poster state -> the guard stands aside,
         # which is this book's real shape (a deferred portrait was never
         # uploaded, so there is no upload key to protect).
@@ -337,6 +345,8 @@ class PortraitDeferralMirror(unittest.TestCase):
         (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
          AG.fetch_url_bytes, AG.read_poster_state) = self.saved
         AG.recent_work_memo.clear()
+        AG.Prefs.pop('cover_mirror_mode', None)
+        AG.mirror_replace_log.clear()
 
     def _helper(self):
         class FakeMetadata(object):
@@ -1088,6 +1098,252 @@ class AuthorArtIsActuallyMeasured(unittest.TestCase):
         self.assertTrue(self.media, 'a poster must still be offered')
         for data in self.media:
             self.assertIsInstance(data, bytes)
+
+
+class CoverMirrorModes(unittest.TestCase):
+    """
+    The direction of truth for cover.jpg is DECLARED, never inferred.
+
+    2026-07-26: a library rebuild overwrote 92 hand-curated cover.jpg files.
+    Two writers were live -- backup_selected_poster (mirrors whatever is
+    selected) and promote_picked_cover (writes an offered online cover over
+    disk on the premise that "selection == offered cover" implies a person
+    picked it). During a scan both premises are false: the SCAN is what makes
+    selections, so automatic choices flowed over the operator's files. There
+    are no backups of that share; the originals are gone.
+
+    The fix is the Lambda.bundle pattern: one pref, cover_mirror_mode, declares
+    which side wins.
+
+      Off      -- never write the media folder.
+      Seed     -- (default) write cover.jpg ONLY where none exists. Safe during
+                  any scan; an existing file can never be replaced.
+      Curation -- Plex is truth for this session: picks replace cover.jpg.
+                  The mode a human turns on while actively choosing art.
+
+    The asymmetry is the point: forgetting to enable Curation costs a re-refresh
+    later; the old design's failure cost unrecoverable curated art.
+    """
+
+    ONLINE = b'\xff\xd8\xff\xe0 the online cover plex selected'
+    CURATED = b'\xff\xd8\xff\xe0 the operator curated file'
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        self.writes = []
+        self.reads = []
+        self.existing = self.CURATED
+        self.saved = (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
+                      AG.make_request, AG.read_poster_state)
+        outer = self
+
+        def router(url, **kwargs):
+            class FakeResponse(object):
+                content = ''
+            reply = FakeResponse()
+            if '/library/all' in url:
+                reply.content = ('<MediaContainer size="1">'
+                                 '<Directory ratingKey="55" '
+                                 'thumb="/library/metadata/55/thumb/1"/>'
+                                 '</MediaContainer>')
+            elif '/thumb/' in url:
+                outer.reads.append(url)
+                reply.content = outer.ONLINE
+            return reply
+
+        class OfferedResponse(object):
+            content = self.ONLINE
+
+        AG.HTTP.Request = router
+        AG.Core.storage.load = lambda path: outer.existing
+        AG.write_cover_sidecar = (
+            lambda path, data: outer.writes.append((path, data)) or True)
+        AG.make_request = lambda url, cache_time=None: OfferedResponse()
+        AG.read_poster_state = lambda guid, tag: None
+        AG.mirror_replace_log.clear()
+
+    def tearDown(self):
+        (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
+         AG.make_request, AG.read_poster_state) = self.saved
+        AG.Prefs.pop('cover_mirror_mode', None)
+        AG.recent_work_memo.clear()
+        AG.mirror_replace_log.clear()
+
+    def _helper(self, guid='com.plexapp.agents.incipit://MODETEST_us'):
+        class FakeMetadata(object):
+            pass
+
+        class FakeHelper(object):
+            metadata = FakeMetadata()
+            thumb = 'https://images.example/online-cover.jpg'
+            thumb_secondary = None
+            force = True
+
+            def album_file_path(self):
+                return '/data/media/x/1 - Book/file.m4b'
+
+        FakeHelper.metadata.guid = guid
+        return FakeHelper()
+
+    # --- the default: seed only ---
+
+    def test_default_mode_is_seed(self):
+        self.assertEqual(AG.cover_mirror_mode(), 'seed')
+
+    def test_seed_never_replaces_an_existing_file(self):
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(self.writes, [],
+                         'an automatic selection must not replace curated art')
+
+    def test_seed_refusal_skips_the_poster_download_entirely(self):
+        # The refusal is decidable from the file's existence alone, so paying
+        # for the selected poster's bytes first would be pure waste per track.
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(self.reads, [])
+
+    def test_seed_still_writes_where_no_cover_exists(self):
+        self.existing = None
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(len(self.writes), 1, 'seeding absent covers must survive')
+        self.assertEqual(self.writes[0][1], self.ONLINE)
+
+    def test_promote_never_runs_outside_curation(self):
+        # THE RUN-1 WRITER. Its premise -- selection matches an offered online
+        # cover, therefore a person picked it -- is false during a scan.
+        AG.Prefs['prefer_local_cover'] = True
+        AG.promote_picked_cover(self._helper())
+        self.assertEqual(self.writes, [])
+
+    # --- off ---
+
+    def test_off_does_nothing_at_all(self):
+        AG.Prefs['cover_mirror_mode'] = 'Off'
+        AG.backup_selected_poster(self._helper())
+        AG.promote_picked_cover(self._helper())
+        self.assertEqual(self.writes, [])
+
+    # --- curation ---
+
+    def test_curation_replaces_the_file(self):
+        AG.Prefs['cover_mirror_mode'] = (
+            'Curation (the selected poster replaces cover.jpg)')
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(len(self.writes), 1)
+        self.assertEqual(self.writes[0][1], self.ONLINE)
+
+    def test_curation_lets_promote_write(self):
+        AG.Prefs['cover_mirror_mode'] = (
+            'Curation (the selected poster replaces cover.jpg)')
+        AG.Prefs['prefer_local_cover'] = True
+        AG.promote_picked_cover(self._helper())
+        self.assertEqual(len(self.writes), 1)
+
+    # --- resolver robustness ---
+
+    def test_unknown_pref_values_resolve_to_seed(self):
+        for weird in (None, True, False, '', 'banana', 0):
+            AG.Prefs['cover_mirror_mode'] = weird
+            self.assertEqual(AG.cover_mirror_mode(), 'seed',
+                             'unknown value %r must fail SAFE' % (weird,))
+
+
+class MirrorStormGuard(unittest.TestCase):
+    """
+    Curation mode's backstop: no human replaces cover.jpg on many DISTINCT
+    albums within a minute -- only a scan does. If Curation is accidentally
+    left on through a rebuild, the storm guard caps the damage and turns the
+    rest into loud MIRROR STORM log lines the scan logger alerts on.
+
+    A pick-and-refresh cycle takes a human ~30-60s per book, so the sustained
+    human ceiling is ~2 distinct albums per minute; run 1's scan attempted
+    dozens. The threshold sits between the two.
+    """
+
+    ONLINE = b'\xff\xd8\xff\xe0 the online cover plex selected'
+    CURATED = b'\xff\xd8\xff\xe0 the operator curated file'
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        AG.mirror_replace_log.clear()
+        self.writes = []
+        self.existing = self.CURATED
+        self.saved = (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
+                      AG.read_poster_state)
+        outer = self
+
+        def router(url, **kwargs):
+            class FakeResponse(object):
+                content = ''
+            reply = FakeResponse()
+            if '/library/all' in url:
+                reply.content = ('<MediaContainer size="1">'
+                                 '<Directory ratingKey="55" '
+                                 'thumb="/library/metadata/55/thumb/1"/>'
+                                 '</MediaContainer>')
+            elif '/thumb/' in url:
+                reply.content = outer.ONLINE
+            return reply
+
+        AG.HTTP.Request = router
+        AG.Core.storage.load = lambda path: outer.existing
+        AG.write_cover_sidecar = (
+            lambda path, data: outer.writes.append((path, data)) or True)
+        AG.read_poster_state = lambda guid, tag: None
+        AG.Prefs['cover_mirror_mode'] = (
+            'Curation (the selected poster replaces cover.jpg)')
+
+    def tearDown(self):
+        (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
+         AG.read_poster_state) = self.saved
+        AG.Prefs.pop('cover_mirror_mode', None)
+        AG.recent_work_memo.clear()
+        AG.mirror_replace_log.clear()
+
+    def _helper(self, guid):
+        class FakeMetadata(object):
+            pass
+
+        class FakeHelper(object):
+            metadata = FakeMetadata()
+            thumb = 'https://images.example/online-cover.jpg'
+            thumb_secondary = None
+            force = True
+
+            def album_file_path(self):
+                return '/data/media/x/%s/file.m4b' % guid
+
+        FakeHelper.metadata.guid = guid
+        return FakeHelper()
+
+    def test_a_storm_of_distinct_albums_is_capped(self):
+        for i in range(12):
+            AG.backup_selected_poster(self._helper('guid-storm-%d' % i))
+        self.assertEqual(
+            len(self.writes), AG.MIRROR_STORM_LIMIT,
+            'replacement writes must cap at the storm limit, not run to 12')
+
+    def test_seeding_is_never_storm_limited(self):
+        # A rebuild legitimately seeds hundreds of absent covers; only
+        # REPLACEMENTS are evidence of runaway automation.
+        self.existing = None
+        for i in range(12):
+            AG.backup_selected_poster(self._helper('guid-seed-%d' % i))
+        self.assertEqual(len(self.writes), 12)
+
+    def test_old_entries_expire_from_the_window(self):
+        real_time = AG.time
+        try:
+            now = [1000000.0]
+            AG.time = lambda: now[0]
+            for i in range(AG.MIRROR_STORM_LIMIT):
+                AG.backup_selected_poster(self._helper('guid-a-%d' % i))
+            self.assertEqual(len(self.writes), AG.MIRROR_STORM_LIMIT)
+            # A human hour later is not part of the same storm.
+            now[0] += 3600
+            AG.backup_selected_poster(self._helper('guid-later'))
+            self.assertEqual(len(self.writes), AG.MIRROR_STORM_LIMIT + 1)
+        finally:
+            AG.time = real_time
 
 
 if __name__ == '__main__':

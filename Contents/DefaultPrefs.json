@@ -73,10 +73,15 @@
         "default": "false"
     },
     {
-        "id": "backup_poster_to_cover",
-        "label": "On a metadata refresh, save the current poster to cover.jpg next to the book (only when it changed), so a manually-set cover persists to disk and survives a rebuild.",
-        "type": "bool",
-        "default": "false"
+        "id": "cover_mirror_mode",
+        "label": "Save the selected poster to the book folder's cover.jpg:",
+        "type": "enum",
+        "values": [
+            "Off",
+            "Seed only (write cover.jpg only where none exists)",
+            "Curation (the selected poster replaces cover.jpg)"
+        ],
+        "default": "Seed only (write cover.jpg only where none exists)"
     },
     {
         "id": "series_from_folder_authors",
