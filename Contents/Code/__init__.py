@@ -1498,7 +1498,14 @@ def offer_secondary_author_poster(helper, valid_posters):
     # measure would double the author-art traffic.
     secondary_dims = None
     if (helper.thumb_secondary not in helper.metadata.posters or helper.force):
-        secondary_data = make_request(helper.thumb_secondary)
+        # fetch_url_bytes, NOT make_request: the latter returns Plex's lazy
+        # HTTPRequest wrapper, and image_dimensions below slices it -- which
+        # raised 'HTTPRequest object has no attribute __getitem__' into the
+        # outer except and became None on EVERY artist (measured live
+        # 2026-07-25). Proxy.Media accepted the wrapper, so the poster still
+        # appeared and only the measurement was lost, which is why it went
+        # unnoticed from v1.3.118.
+        secondary_data = fetch_url_bytes(helper.thumb_secondary)
         if secondary_data is not None:
             helper.metadata.posters[helper.thumb_secondary] = \
                 Proxy.Media(secondary_data, sort_order=1)
@@ -1945,7 +1952,10 @@ class AudiobookArtist(Agent.Artist):
         secondary_dims = None
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
-                thumb_data = make_request(helper.thumb)
+                # Bytes, not the HTTPRequest wrapper -- see the twin call in
+                # offer_secondary_author_poster. thumb_dims below is measured
+                # from this, and a wrapper silently measured as None.
+                thumb_data = fetch_url_bytes(helper.thumb)
                 if thumb_data is not None:
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=0

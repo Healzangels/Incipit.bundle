@@ -1021,5 +1021,74 @@ class PortraitFixCollapsesPerTrack(unittest.TestCase):
                          'the selected poster must not be downloaded twice')
 
 
+class AuthorArtIsActuallyMeasured(unittest.TestCase):
+    """
+    The author-art path must hand image_dimensions BYTES, not Plex's wrapper.
+
+    make_request returns the lazy HTTP.Request object; only fetch_url_bytes
+    unwraps it via .content. Both artist call sites passed the wrapper straight
+    to image_dimensions, whose `data[:8]` raised TypeError into the outer except
+    and became None -- so thumb_dims and secondary_dims were ALWAYS None.
+
+    Confirmed live 2026-07-25, once per artist refresh:
+        incipit cover: could not measure local cover
+        ('HTTPRequest' object has no attribute '__getitem__')
+
+    Consequences, both silent: the container reorder that puts the better
+    square-tile fit last (v1.3.118) could never fire, and the opt-in
+    prefer_square_author_art pref was inert because select_best_fit_author_art
+    is handed the same two Nones. The unit tests missed it because they pass raw
+    bytes directly to better_square_portrait, never through the fetch.
+    """
+
+    def setUp(self):
+        self.real_fetch = AG.fetch_url_bytes
+        self.real_request = AG.make_request
+        self.media = []
+        outer = self
+        AG.fetch_url_bytes = lambda url: _jpeg(900, 900)
+
+        class Wrapper(object):
+            """What make_request really returns: no __getitem__."""
+            content = _jpeg(900, 900)
+
+        AG.make_request = lambda url, cache_time=None: Wrapper()
+        real_media = AG.Proxy.Media
+        AG.Proxy.Media = lambda data, **kw: outer.media.append(data) or ('media', 0)
+        self.real_media = real_media
+
+    def tearDown(self):
+        AG.fetch_url_bytes = self.real_fetch
+        AG.make_request = self.real_request
+        AG.Proxy.Media = self.real_media
+
+    def _helper(self):
+        class FakePosters(dict):
+            def validate_keys(self, keys):
+                self.validated = keys
+
+        class FakeHelper(object):
+            thumb = 'https://hardcover/portrait.jpg'
+            thumb_secondary = 'https://audible/photo.jpg'
+            force = True
+
+            class metadata(object):
+                posters = FakePosters()
+        return FakeHelper()
+
+    def test_the_secondary_poster_is_measured_not_swallowed(self):
+        posters, dims = AG.offer_secondary_author_poster(self._helper(), [])
+        self.assertEqual(dims, (900, 900),
+                         'dims must be a real measurement, not None')
+
+    def test_what_reaches_proxy_media_is_bytes(self):
+        # Proxy.Media(wrapper) is what made this survive unnoticed -- the poster
+        # still appeared, only the measurement was lost.
+        AG.offer_secondary_author_poster(self._helper(), [])
+        self.assertTrue(self.media, 'a poster must still be offered')
+        for data in self.media:
+            self.assertIsInstance(data, bytes)
+
+
 if __name__ == '__main__':
     unittest.main()
