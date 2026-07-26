@@ -1346,5 +1346,96 @@ class MirrorStormGuard(unittest.TestCase):
             AG.time = real_time
 
 
+class AuthorArtOrderingIsStable(unittest.TestCase):
+    """
+    The square-fit ordering must survive passes that do not re-fetch images.
+
+    Dimensions were only measured on the pass that FETCHED an image. The artist
+    update runs once per album, and on every later pass the images are already
+    in the container, so the dims came back None, the reorder condition failed,
+    and validate_keys re-ran in DEFAULT order -- undoing the correct ordering
+    from the first pass. The last pass wins, so any author with several books
+    always ended on the default (Audible) image.
+
+    Verified live 2026-07-26 on Bryce O'Connor: Hardcover 820x820 vs Audible
+    1000x1500 -- the rule picks the square unambiguously, yet the Audible tall
+    was selected. Fix: dimensions are remembered per URL, so every pass can
+    reproduce the same ordering.
+    """
+
+    def setUp(self):
+        AG.IMAGE_DIMS_MEMO.clear()
+        self.real_fetch = AG.fetch_url_bytes
+        self.real_media = AG.Proxy.Media
+        AG.fetch_url_bytes = lambda url: _jpeg(1000, 1500)
+        AG.Proxy.Media = lambda data, **kw: ('media', 0)
+
+    def tearDown(self):
+        AG.fetch_url_bytes = self.real_fetch
+        AG.Proxy.Media = self.real_media
+        AG.IMAGE_DIMS_MEMO.clear()
+
+    def _helper(self, force=False, preloaded=False):
+        class FakePosters(dict):
+            pass
+
+        class FakeHelper(object):
+            thumb = 'https://hardcover/portrait.jpg'
+            thumb_secondary = 'https://audible/photo.jpg'
+
+        FakeHelper.force = force
+        FakeHelper.metadata = type('M', (object,), {'posters': FakePosters()})()
+        if preloaded:
+            FakeHelper.metadata.posters[FakeHelper.thumb_secondary] = ('media', 0)
+        return FakeHelper()
+
+    def test_first_pass_measures_and_remembers(self):
+        posters, dims = AG.offer_secondary_author_poster(self._helper(), [])
+        self.assertEqual(dims, (1000, 1500))
+        self.assertEqual(AG.IMAGE_DIMS_MEMO.get('https://audible/photo.jpg'),
+                         (1000, 1500))
+
+    def test_a_later_pass_recalls_dims_without_fetching(self):
+        AG.offer_secondary_author_poster(self._helper(), [])
+        fetches = []
+        AG.fetch_url_bytes = lambda url: fetches.append(url)
+        posters, dims = AG.offer_secondary_author_poster(
+            self._helper(preloaded=True), [])
+        self.assertEqual(dims, (1000, 1500),
+                         'pass 2 must know the dims or the ordering reverts')
+        self.assertEqual(fetches, [], 'and must not pay a re-fetch for them')
+
+    def test_remember_dims_ignores_unmeasurable_bytes(self):
+        self.assertIsNone(AG.remember_dims('https://x/y.jpg', b'not an image'))
+        self.assertNotIn('https://x/y.jpg', AG.IMAGE_DIMS_MEMO)
+
+
+class SquareTieBandCalibration(unittest.TestCase):
+    """
+    The tie band decides when SQUARENESS may beat raw resolution, and 0.75 was
+    too narrow for real provider art: Callie Hart's Hardcover square is 400x400
+    against an Audible 576x768 portrait selfie -- 400/576 = 0.69, just outside
+    the old band, so resolution won and the square professional photo lost.
+    Verified live 2026-07-26 (the operator flagged the outcome as wrong).
+
+    At 0.5 the square wins whenever it has at least HALF the tall image's short
+    edge, which matches how these render in a square tile: a centre-crop of a
+    3:4 portrait loses the top of the head, while a modest square stays a face.
+    Glen Cook's guard case (117px thumbnail vs 3072x2304, ratio 0.05) still
+    resolves to resolution, so the postage-stamp regression stays impossible.
+    """
+
+    def test_callie_hart_square_now_wins(self):
+        self.assertIs(AG.better_square_portrait((400, 400), (576, 768))[0], 400)
+
+    def test_bryce_oconnor_square_still_wins(self):
+        self.assertEqual(AG.better_square_portrait((820, 820), (1000, 1500)),
+                         (820, 820))
+
+    def test_glen_cook_thumbnail_still_loses(self):
+        self.assertEqual(AG.better_square_portrait((117, 150), (3072, 2304)),
+                         (3072, 2304))
+
+
 if __name__ == '__main__':
     unittest.main()

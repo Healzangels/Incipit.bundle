@@ -1559,7 +1559,37 @@ def select_sole_author_art(helper):
 # instead of resolution. 0.75 = within 25%. Measured against the live library:
 # it takes Bryce O'Connor's 820x820 over his 1000x1500 (820/1000 = 0.82) while
 # leaving Glen Cook on his 3072x2304 rather than a 117x150 thumbnail.
-SQUARE_TIE_BAND = 0.75
+# Dimensions remembered per image URL. The artist update runs once per ALBUM,
+# and only the pass that FETCHES an image can measure it -- so without this,
+# every later pass had dims of None, the square-fit reorder condition failed,
+# and validate_keys re-ran in DEFAULT order, undoing the first pass's correct
+# ordering. The last pass wins, so any author with several books always ended
+# on the default (Audible) image. Verified live 2026-07-26 on Bryce O'Connor:
+# 820x820 vs 1000x1500 -- the rule picks the square unambiguously, and the tall
+# was selected anyway. Keyed by URL, so a provider serving a new image
+# self-invalidates; ~2 entries per author, so growth is trivial.
+IMAGE_DIMS_MEMO = {}
+
+
+def remember_dims(url, data):
+    """Measure `data`, remember the answer for `url`, return it (None stays
+    unremembered, so a later good fetch can still fill it)."""
+    measured = image_dimensions(data)
+    if url and measured:
+        IMAGE_DIMS_MEMO[url] = measured
+    return measured
+
+
+# How close two portraits' SHORT EDGES must be before squareness decides
+# instead of resolution. WAS 0.75; widened to 0.5 on live evidence (2026-07-26,
+# Callie Hart): her Hardcover square is 400x400 against an Audible 576x768
+# portrait -- 400/576 = 0.69, just outside the old band, so resolution won and
+# a portrait selfie beat the square professional photo in a SQUARE tile. A
+# centre-crop of a 3:4 portrait loses the top of the head; a modest square
+# stays a face -- so squareness deserves the wider berth. Glen Cook's guard
+# case (117px thumbnail vs 3072x2304, ratio 0.05) still resolves to
+# resolution, so the postage-stamp regression stays impossible.
+SQUARE_TIE_BAND = 0.5
 
 
 def better_square_portrait(first, second):
@@ -1630,7 +1660,12 @@ def offer_secondary_author_poster(helper, valid_posters):
         if secondary_data is not None:
             helper.metadata.posters[helper.thumb_secondary] = \
                 Proxy.Media(secondary_data, sort_order=1)
-            secondary_dims = image_dimensions(secondary_data)
+            secondary_dims = remember_dims(helper.thumb_secondary, secondary_data)
+    if secondary_dims is None:
+        # A pass that did not fetch (image already in the container) must still
+        # KNOW the dims, or the square-fit ordering decided on pass 1 reverts
+        # on pass 2 -- see IMAGE_DIMS_MEMO.
+        secondary_dims = IMAGE_DIMS_MEMO.get(helper.thumb_secondary)
     valid_posters.append(helper.thumb_secondary)
     return valid_posters, secondary_dims
 
@@ -2084,9 +2119,15 @@ class AudiobookArtist(Agent.Artist):
                     thumb_added = True
                     # Measured while the bytes are in hand; see
                     # better_square_portrait for what it decides.
-                    thumb_dims = image_dimensions(thumb_data)
+                    thumb_dims = remember_dims(helper.thumb, thumb_data)
             else:
                 thumb_added = True
+                # No fetch this pass, so recall the measurement -- otherwise
+                # the reorder below is dims-blind on every pass after the
+                # first and re-asserts DEFAULT order, which is exactly how
+                # multi-book authors ended on the Audible image regardless of
+                # what pass 1 correctly decided (see IMAGE_DIMS_MEMO).
+                thumb_dims = IMAGE_DIMS_MEMO.get(helper.thumb)
         # Author-image selection. Two authors want the Hardcover portrait, MOST
         # want the Audible photo, and there is no reliable signal to tell them
         # apart automatically (both providers return real photos; which looks
