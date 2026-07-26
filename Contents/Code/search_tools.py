@@ -1019,6 +1019,31 @@ class AlbumSearchTool(SearchTool):
             extra += '&asin=' + quote_param(asin_hint)
             log.info('incipit asin hint: %s', asin_hint)
 
+        # ISBN, sent ALONGSIDE the ASIN rather than instead of it. A sidecar
+        # ASIN can be DEAD while the sidecar's ISBN is the live identifier:
+        # "The Lost Stories Collection" pins B08WF9JR2P (resolves to nothing
+        # anywhere) next to isbn 9780593399439 -- whose ISBN-10 form is the id
+        # in the book's own audible.com URL. Publishers routinely register
+        # audio editions under the print ISBN-10 rather than a B0 ASIN. The
+        # API uses this ONLY as a fallback pin identity when the ASIN above is
+        # absent or resolves to nothing, so sending both never displaces a
+        # working ASIN. Light shape check only (10/13 significant chars); the
+        # API owns the ISBN-13 -> ISBN-10 conversion and check-digit math.
+        try:
+            sc = self.sidecar()
+            if sc:
+                sc_isbn = sc.get('isbn')
+                if isinstance(sc_isbn, (str, unicode)):
+                    kept = ''
+                    for ch in sc_isbn:
+                        if ch.isdigit() or ch in 'Xx':
+                            kept += ch
+                    if len(kept) in (10, 13):
+                        extra += '&isbn=' + quote_param(kept.upper())
+                        log.info('incipit isbn hint: %s', kept.upper())
+        except Exception as e:
+            log.error('incipit isbn probe failed: %s', e)
+
         # Narrator, from the sidecar (swap-corrected). For a popular book the
         # providers return several editions with IDENTICAL title and author --
         # Harry Potter and the Chamber of Secrets comes back as Jim Dale,
