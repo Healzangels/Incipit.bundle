@@ -362,6 +362,25 @@ def cover_mirror_mode():
         re-refresh after flipping it; the old design's forgetting cost
         unrecoverable curated art. Unknown/legacy values resolve to 'seed' for
         the same reason.
+
+        THE MODE IS THE WHOLE PROTECTION -- do not add a rate/"storm" guard back.
+        v1.3.125 shipped one (refuse a replacement once 6+ distinct albums were
+        replaced inside 60s, on the theory that only a scan writes that fast).
+        Removed in v1.3.127 because the incident data refutes it: the rebuild it
+        was written to stop wrote at 1-15 files per MINUTE, median ~4, so it
+        would have let more than half the damage through -- while the operator's
+        real workflow (apply art to N books, then ONE artist-level refresh, up
+        to ~40 covers for a series like Xanth) sits far above any threshold that
+        would catch a scan. The two rates overlap, so rate cannot separate them,
+        and in practice the guard only ever fired on legitimate curation.
+        ZeroQI's Lambda.bundle -- the same export-to-media problem, years of use
+        -- carries no rate guard either, for the same reason: the declared
+        direction is sufficient and a heuristic is not.
+
+        What DOES make an unexpected write detectable is the log: every write
+        announces itself ('poster-backup: saved ->', 'promoted the picked'), and
+        the scan logger alerts on those strings. Detection, not prevention, is
+        the right job for something that cannot tell the two cases apart.
     """
     try:
         raw = Prefs['cover_mirror_mode']
@@ -375,42 +394,6 @@ def cover_mirror_mode():
     if text.startswith('curation'):
         return 'curate'
     return 'seed'
-
-
-# Storm guard state: guid -> time() of its last REPLACEMENT attempt (writes
-# that would overwrite an existing cover.jpg; seeds are never counted). Global
-# across update() calls, like recent_work_memo.
-mirror_replace_log = {}
-# No human replaces cover art on this many DISTINCT albums inside the window --
-# a pick-and-refresh cycle takes ~30-60s per book, so the sustained human
-# ceiling is ~2/min. Run 1's scan attempted dozens per minute. The threshold
-# sits between the two: curation sessions never feel it, a scan hits it in
-# seconds.
-MIRROR_STORM_LIMIT = 6
-MIRROR_STORM_WINDOW = 60
-
-
-def replacement_is_storm(guid):
-    """
-        True when replacement writes are arriving faster than any human picks.
-
-        The backstop for curate mode left on by mistake through a scan: caps
-        the damage at MIRROR_STORM_LIMIT files and turns everything after into
-        loud MIRROR STORM log lines (the scan logger alerts on that string).
-        Attempts are recorded even when refused, so a scan cannot ride the
-        window's edge. Same-guid repeats (a multi-part book's tracks) count
-        once -- only DISTINCT albums signal automation.
-    """
-    now = time()
-    for key in list(mirror_replace_log.keys()):
-        if now - mirror_replace_log[key] > MIRROR_STORM_WINDOW:
-            mirror_replace_log.pop(key, None)
-    others = 0
-    for key in mirror_replace_log:
-        if key != guid:
-            others += 1
-    mirror_replace_log[guid] = now
-    return others >= MIRROR_STORM_LIMIT
 
 
 def write_cover_sidecar(cover_path, image_bytes):
@@ -510,7 +493,6 @@ def promote_picked_cover(helper):
             custom upload never matches; backup_selected_poster captures it);
           - only when the pick DIFFERS from the current cover.jpg;
           - never the artist photo (the same poison check the backup uses);
-          - storm-guarded, like every replacement writer.
     """
     if cover_mirror_mode() != 'curate':
         return
@@ -597,11 +579,6 @@ def promote_picked_cover(helper):
             log.warn('%s: picked cover is the artist photo -- refusing to write it', tag)
             mark_done(tag, helper.metadata.guid, thumb)
             return
-    if existing and replacement_is_storm(helper.metadata.guid):
-        log.error('%s: MIRROR STORM -- %d+ distinct albums replacing cover.jpg '
-                  'within %ds is a scan, not a person; refusing to overwrite %s',
-                  tag, MIRROR_STORM_LIMIT, MIRROR_STORM_WINDOW, cover_path)
-        return
     if write_cover_sidecar(cover_path, selected):
         mark_done(tag, helper.metadata.guid, thumb)
         log.warn('%s: promoted the picked online cover to %s (%s bytes) -- now local',
@@ -850,17 +827,6 @@ def backup_selected_poster(helper):
     # person is choosing. The byte checks above already mean this only fires on
     # a real change.
     #
-    # Storm guard, replacements only (reaching here with `existing` means
-    # curate mode -- seed returned above). If curate is accidentally left on
-    # through a scan, this caps the damage at MIRROR_STORM_LIMIT files and
-    # makes every further attempt a loud, grep-able MIRROR STORM line.
-    if existing and replacement_is_storm(helper.metadata.guid):
-        log.error('incipit poster-backup: MIRROR STORM -- %d+ distinct albums '
-                  'replacing cover.jpg within %ds is a scan, not a person; '
-                  'refusing to overwrite %s (switch the cover mirror out of '
-                  'Curation during scans)',
-                  MIRROR_STORM_LIMIT, MIRROR_STORM_WINDOW, cover_path)
-        return
     if write_cover_sidecar(cover_path, selected):
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.warn('incipit poster-backup: saved -> %s (%s bytes)', cover_path, len(selected))

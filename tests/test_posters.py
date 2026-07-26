@@ -335,7 +335,6 @@ class PortraitDeferralMirror(unittest.TestCase):
             lambda url: outer.online_fetches.append(url) or outer.online_bytes)
         AG.Prefs['cover_mirror_mode'] = (
             'Curation (the selected poster replaces cover.jpg)')
-        AG.mirror_replace_log.clear()
         # F13 curated-file guard: no poster state -> the guard stands aside,
         # which is this book's real shape (a deferred portrait was never
         # uploaded, so there is no upload key to protect).
@@ -346,7 +345,6 @@ class PortraitDeferralMirror(unittest.TestCase):
          AG.fetch_url_bytes, AG.read_poster_state) = self.saved
         AG.recent_work_memo.clear()
         AG.Prefs.pop('cover_mirror_mode', None)
-        AG.mirror_replace_log.clear()
 
     def _helper(self):
         class FakeMetadata(object):
@@ -1160,14 +1158,12 @@ class CoverMirrorModes(unittest.TestCase):
             lambda path, data: outer.writes.append((path, data)) or True)
         AG.make_request = lambda url, cache_time=None: OfferedResponse()
         AG.read_poster_state = lambda guid, tag: None
-        AG.mirror_replace_log.clear()
 
     def tearDown(self):
         (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
          AG.make_request, AG.read_poster_state) = self.saved
         AG.Prefs.pop('cover_mirror_mode', None)
         AG.recent_work_memo.clear()
-        AG.mirror_replace_log.clear()
 
     def _helper(self, guid='com.plexapp.agents.incipit://MODETEST_us'):
         class FakeMetadata(object):
@@ -1245,105 +1241,6 @@ class CoverMirrorModes(unittest.TestCase):
             AG.Prefs['cover_mirror_mode'] = weird
             self.assertEqual(AG.cover_mirror_mode(), 'seed',
                              'unknown value %r must fail SAFE' % (weird,))
-
-
-class MirrorStormGuard(unittest.TestCase):
-    """
-    Curation mode's backstop: no human replaces cover.jpg on many DISTINCT
-    albums within a minute -- only a scan does. If Curation is accidentally
-    left on through a rebuild, the storm guard caps the damage and turns the
-    rest into loud MIRROR STORM log lines the scan logger alerts on.
-
-    A pick-and-refresh cycle takes a human ~30-60s per book, so the sustained
-    human ceiling is ~2 distinct albums per minute; run 1's scan attempted
-    dozens. The threshold sits between the two.
-    """
-
-    ONLINE = b'\xff\xd8\xff\xe0 the online cover plex selected'
-    CURATED = b'\xff\xd8\xff\xe0 the operator curated file'
-
-    def setUp(self):
-        AG.recent_work_memo.clear()
-        AG.mirror_replace_log.clear()
-        self.writes = []
-        self.existing = self.CURATED
-        self.saved = (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
-                      AG.read_poster_state)
-        outer = self
-
-        def router(url, **kwargs):
-            class FakeResponse(object):
-                content = ''
-            reply = FakeResponse()
-            if '/library/all' in url:
-                reply.content = ('<MediaContainer size="1">'
-                                 '<Directory ratingKey="55" '
-                                 'thumb="/library/metadata/55/thumb/1"/>'
-                                 '</MediaContainer>')
-            elif '/thumb/' in url:
-                reply.content = outer.ONLINE
-            return reply
-
-        AG.HTTP.Request = router
-        AG.Core.storage.load = lambda path: outer.existing
-        AG.write_cover_sidecar = (
-            lambda path, data: outer.writes.append((path, data)) or True)
-        AG.read_poster_state = lambda guid, tag: None
-        AG.Prefs['cover_mirror_mode'] = (
-            'Curation (the selected poster replaces cover.jpg)')
-
-    def tearDown(self):
-        (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
-         AG.read_poster_state) = self.saved
-        AG.Prefs.pop('cover_mirror_mode', None)
-        AG.recent_work_memo.clear()
-        AG.mirror_replace_log.clear()
-
-    def _helper(self, guid):
-        class FakeMetadata(object):
-            pass
-
-        class FakeHelper(object):
-            metadata = FakeMetadata()
-            thumb = 'https://images.example/online-cover.jpg'
-            thumb_secondary = None
-            force = True
-
-            def album_file_path(self):
-                return '/data/media/x/%s/file.m4b' % guid
-
-        FakeHelper.metadata.guid = guid
-        return FakeHelper()
-
-    def test_a_storm_of_distinct_albums_is_capped(self):
-        for i in range(12):
-            AG.backup_selected_poster(self._helper('guid-storm-%d' % i))
-        self.assertEqual(
-            len(self.writes), AG.MIRROR_STORM_LIMIT,
-            'replacement writes must cap at the storm limit, not run to 12')
-
-    def test_seeding_is_never_storm_limited(self):
-        # A rebuild legitimately seeds hundreds of absent covers; only
-        # REPLACEMENTS are evidence of runaway automation.
-        self.existing = None
-        for i in range(12):
-            AG.backup_selected_poster(self._helper('guid-seed-%d' % i))
-        self.assertEqual(len(self.writes), 12)
-
-    def test_old_entries_expire_from_the_window(self):
-        real_time = AG.time
-        try:
-            now = [1000000.0]
-            AG.time = lambda: now[0]
-            for i in range(AG.MIRROR_STORM_LIMIT):
-                AG.backup_selected_poster(self._helper('guid-a-%d' % i))
-            self.assertEqual(len(self.writes), AG.MIRROR_STORM_LIMIT)
-            # A human hour later is not part of the same storm.
-            now[0] += 3600
-            AG.backup_selected_poster(self._helper('guid-later'))
-            self.assertEqual(len(self.writes), AG.MIRROR_STORM_LIMIT + 1)
-        finally:
-            AG.time = real_time
 
 
 class AuthorArtOrderingIsStable(unittest.TestCase):
