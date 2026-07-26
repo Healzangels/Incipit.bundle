@@ -171,11 +171,18 @@ def byte_at(data, index):
         bytes yields an int and ord() raises. struct reads a one-byte SLICE,
         which is bytes under both, so it is the one form that cannot drift.
 
-        Drift here is INVISIBLE, which is why this exists: comparing bytes to a
-        str literal is silently False, so image_dimensions returned None for
-        every image, local_cover_is_portrait read that as "not portrait", and
-        the portrait guard was a no-op -- while the test suite stayed green,
-        because it exercised the same mismatched comparison.
+        Drift here is INVISIBLE, which is why this exists. Comparing bytes to a
+        str literal is silently False, so under PYTHON 3 -- the test harness,
+        not production -- image_dimensions returned None for every image and
+        local_cover_is_portrait read that as "not portrait". Production is
+        py2.7, where the two literal forms are the same type, so the old code
+        worked there and the portrait deferral has fired live (measured on
+        Extraction and The Ghost, 2026-07-25).
+
+        The cost was therefore not a prod bug but an untestable one: the suite
+        stayed green while exercising the mismatched comparison, so nothing in
+        this file's image handling could be covered at all. Any NEW comparison
+        written the old way re-opens that hole silently.
     """
     return struct.unpack('B', data[index:index + 1])[0]
 
@@ -237,10 +244,24 @@ def image_dimensions(data):
             width, height = struct.unpack('>II', data[16:24])
             return (int(width), int(height))
         if data[:2] == b'BM' and len(data) >= 26:
-            # The DIB header's height is SIGNED: negative means the rows are
-            # stored top-down, not that the image has a negative size.
-            width, height = struct.unpack('<ii', data[18:26])
-            return (abs(int(width)), abs(int(height)))
+            # The DIB header SIZE at offset 14 says which layout follows, and
+            # assuming one is the mistake this function exists to refuse. An
+            # OS/2 BITMAPCOREHEADER keeps 16-bit dimensions at 18/20, so
+            # reading BITMAPINFOHEADER's 32-bit pair at 18/22 turned a 510x680
+            # jacket into (44564990, 1572865): not merely wrong but unbeatable,
+            # since better_square_portrait ranks on min(width, height).
+            header = struct.unpack('<I', data[14:18])[0]
+            if header == 12:
+                width, height = struct.unpack('<HH', data[18:22])
+                return (int(width), int(height))
+            if header >= 40:
+                # BITMAPINFOHEADER and every later variant. Height is SIGNED:
+                # negative means the rows are stored top-down, not that the
+                # image has a negative size.
+                width, height = struct.unpack('<ii', data[18:26])
+                return (abs(int(width)), abs(int(height)))
+            # A header size that is neither is a layout we cannot place.
+            return None
         if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
             return webp_dimensions(data)
         if data[:2] != b'\xff\xd8':
@@ -706,8 +727,15 @@ def backup_selected_poster(helper):
     # guard could not tell those cases apart, and the automatic ones it feared
     # are covered without it: a re-match's default selection is either the
     # local cover (byte-identical to disk, caught by the unchanged-skip above)
-    # or a portrait book's online default (refused by the portrait branch
-    # above), and inherited artist art is refused by the poison guard below.
+    # or inherited artist art (refused by the poison guard above).
+    #
+    # ONE automatic case is now genuinely unguarded, and it is deliberate. Until
+    # v1.3.121 a third leg read "or a portrait book's online default, refused by
+    # the portrait branch above"; that branch is gone, so a Fix Match that
+    # re-seats the online default on a portrait book IS mirrored to disk with no
+    # human act. That is the point -- see the docstring: the file it would have
+    # protected is one the agent measured as a print jacket and already refused
+    # to display. Do not re-derive the old reasoning from this paragraph.
     #
     # Whoever chose the selection, it is what Plex shows, so it is what the
     # sidecar mirrors. The byte checks above already mean this only fires on a
@@ -964,7 +992,7 @@ def selection_is_agent_owned(selected_key, owned_shas):
 
 
 def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
-                             pref_asserted=False):
+                             pref_asserted=False, selected=None):
     """
         Make `image_bytes` the SELECTED Plex poster for the item with `guid`,
         via the trusted local Plex API (Elevated policy -> no token needed).
@@ -1095,7 +1123,13 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
     # Byte equality is also the only thing that may skip: a CHANGED cover.jpg
     # must still reach Plex (v1.3.45), and it differs.
     if not have_plain and selected_key:
-        current, known = selected_poster_bytes(rk, selected_key, tag)
+        # `selected` lets a caller that has ALREADY read the selected poster
+        # hand those bytes over instead of paying for the same download twice
+        # (correct_portrait_selection reads it to prove the jacket is showing).
+        if selected is not None:
+            current, known = (selected, True)
+        else:
+            current, known = selected_poster_bytes(rk, selected_key, tag)
         if known and same_image(image_bytes, current):
             log.info('%s: the selected poster already IS this image (rk %s) -- '
                      'not uploading a duplicate', tag, rk)
@@ -1105,7 +1139,20 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
     # it there, so re-select via the pad -- new content, identical pixels.
     reselect = have_plain and pref_asserted
     post_bytes = padded_bytes if reselect else image_bytes
-    content_type = 'image/png' if image_bytes[:4] == '\x89PNG' else 'image/jpeg'
+    # Byte literals, not str: the same py2/py3 drift byte_at exists to kill.
+    # Under py3 `image_bytes[:4] == '\\x89PNG'` is always False, so the tests
+    # that now drive this function could never catch a mislabelled upload --
+    # and in py2 a unicode body (which fetch_url_bytes can return, see below)
+    # fails the comparison too. WebP and BMP are named because this diff made
+    # both measurable, so both can now reach a POST.
+    head = image_bytes[:4]
+    content_type = 'image/jpeg'
+    if head == b'\x89PNG':
+        content_type = 'image/png'
+    elif head == b'RIFF':
+        content_type = 'image/webp'
+    elif image_bytes[:2] == b'BM':
+        content_type = 'image/bmp'
     try:
         up = PMS + '/library/metadata/' + rk + '/posters'
         HTTP.Request(up, data=post_bytes,
@@ -1252,31 +1299,55 @@ def correct_portrait_selection(helper, cover_bytes, square_bytes):
         return
     tag = 'incipit portrait-fix'
     guid = helper.metadata.guid
-    state = read_poster_state(guid, tag)
-    if state is None:
-        return
-    rk, selected_key, keys, parent_thumb = state
     try:
         sha, sha_padded, _ = padded_variants(cover_bytes)
     except Exception as e:
         log.error('%s: could not hash the local cover (%s)', tag, e)
         return
+    # MEMO FIRST, like select_local_cover and converge_author_art. update() runs
+    # once per TRACK, and every read below is a round trip -- read_poster_state
+    # is two, and selected_poster_bytes downloads a full poster. Asking the memo
+    # after them meant a 27-part book paid 54 localhost GETs and 27 whole-poster
+    # downloads per refresh to reach the same answer, because the only mark_done
+    # sat inside upload_and_select_poster where tracks 2..27 never arrive.
+    # Keyed on the cover's sha, so a REPLACED cover.jpg re-runs at once rather
+    # than waiting out the TTL -- the same token select_local_cover uses.
+    if not should_run(tag, guid, sha, 90):
+        return
+    state = read_poster_state(guid, tag)
+    if state is None:
+        return
+    rk, selected_key, keys, parent_thumb = state
     # The jacket's own shas count as ours: select_local_cover may have uploaded
     # it on an earlier pass, and undoing our own act is the whole point.
     if not selection_is_agent_owned(selected_key, [sha, sha_padded]):
         log.info('%s: selection is a user upload -- leaving it', tag)
+        mark_done(tag, guid, sha)
+        return
+    if not selected_key:
+        # Nothing selected is a healthy state, not a failed read -- and there is
+        # no jacket to move off. Distinguished from the (None, False) a timed-out
+        # fetch returns, which must NOT be logged as an error either way.
+        mark_done(tag, guid, sha)
         return
     current, known = selected_poster_bytes(rk, selected_key, tag)
     if not known:
+        # No mark_done: a blip must retry on the next pass, not be suppressed.
         log.error('%s: could not read the selected poster -- NOT overriding it, '
                   'so a blip cannot take away a poster on rk %s', tag, rk)
         return
     if not same_image(cover_bytes, current):
         log.info('%s: the selection is not the print jacket -- leaving it', tag)
+        mark_done(tag, guid, sha)
         return
     log.warn('%s: rk %s is showing the PORTRAIT cover.jpg the deferral declined; '
              'force-selecting the square online cover instead', tag, rk)
-    upload_and_select_poster(guid, square_bytes, tag, token=sha, state=state)
+    # `selected` hands the bytes we just read to the callee's duplicate guard,
+    # which would otherwise re-download this exact poster to ask a question this
+    # line already answered: the selection is the jacket, and square_bytes is
+    # not the jacket or there would be nothing to fix.
+    upload_and_select_poster(guid, square_bytes, tag, token=sha, state=state,
+                             selected=current)
 
 
 def select_hardcover_author_art(helper):
@@ -2293,10 +2364,12 @@ class AudiobookAlbum(Agent.Album):
         # on every path that does not read, so the callee still falls back.
         cover_bytes = None
         # Hoisted for the same reason as cover_bytes: correct_portrait_selection
-        # below needs the square online cover's BYTES, but the only assignment
-        # sits under `if helper.thumb:` -- so a book with no online image (the
-        # very case that comment set out to survive) left it unbound and raised
-        # NameError instead of simply having nothing to offer.
+        # below reads the square online cover's BYTES, but the only assignment
+        # sits under `if helper.thumb:`. Defensive rather than a measured fix --
+        # that caller is reached only when deferred_portrait_local is set, which
+        # already requires helper.thumb -- but the two conditions are 150 lines
+        # apart, and an unbound name here is a NameError mid-update, not a
+        # missing poster.
         thumb_data = None
         # Hoisted out of the prefer_local branch: the container-membership check
         # further down runs under `if helper.thumb:`, which is NOT nested inside
@@ -2470,24 +2543,24 @@ class AudiobookAlbum(Agent.Album):
         # Skipped for a poisoned local cover too -- select_local_cover refuses the
         # artist photo on its own, but not asking saves two round trips and keeps
         # the reason in one place.
+        # The shared gate stated ONCE. Both branches want the same four
+        # conditions and differ only on which way the portrait deferral went;
+        # spelling them out twice meant four conditions to keep in sync.
+        # helper.force is what makes cover_bytes freshly read, so neither branch
+        # has anything to compare against on an incremental pass.
         if (
-            Prefs['prefer_local_cover'] and helper.force
-            and not deferred_portrait_local and not poisoned_local
+            Prefs['prefer_local_cover'] and helper.force and not poisoned_local
         ):
-            select_local_cover(helper, cover_bytes)
-        # The MIRROR of that call. When the jacket was deferred, the container
-        # said "use the square" and Plex ignored it, because a container cannot
-        # move a selection it persisted on an earlier scan. Say it through the
-        # upload lever instead, which can -- otherwise the deferral is correct
-        # and powerless forever, which is exactly the 3 albums measured frozen
-        # on a portrait. Same force gate as its sibling: cover_bytes is only
-        # re-read on a real Refresh Metadata, so there is nothing to compare
-        # against on an incremental pass.
-        elif (
-            Prefs['prefer_local_cover'] and helper.force
-            and deferred_portrait_local and not poisoned_local
-        ):
-            correct_portrait_selection(helper, cover_bytes, thumb_data)
+            if not deferred_portrait_local:
+                select_local_cover(helper, cover_bytes)
+            else:
+                # The MIRROR of that call. When the jacket was deferred, the
+                # container said "use the square" and Plex ignored it, because a
+                # container cannot move a selection it persisted on an earlier
+                # scan. Say it through the upload lever instead, which can --
+                # otherwise the deferral is correct and powerless forever, which
+                # is exactly the 3 albums measured frozen on a portrait.
+                correct_portrait_selection(helper, cover_bytes, thumb_data)
         # Back up the currently-selected poster to cover.jpg (opt-in). Runs
         # AFTER the select: select_local_cover is ownership-guarded (a user's
         # custom upload survives it), so what is selected HERE is the state
@@ -2497,12 +2570,13 @@ class AudiobookAlbum(Agent.Album):
         # backup-first order clobbered a freshly-dropped cover.jpg with the
         # previous selection before prefer_local could ever serve it.
         #
-        # The portrait deferral no longer gates the mirror off wholesale -- that
-        # swallowed every deliberate pick on a portrait book (measured live on
-        # Joseph Bridgeman: hand-picked poster, Refresh, nothing on disk, no log).
-        # The flag is passed down instead, and backup_selected_poster refuses
-        # exactly ONE selection: the online default the deferral itself made,
-        # which is the only selection that can occur without a human act.
+        # The portrait deferral does not gate the mirror at all any more. It
+        # first gated it wholesale, which swallowed every deliberate pick on a
+        # portrait book (Joseph Bridgeman: hand-picked poster, Refresh, nothing
+        # on disk, no log). It then refused just the deferred-to online default
+        # -- but that refusal only ever protected a file the agent had itself
+        # measured as a print jacket and refused to display, so v1.3.121 dropped
+        # it and the parameter with it. Whatever is selected now reaches disk.
         if Prefs['backup_poster_to_cover'] and helper.force:
             backup_selected_poster(helper)
         # Rating.

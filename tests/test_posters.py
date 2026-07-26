@@ -278,12 +278,17 @@ class PortraitDeferralMirror(unittest.TestCase):
     poster plus Refresh Metadata changed nothing on disk, silently, because the
     old cover.jpg happened to be a print jacket.
 
-    The distinguishing fact: the agent only ever auto-selects the ONLINE cover
-    it deferred to. Any other selection was a human act. So the mirror now runs
-    on portrait books too, and skips only when the selection is byte-identical
-    to that deferred default (fail-closed when the default can't be fetched).
-    This is the third repair path this flag has silently suppressed (poison
-    repair in v1.3.108, now the mirror) -- prefer narrowing it over gating on it.
+    v1.3.120 then narrowed it to refuse only the deferred-to online default, on
+    the reasoning that the agent auto-selects nothing else. v1.3.121 removed the
+    refusal outright: the only file it could protect is one the agent had itself
+    measured as a print jacket and already refused to display, so preserving it
+    left cover.jpg an unfaithful mirror and the book re-deciding on every scan.
+    The flag is gone with it -- backup_selected_poster now takes only `helper`,
+    and whatever Plex shows is what reaches disk.
+
+    This is the third repair path that flag silently suppressed (poison repair
+    in v1.3.108, then the mirror twice) -- the standing lesson is to narrow such
+    a gate rather than widen what it covers.
     """
 
     ONLINE = b'\xff\xd8\xff\xe0 the square online cover'
@@ -297,6 +302,7 @@ class PortraitDeferralMirror(unittest.TestCase):
                       AG.fetch_url_bytes, AG.read_poster_state)
         self.selected_bytes = self.PICKED
         self.online_bytes = self.ONLINE
+        self.online_fetches = []
         outer = self
 
         def router(url, **kwargs):
@@ -316,7 +322,12 @@ class PortraitDeferralMirror(unittest.TestCase):
         AG.Core.storage.load = lambda path: outer.PORTRAIT
         AG.write_cover_sidecar = (
             lambda path, data: outer.writes.append((path, data)) or True)
-        AG.fetch_url_bytes = lambda url: outer.online_bytes
+        # Records instead of returning: backup_selected_poster must no longer
+        # call this at all (v1.3.121 removed the per-refresh CDN fetch that
+        # existed only to tell a pick from the deferred-to default). A stub
+        # that merely returned a value could not tell us the call was gone.
+        AG.fetch_url_bytes = (
+            lambda url: outer.online_fetches.append(url) or outer.online_bytes)
         # F13 curated-file guard: no poster state -> the guard stands aside,
         # which is this book's real shape (a deferred portrait was never
         # uploaded, so there is no upload key to protect).
@@ -372,13 +383,17 @@ class PortraitDeferralMirror(unittest.TestCase):
                          'the square we deferred TO belongs on disk')
         self.assertEqual(self.writes[0][1], self.ONLINE)
 
-    def test_no_online_default_is_needed_to_decide_any_more(self):
-        # The old code fetched the online cover on every portrait book just to
+    def test_the_per_refresh_cdn_fetch_is_gone(self):
+        # The old code fetched the online cover on EVERY portrait book just to
         # tell a pick from the default, and failed closed when it could not.
-        # Both selections now mirror, so the question -- and the per-refresh
-        # CDN fetch it cost -- is gone.
+        # Both selections now mirror, so the question is gone -- and so is the
+        # fetch. Asserting the call count, not just the outcome: re-introducing
+        # an unconditional fetch whose result is discarded would leave every
+        # other test in this class green.
         self.online_bytes = None
         AG.backup_selected_poster(self._helper())
+        self.assertEqual(self.online_fetches, [],
+                         'backup_selected_poster must not fetch helper.thumb')
         self.assertEqual(len(self.writes), 1)
         self.assertEqual(self.writes[0][1], self.PICKED)
 
@@ -405,10 +420,6 @@ class PortraitDeferralMirror(unittest.TestCase):
         AG.backup_selected_poster(self._helper())
         self.assertEqual(len(self.writes), 1, 'the pick must still reach cover.jpg')
         self.assertEqual(self.writes[0][1], self.PICKED)
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class SquareTilePortraitChoice(unittest.TestCase):
@@ -853,3 +864,162 @@ class ImageDimensionsFormats(unittest.TestCase):
         self.assertFalse(AG.local_cover_is_portrait(_webp_extended(1080, 1080)))
         self.assertFalse(AG.local_cover_is_portrait(_bmp(300, 300)))
         self.assertFalse(AG.local_cover_is_portrait(_jpeg(1500, 1500)))
+
+
+def _bmp_core(width, height):
+    """An OS/2 v1 BMP: 12-byte BITMAPCOREHEADER, 16-bit dimensions at 18/20."""
+    return (b'BM' + struct.pack('<I', 100) + b'\x00' * 4 + struct.pack('<I', 26)
+            + struct.pack('<I', 12) + struct.pack('<HH', width, height)
+            + b'\x01\x00\x18\x00' + b'\x00' * 24)
+
+
+class ImageDimensionsStrictness(unittest.TestCase):
+    """
+    A confidently WRONG size is worse than None, for every format.
+
+    image_dimensions' JPEG walk is deliberately strict on that reasoning, and
+    the WebP branches check their sync/signature bytes for it. BMP shipped
+    without the equivalent check: it read a 32-bit width/height at offset 18
+    unconditionally, which is only the BITMAPINFOHEADER layout. An OS/2
+    BITMAPCOREHEADER stores 16-bit dimensions at 18/20, so those files were
+    measured as garbage rather than refused -- 510x680 came back as
+    (44564990, 1572865).
+
+    That is not merely a miss. better_square_portrait scores candidates on
+    min(width, height), so a short edge in the millions beats every real image
+    and such a file would win the author square-tile contest outright, and
+    local_cover_is_portrait would call a print jacket landscape.
+    """
+
+    def test_an_os2_core_header_bmp_is_measured_correctly(self):
+        self.assertEqual(AG.image_dimensions(_bmp_core(510, 680)), (510, 680))
+
+    def test_an_os2_core_header_portrait_is_recognised_as_portrait(self):
+        self.assertTrue(AG.local_cover_is_portrait(_bmp_core(510, 680)))
+
+    def test_an_unknown_dib_header_size_is_refused_not_guessed(self):
+        # A DIB size that is neither the 12-byte core nor a >=40-byte info
+        # header is a layout we cannot place -- None, never a guess.
+        odd = (b'BM' + struct.pack('<I', 100) + b'\x00' * 4 + struct.pack('<I', 26)
+               + struct.pack('<I', 16) + b'\x00' * 40)
+        self.assertIsNone(AG.image_dimensions(odd))
+
+    def test_a_truncated_bmp_is_refused(self):
+        self.assertIsNone(AG.image_dimensions(b'BM' + b'\x00' * 8))
+
+    def test_a_webp_with_a_bad_sync_code_is_refused(self):
+        # An HTML error body or an ALPH/ANIM-first WebP must not yield numbers.
+        bad = bytearray(_webp_lossy(760, 760))
+        bad[23:26] = b'\x00\x00\x00'
+        self.assertIsNone(AG.image_dimensions(bytes(bad)))
+
+    def test_a_webp_lossless_with_a_bad_signature_is_refused(self):
+        bad = bytearray(_webp_lossless(500, 500))
+        bad[20:21] = b'\x00'
+        self.assertIsNone(AG.image_dimensions(bytes(bad)))
+
+    def test_a_truncated_webp_chunk_is_refused(self):
+        self.assertIsNone(AG.image_dimensions(_webp_lossy(760, 760)[:24]))
+        self.assertIsNone(AG.image_dimensions(_webp_extended(1080, 1080)[:26]))
+
+
+class PortraitFixCollapsesPerTrack(unittest.TestCase):
+    """
+    The portrait fix must cost nothing on tracks 2..N, and nothing when there is
+    no selection to move off.
+
+    Plex calls update() once per TRACK. Every step in correct_portrait_selection
+    is a round trip -- read_poster_state is two, and selected_poster_bytes pulls
+    a whole poster -- so asking the memo AFTER them made a 27-part book pay 54
+    localhost GETs and 27 full-poster downloads per refresh to reach the answer
+    track 1 already had. Its two siblings (select_local_cover, converge_author_art)
+    both consult should_run first; this one did not, because the only mark_done
+    for the tag lived inside upload_and_select_poster, which tracks 2..27 never
+    reach when nothing needs fixing.
+    """
+
+    def setUp(self):
+        self.posts = []
+        self.reads = []
+        self.states = []
+        self.real = AG.HTTP.Request
+        self.real_state = AG.read_poster_state
+        self.selected = ('metadata://posters/com.plexapp.agents.incipit_'
+                         '124a757ccdffc12d2dbe1a4bdf291e5c6bebf1cc')
+        self.served = COVER
+        outer = self
+
+        def router(url, **kwargs):
+            if kwargs.get('data') is not None:
+                outer.posts.append(kwargs['data'])
+
+                class Posted(object):
+                    content = 'ok'
+                return Posted()
+            outer.reads.append(url)
+
+            class Fetched(object):
+                content = outer.served
+            return Fetched()
+
+        def state(guid, tag):
+            outer.states.append(tag)
+            return ('101', outer.selected, [], None)
+
+        AG.HTTP.Request = router
+        AG.read_poster_state = state
+        AG.recent_work_memo.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real
+        AG.read_poster_state = self.real_state
+        AG.recent_work_memo.clear()
+
+    def _helper(self):
+        class FakeHelper(object):
+            class metadata(object):
+                guid = 'guid-tracks'
+        return FakeHelper()
+
+    def test_a_second_track_does_no_io_at_all(self):
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        first_states, first_reads = len(self.states), len(self.reads)
+        self.assertEqual(len(self.posts), 1)
+        for unused in range(26):
+            AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(len(self.states), first_states,
+                         'tracks 2..27 must not re-read poster state')
+        self.assertEqual(len(self.reads), first_reads,
+                         'tracks 2..27 must not re-download the poster')
+        self.assertEqual(len(self.posts), 1, 'one upload for the whole book')
+
+    def test_a_replaced_cover_re_runs_immediately(self):
+        # The memo is keyed on the cover sha, not the guid, so dropping a NEW
+        # cover.jpg is not suppressed by the previous pass's entry.
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(len(self.posts), 1)
+        replaced = b'\xff\xd8\xff\xe0 a different jacket entirely'
+        self.served = replaced
+        AG.correct_portrait_selection(self._helper(), replaced, ARTIST)
+        self.assertEqual(len(self.posts), 2)
+
+    def test_no_selection_is_not_reported_as_a_failed_read(self):
+        # A book with nothing selected is healthy and has no jacket to move off.
+        # It must not download anything, and must not log a read failure.
+        self.selected = None
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(self.reads, [], 'nothing selected means nothing to read')
+        self.assertEqual(self.posts, [])
+
+    def test_the_selected_bytes_are_read_only_once(self):
+        # correct_portrait_selection proves the selection IS the jacket, then
+        # hands those bytes to upload_and_select_poster, whose duplicate guard
+        # would otherwise pull the identical poster a second time.
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        poster_reads = [u for u in self.reads if '/file?url=' in u]
+        self.assertEqual(len(poster_reads), 1,
+                         'the selected poster must not be downloaded twice')
+
+
+if __name__ == '__main__':
+    unittest.main()
