@@ -11,6 +11,7 @@ exact-byte comparison missed that for months (found live on Kyle Mills /
 """
 
 import os
+import struct
 import sys
 import unittest
 
@@ -744,3 +745,111 @@ class PrintJacketSelectionIsCorrected(unittest.TestCase):
         AG.read_poster_state = lambda guid, tag: None
         AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
         self.assertEqual(self.posts, [])
+
+
+def _jpeg(width, height):
+    return (b'\xff\xd8'
+            + b'\xff\xe0' + struct.pack('>H', 16)
+            + b'JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00'
+            + b'\xff\xc0' + struct.pack('>H', 17) + b'\x08'
+            + struct.pack('>HH', height, width)
+            + b'\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01')
+
+
+def _png(width, height):
+    return (b'\x89PNG\r\n\x1a\n' + struct.pack('>I', 13) + b'IHDR'
+            + struct.pack('>II', width, height) + b'\x08\x02\x00\x00\x00')
+
+
+def _bmp(width, height):
+    return (b'BM' + struct.pack('<I', 100) + b'\x00' * 4 + struct.pack('<I', 54)
+            + struct.pack('<I', 40) + struct.pack('<ii', width, height)
+            + b'\x01\x00\x18\x00' + b'\x00' * 24)
+
+
+def _riff(chunk):
+    return b'RIFF' + struct.pack('<I', 4 + len(chunk)) + b'WEBP' + chunk
+
+
+def _webp_lossy(width, height):
+    body = b'\x00\x00\x00' + b'\x9d\x01\x2a' + struct.pack('<HH', width, height)
+    return _riff(b'VP8 ' + struct.pack('<I', len(body)) + body)
+
+
+def _webp_lossless(width, height):
+    packed = (width - 1) | ((height - 1) << 14)
+    body = b'\x2f' + struct.pack('<I', packed)
+    return _riff(b'VP8L' + struct.pack('<I', len(body)) + body)
+
+
+def _three(value):
+    return struct.pack('<I', value)[:3]
+
+
+def _webp_extended(width, height):
+    body = b'\x00' * 4 + _three(width - 1) + _three(height - 1)
+    return _riff(b'VP8X' + struct.pack('<I', len(body)) + body)
+
+
+class ImageDimensionsFormats(unittest.TestCase):
+    """
+    Measuring covers must not depend on the file being a JPEG.
+
+    image_dimensions handled JPEG and PNG only, and every other format fell
+    through to None -- which local_cover_is_portrait reads as "not portrait",
+    because an unmeasurable image must never be treated as a confident yes. The
+    result is a SILENT failure of the portrait guard: a print-jacket cover.jpg
+    in any other format is defaulted to, deferring never fires, and the book
+    freezes on it exactly as Extraction did.
+
+    Not hypothetical -- measured live 2026-07-25, three selected posters in the
+    library were already non-JPEG: WebP extended (Cujo, 1080x1080), WebP lossy
+    (The Return of the King, 760x760) and BMP (City of Endless Night, 300x300).
+
+    These tests can exist at all only because the parser now uses byte idioms
+    that behave the same in Python 2.7 and Python 3. The old `data[:2] !=
+    '\\xff\\xd8'` and `ord(data[i])` compare bytes to str under py3, so the
+    function returned None for EVERY image in this harness and could not be
+    tested -- a green suite proved nothing about it.
+    """
+
+    def test_jpeg(self):
+        self.assertEqual(AG.image_dimensions(_jpeg(510, 680)), (510, 680))
+
+    def test_png(self):
+        self.assertEqual(AG.image_dimensions(_png(1400, 1400)), (1400, 1400))
+
+    def test_bmp(self):
+        # City of Endless Night's live poster.
+        self.assertEqual(AG.image_dimensions(_bmp(300, 300)), (300, 300))
+
+    def test_bmp_with_a_negative_height_is_top_down_not_upside_down(self):
+        # A negative height means top-down row order, not a negative size.
+        self.assertEqual(AG.image_dimensions(_bmp(300, -420)), (300, 420))
+
+    def test_webp_lossy(self):
+        # The Return of the King's live poster.
+        self.assertEqual(AG.image_dimensions(_webp_lossy(760, 760)), (760, 760))
+
+    def test_webp_lossless(self):
+        self.assertEqual(AG.image_dimensions(_webp_lossless(500, 500)), (500, 500))
+
+    def test_webp_extended(self):
+        # Cujo's live poster.
+        self.assertEqual(AG.image_dimensions(_webp_extended(1080, 1080)), (1080, 1080))
+
+    def test_garbage_is_still_none(self):
+        self.assertIsNone(AG.image_dimensions(b'not an image at all'))
+        self.assertIsNone(AG.image_dimensions(b''))
+        self.assertIsNone(AG.image_dimensions(b'RIFF____WEBPnope'))
+
+    def test_a_portrait_webp_cover_is_now_recognised(self):
+        # THE POINT. Before this, a portrait WebP measured as None -> "not
+        # portrait" -> the print jacket became the default with no warning.
+        self.assertTrue(AG.local_cover_is_portrait(_webp_lossy(280, 420)))
+        self.assertTrue(AG.local_cover_is_portrait(_bmp(510, 680)))
+
+    def test_a_square_cover_in_any_format_is_not_portrait(self):
+        self.assertFalse(AG.local_cover_is_portrait(_webp_extended(1080, 1080)))
+        self.assertFalse(AG.local_cover_is_portrait(_bmp(300, 300)))
+        self.assertFalse(AG.local_cover_is_portrait(_jpeg(1500, 1500)))

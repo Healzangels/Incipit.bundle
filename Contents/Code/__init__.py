@@ -163,21 +163,87 @@ def local_cover_bytes(helper):
 PORTRAIT_RATIO = 1.15
 
 
+def byte_at(data, index):
+    """
+        The unsigned byte at `index`, in BOTH Python 2 and Python 3.
+
+        py2 indexing a str yields a 1-char str and needs ord(); py3 indexing
+        bytes yields an int and ord() raises. struct reads a one-byte SLICE,
+        which is bytes under both, so it is the one form that cannot drift.
+
+        Drift here is INVISIBLE, which is why this exists: comparing bytes to a
+        str literal is silently False, so image_dimensions returned None for
+        every image, local_cover_is_portrait read that as "not portrait", and
+        the portrait guard was a no-op -- while the test suite stayed green,
+        because it exercised the same mismatched comparison.
+    """
+    return struct.unpack('B', data[index:index + 1])[0]
+
+
+def webp_dimensions(data):
+    """
+        (width, height) for the three WebP chunk layouts, or None.
+
+        Three because the format has three: VP8 (lossy), VP8L (lossless) and
+        VP8X (extended). Handling one is not enough -- the lossy and extended
+        forms are both already SELECTED posters in this library (The Return of
+        the King at 760x760, Cujo at 1080x1080).
+    """
+    chunk = data[12:16]
+    if chunk == b'VP8 ' and len(data) >= 30:
+        # Frame tag (3 bytes) then the sync code, which is checked rather than
+        # skipped: a confidently WRONG size would pick a poster, and None only
+        # keeps the current behaviour. Same reasoning as the strict JPEG walk.
+        if data[23:26] != b'\x9d\x01\x2a':
+            return None
+        width, height = struct.unpack('<HH', data[26:30])
+        # 14 bits each; the top two bits are the scaling hint, not the size.
+        return (int(width) & 0x3FFF, int(height) & 0x3FFF)
+    if chunk == b'VP8L' and len(data) >= 25:
+        if data[20:21] != b'\x2f':
+            return None
+        # One signature byte, then width-1 and height-1 as 14 bits each.
+        packed = struct.unpack('<I', data[21:25])[0]
+        return (int(packed & 0x3FFF) + 1, int((packed >> 14) & 0x3FFF) + 1)
+    if chunk == b'VP8X' and len(data) >= 30:
+        # Canvas size as two 3-byte little-endian values, each stored minus 1.
+        width = struct.unpack('<I', data[24:27] + b'\x00')[0]
+        height = struct.unpack('<I', data[27:30] + b'\x00')[0]
+        return (int(width) + 1, int(height) + 1)
+    return None
+
+
 def image_dimensions(data):
     """
-        (width, height) for JPEG or PNG BYTES, or None when undeterminable.
+        (width, height) for JPEG, PNG, BMP or WebP BYTES, or None when
+        undeterminable.
 
         Bytes rather than a URL: the local cover.jpg is already in memory here,
         and measure_image (update_tools) fetches a URL and handles JPEG only.
         Every failure returns None so an unreadable image simply keeps the
         existing behaviour instead of changing which poster is used.
+
+        BMP and WebP are here because "unmeasurable" is not a neutral answer:
+        local_cover_is_portrait turns None into "not portrait", so a print
+        jacket in an unhandled format is silently defaulted to and the book
+        freezes on it. Three selected posters in this library were already
+        non-JPEG when that was measured (2026-07-25).
     """
     try:
-        if data[:8] == '\x89PNG\r\n\x1a\n':
+        if not data:
+            return None
+        if data[:8] == b'\x89PNG\r\n\x1a\n':
             # IHDR width/height are the two big-endian longs at offset 16.
             width, height = struct.unpack('>II', data[16:24])
             return (int(width), int(height))
-        if data[:2] != '\xff\xd8':
+        if data[:2] == b'BM' and len(data) >= 26:
+            # The DIB header's height is SIGNED: negative means the rows are
+            # stored top-down, not that the image has a negative size.
+            width, height = struct.unpack('<ii', data[18:26])
+            return (abs(int(width)), abs(int(height)))
+        if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            return webp_dimensions(data)
+        if data[:2] != b'\xff\xd8':
             return None
         # Walk the JPEG segments to the SOFn frame header, as measure_image does.
         #
@@ -192,9 +258,9 @@ def image_dimensions(data):
         index = 2
         total = len(data)
         while index < total - 9:
-            if data[index] != '\xff':
+            if data[index:index + 1] != b'\xff':
                 return None
-            marker = ord(data[index + 1])
+            marker = byte_at(data, index + 1)
             # Padding fill bytes: a run of 0xff before the real marker byte.
             if marker == 0xff:
                 index += 1
