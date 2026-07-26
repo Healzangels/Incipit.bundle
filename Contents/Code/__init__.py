@@ -753,28 +753,70 @@ def read_poster_state(guid, tag):
         return None
 
 
-def selection_is_artist_art(artist_bytes, selected):
+def same_image(first, second):
     """
-        True when `selected` IS the artist photo -- plain, or our own padded
-        re-select of it.
+        True when `second` is the SAME picture as `first` -- byte-identical, or
+        our own RESELECT_PAD copy of it.
 
         The pad matters, and still does even though upload_and_select_poster no
         longer MINTS one: it used to re-POST image+RESELECT_PAD to force a
         re-selection when the plain bytes already existed de-selected, so albums
         touched before that changed are still carrying padded posters. An exact
-        byte comparison does not recognise them and the guard then waves the
-        poison through. Measured on Kyle Mills / "Fade", whose selected poster
-        was byte-for-byte the author photo plus the 20-byte pad.
+        byte comparison does not recognise them.
+
+        Shared by the two questions that both reduce to picture identity -- "is
+        the selection the artist photo?" (poison) and "is the selection already
+        the image I am about to upload?" (duplicate tiles). They were one rule
+        copied twice in review; keeping a single implementation is what stops
+        one of them learning about a new pad form and the other not.
     """
-    if not artist_bytes or not selected:
+    if not first or not second:
         return False
-    if len(artist_bytes) == len(selected) and artist_bytes == selected:
+    if len(first) == len(second) and first == second:
         return True
     try:
-        _, _, padded = padded_variants(artist_bytes)
+        _, _, padded = padded_variants(first)
     except Exception:
         return False
-    return len(padded) == len(selected) and padded == selected
+    return len(padded) == len(second) and padded == second
+
+
+def selection_is_artist_art(artist_bytes, selected):
+    """
+        True when `selected` IS the artist photo -- plain, or our own padded
+        re-select of it.
+
+        Measured on Kyle Mills / "Fade", whose selected poster was byte-for-byte
+        the author photo plus the 20-byte pad: an exact comparison missed it and
+        the guard waved the poison through.
+    """
+    return same_image(artist_bytes, selected)
+
+
+def selected_poster_bytes(rk, selected_key, tag):
+    """
+        (bytes_of_the_currently_selected_poster, known), via the local API.
+
+        TWO values, for the same reason artist_poster_bytes returns two: the
+        caller must be able to tell "the selection is a DIFFERENT image" from "I
+        could not read it", because only the first may skip an upload. Collapsing
+        them would turn one timed-out localhost call into a refusal to fix a
+        wrong poster.
+
+        The key Plex hands back is the `ratingKey` form (metadata://posters/...
+        or upload://posters/...); the fetchable URL is /file?url=<it>, fully
+        quoted -- the slashes and the colon must be escaped or Plex reads a
+        truncated key and 404s.
+    """
+    if not rk or not selected_key:
+        return (None, False)
+    try:
+        url = (PMS + '/library/metadata/' + rk + '/file?url='
+               + urllib.quote(selected_key, ''))
+        return (HTTP.Request(url, timeout=8, cacheTime=0).content, True)
+    except Exception as e:
+        log.error('%s: could not read the selected poster (%s)', tag, e)
+        return (None, False)
 
 
 # Per-guid cache for the artist poster, because update() runs once per TRACK
@@ -964,6 +1006,37 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
         )
         mark_done(tag, guid, memo_token)
         return False
+    # LAST cheap-evidence gap: the keys say nothing about whether the selection
+    # is already our picture. The sha tests above only recognise an upload://
+    # key, because Plex names uploads by CONTENT sha; a CONTAINER key is sha1 of
+    # the KEY STRING we filed the poster under -- sha1('incipit-local-cover') --
+    # never the image's bytes, the same fact selection_is_agent_owned records.
+    # So when Plex is already DISPLAYING our picture as a container poster,
+    # nothing above can tell, and the POST below adds a byte-identical duplicate
+    # that stays in the picker forever as a second, indistinguishable tile.
+    #
+    # Measured live 2026-07-25: 147 of 150 sampled albums (98%) and 75 of 169
+    # artists carried exactly that duplicate, and 45% of every poster tile in
+    # the library was a copy of another tile.
+    #
+    # Gated on `not have_plain`, and LAST, because it is the only step here that
+    # costs a round trip. When our bytes ARE among the keys the selection is by
+    # definition some other image, so the read would buy nothing -- and every
+    # stand-down above must stay free.
+    #
+    # FAILS OPEN, deliberately asymmetric: `known` False means the read failed,
+    # and uploading anyway is merely the status quo -- one wasted POST. Reading
+    # "could not tell" as "already correct" would leave a WRONG poster standing,
+    # the destructive direction the poison guards already fail closed against.
+    # Byte equality is also the only thing that may skip: a CHANGED cover.jpg
+    # must still reach Plex (v1.3.45), and it differs.
+    if not have_plain and selected_key:
+        current, known = selected_poster_bytes(rk, selected_key, tag)
+        if known and same_image(image_bytes, current):
+            log.info('%s: the selected poster already IS this image (rk %s) -- '
+                     'not uploading a duplicate', tag, rk)
+            mark_done(tag, guid, memo_token)
+            return True
     # pref_asserted with the plain copy de-selected: the agent's own unpin put
     # it there, so re-select via the pad -- new content, identical pixels.
     reselect = have_plain and pref_asserted

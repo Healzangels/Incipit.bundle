@@ -518,3 +518,108 @@ class BestFitAuthorArtSelect(unittest.TestCase):
         helper.thumb_secondary = ''
         AG.select_best_fit_author_art(helper, (270, 270), (211, 250))
         self.assertEqual(self.calls, [])
+
+
+class SelectionAlreadyShowsThisImage(unittest.TestCase):
+    """
+    Do not upload a copy of the image Plex is ALREADY displaying.
+
+    A container poster's key is a hash of the KEY STRING we filed it under
+    (sha1('incipit-local-cover')), never the image's byte sha -- the fact
+    selection_is_agent_owned records. So the `sha in selected_key` skip at the
+    top of upload_and_select_poster cannot recognise "the selection already IS
+    these pixels" when the selection is a container entry, and the agent
+    uploaded a byte-identical duplicate.
+
+    Measured live 2026-07-25 on the audiobook library: 147 of 150 sampled
+    albums (98%) carried an upload holding bytes their own incipit container
+    already offered, and 75 of 169 artists carried the same duplication -- the
+    two identical tiles in the poster picker. Nearly half of every poster tile
+    in the library was a copy of another tile.
+
+    The guard must FAIL OPEN. Uploading when we cannot read the selection is
+    the status quo and merely wastes a POST; SKIPPING on an unreadable
+    selection would leave a wrong poster in place, which is the destructive
+    direction and the one the poison guards already fail closed against.
+    """
+
+    def setUp(self):
+        self.posts = []
+        self.reads = []
+        self.real = AG.HTTP.Request
+        self.served = COVER
+
+        def router(url, **kwargs):
+            if kwargs.get('data') is not None:
+                self.posts.append(url)
+
+                class Posted(object):
+                    content = 'ok'
+
+                return Posted()
+            self.reads.append(url)
+            if self.served is None:
+                raise IOError('poster read failed')
+
+            class Fetched(object):
+                content = self.served
+
+            Fetched.content = self.served
+            return Fetched()
+
+        AG.HTTP.Request = router
+        AG.recent_work_memo.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real
+        AG.recent_work_memo.clear()
+
+    # A container key, shaped exactly like the live ones: the agent id plus
+    # sha1 of the key string, NOT of the image.
+    CONTAINER = ('metadata://posters/com.plexapp.agents.incipit_'
+                 '124a757ccdffc12d2dbe1a4bdf291e5c6bebf1cc')
+
+    def _state(self, selected):
+        return ('101', selected, [], None)
+
+    def test_no_upload_when_the_selection_is_already_these_pixels(self):
+        result = AG.upload_and_select_poster(
+            'guid-same', COVER, 'test', state=self._state(self.CONTAINER))
+        self.assertTrue(result, 'already-correct counts as converged')
+        self.assertEqual(self.posts, [],
+                         'the selected poster IS this image -- uploading it '
+                         'again just adds a duplicate tile')
+
+    def test_a_changed_cover_still_uploads(self):
+        # The v1.3.45 behaviour that must survive: replacing cover.jpg with a
+        # DIFFERENT image has to reach Plex. Only byte equality may skip.
+        self.served = ARTIST
+        result = AG.upload_and_select_poster(
+            'guid-changed', COVER, 'test', state=self._state(self.CONTAINER))
+        self.assertTrue(result)
+        self.assertEqual(len(self.posts), 1, 'a changed cover must still upload')
+
+    def test_an_unreadable_selection_fails_open_and_uploads(self):
+        self.served = None
+        result = AG.upload_and_select_poster(
+            'guid-blip', COVER, 'test', state=self._state(self.CONTAINER))
+        self.assertTrue(result)
+        self.assertEqual(len(self.posts), 1,
+                         'could-not-tell must behave exactly as before, not skip')
+
+    def test_a_padded_copy_of_the_selection_is_not_uploaded_either(self):
+        # Albums touched before v1.3.112 wear image+RESELECT_PAD. That is still
+        # the same picture, so it is still a duplicate.
+        self.served = COVER + PAD
+        result = AG.upload_and_select_poster(
+            'guid-padded', COVER, 'test', state=self._state(self.CONTAINER))
+        self.assertTrue(result)
+        self.assertEqual(self.posts, [])
+
+    def test_no_selection_at_all_still_uploads_without_a_read(self):
+        # The birth case: nothing selected, nothing to compare against.
+        result = AG.upload_and_select_poster(
+            'guid-new', COVER, 'test', state=self._state(None))
+        self.assertTrue(result)
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.reads, [], 'no selection means no read to make')
