@@ -111,5 +111,64 @@ class TestExistingHintsStillRide(unittest.TestCase):
         self.assertIn('&series=', extra)
 
 
+
+class TestSandboxSafeExtraction(unittest.TestCase):
+    """
+    The first ISBN implementation iterated the string character by character
+    (`for ch in sc_isbn`). That works in py2, py3 AND this harness -- but dies
+    in the Plex sandbox: RestrictedPython guards iteration via _getiter_,
+    which calls __iter__, and py2 unicode strings have no __iter__ (they
+    iterate via the legacy __getitem__ protocol). Measured live 2026-07-26:
+    "incipit isbn probe failed: 'unicode' object has no attribute '__iter__'"
+    on every scan, so the hint silently never rode. The harness cannot
+    reproduce that (py3 strings have __iter__), so this pins the SOURCE: no
+    for-loop over the isbn value.
+    """
+
+    def test_isbn_extraction_does_not_iterate_the_string(self):
+        code_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'Contents', 'Code'
+        )
+        with open(os.path.join(code_dir, 'search_tools.py')) as f:
+            src = f.read()
+        start = src.index('ISBN, sent ALONGSIDE')
+        end = src.index('incipit isbn probe failed')
+        self.assertNotIn('for ch in', src[start:end])
+
+
+class TestResultRowContract(unittest.TestCase):
+    """
+    The album search's display loop reads r['title'] (and the author/narrator
+    keys) unconditionally, so score_create_result must ALWAYS set them. The
+    author and narrator keys were hardened long ago with exactly this
+    reasoning written next to them; title was still conditional, and a
+    title-less API row (the B08WF9JR2P husk) crashed the whole listing with
+    KeyError: 'title' -- one bad row blanked every result for the book.
+    """
+
+    def row_for(self, title):
+        score = ST.ScoreTool.__new__(ST.ScoreTool)
+        score.asin = 'B000TEST01'
+        score.author = 'Michael Scott'
+        score.narrator = 'Alan Kelly'
+        score.date = None
+        score.region = 'us'
+        score.title = title
+        score.year = None
+        return score.score_create_result(85)
+
+    def test_title_key_always_present(self):
+        for title in ('A Real Title', '', None):
+            row = self.row_for(title)
+            self.assertIn('title', row)
+
+    def test_empty_title_degrades_to_empty_string(self):
+        self.assertEqual(self.row_for(None)['title'], '')
+        self.assertEqual(self.row_for('')['title'], '')
+
+    def test_real_title_kept(self):
+        self.assertEqual(self.row_for('A Real Title')['title'], 'A Real Title')
+
 if __name__ == '__main__':
     unittest.main()

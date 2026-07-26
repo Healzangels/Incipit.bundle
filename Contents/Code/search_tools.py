@@ -1034,10 +1034,15 @@ class AlbumSearchTool(SearchTool):
             if sc:
                 sc_isbn = sc.get('isbn')
                 if isinstance(sc_isbn, (str, unicode)):
-                    kept = ''
-                    for ch in sc_isbn:
-                        if ch.isdigit() or ch in 'Xx':
-                            kept += ch
+                    # re.sub, NOT a per-character loop: the sandbox guards
+                    # iteration via _getiter_, which calls __iter__ -- and py2
+                    # unicode strings have no __iter__ (legacy __getitem__
+                    # protocol), so looping over this string's characters dies
+                    # with "'unicode' object has no attribute '__iter__'" in
+                    # Plex while passing py2, py3 AND the test harness.
+                    # Measured live 2026-07-26 on every scan; guarded by
+                    # test_isbn_extraction_does_not_iterate_the_string.
+                    kept = re.sub(r'[^0-9Xx]', '', sc_isbn)
                     if len(kept) in (10, 13):
                         extra += '&isbn=' + quote_param(kept.upper())
                         log.info('incipit isbn hint: %s', kept.upper())
@@ -1737,8 +1742,12 @@ class ScoreTool:
         if score:
             plex_score_dict['score'] = score
             data_to_log.append({'Score is': str(score)})
+        # Read unconditionally by the album search's display loop, exactly like
+        # author/narrator/year above -- so the key must always exist. A
+        # title-less API row (a dead-ASIN catalog stub) crashed the whole
+        # listing with KeyError: 'title', blanking every result for the book.
+        plex_score_dict['title'] = self.title or ''
         if self.title:
-            plex_score_dict['title'] = self.title
             data_to_log.append({'Title is': self.title})
         # Likewise read unconditionally by the display loop; '' when the
         # candidate carries no parseable date (many provider records don't).
