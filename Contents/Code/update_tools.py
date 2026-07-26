@@ -783,8 +783,16 @@ class AlbumUpdateTool(UpdateTool):
             # shelving correctly and the padding only made the sort title look
             # wrong. Reverted in 1.3.22; don't reintroduce it without first
             # confirming a real mis-ordering in Plex.
+            # strip() both halves: this composer is the LAST thing between a
+            # dirty source and a SAVED sort title. Goodreads series 131836 is
+            # literally titled "Six of Crows " (librarian trailing space);
+            # concatenated raw it produced "Six of Crows , Book 2" -- a shelf
+            # split that re-matching could not fix, since the same string was
+            # re-derived every time. The API trims its side too (af9fb5c);
+            # this guards every other source (providers, folder names).
             series_with_volume = (
-                SERIES_SORT_ARTICLE_RE.sub('', self.series) + ', ' + self.volume
+                SERIES_SORT_ARTICLE_RE.sub('', self.series).strip()
+                + ', ' + self.volume.strip()
             )
         # Only include subtitle in sort if not in a series
         if not self.volume:
