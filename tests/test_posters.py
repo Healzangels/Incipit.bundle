@@ -343,22 +343,43 @@ class PortraitDeferralMirror(unittest.TestCase):
     def test_a_deliberate_pick_is_mirrored_despite_the_portrait(self):
         # The Bridgeman case: portrait on disk, operator picked a different
         # poster. The old gate skipped the mirror wholesale; the pick must land.
-        AG.backup_selected_poster(self._helper(), portrait_deferred=True)
+        AG.backup_selected_poster(self._helper())
         self.assertEqual(len(self.writes), 1, 'the pick must reach cover.jpg')
         self.assertEqual(self.writes[0][1], self.PICKED)
 
-    def test_the_deferred_default_is_still_never_mirrored(self):
-        # The danger the gate existed for: the agent's own automatic online
-        # default must not overwrite the operator's portrait file.
+    def test_the_deferred_default_IS_mirrored_over_the_print_jacket(self):
+        # REVERSED in v1.3.121, deliberately -- this test used to assert the
+        # opposite. The refusal protected "the operator's file", but the only
+        # file it ever protected is one the agent had just POSITIVELY MEASURED
+        # as a print jacket (that is what portrait_deferred means) and had
+        # already refused to display. Keeping it made cover.jpg an unfaithful
+        # mirror precisely where the agent judged the file wrong, and left the
+        # book depending on the deferral firing on every future scan instead of
+        # being settled on disk.
+        #
+        # Measured live on Douglas Preston / "Extraction" (2026-07-25): the
+        # portrait-fix correctly force-selected the square 2400x2400, and this
+        # refusal then left cover.jpg as the 31,820-byte jacket.
+        #
+        # Safe because it is self-limiting: it can only ever replace a portrait
+        # file with the square the agent preferred. A book whose cover.jpg is
+        # square never reaches here at all (verified against Brandon Sanderson /
+        # "The Sunlit Man", whose hand-uploaded 1500x1500 is already on disk).
         self.selected_bytes = self.ONLINE
-        AG.backup_selected_poster(self._helper(), portrait_deferred=True)
-        self.assertEqual(self.writes, [])
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(len(self.writes), 1,
+                         'the square we deferred TO belongs on disk')
+        self.assertEqual(self.writes[0][1], self.ONLINE)
 
-    def test_an_unreadable_default_fails_closed(self):
-        # Cannot tell a pick from the default -> do not guess with a write.
+    def test_no_online_default_is_needed_to_decide_any_more(self):
+        # The old code fetched the online cover on every portrait book just to
+        # tell a pick from the default, and failed closed when it could not.
+        # Both selections now mirror, so the question -- and the per-refresh
+        # CDN fetch it cost -- is gone.
         self.online_bytes = None
-        AG.backup_selected_poster(self._helper(), portrait_deferred=True)
-        self.assertEqual(self.writes, [])
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(len(self.writes), 1)
+        self.assertEqual(self.writes[0][1], self.PICKED)
 
     def test_a_normal_book_still_mirrors_without_the_flag(self):
         AG.backup_selected_poster(self._helper())
@@ -380,7 +401,7 @@ class PortraitDeferralMirror(unittest.TestCase):
         AG.read_poster_state = lambda guid, tag: (
             '103831', 'metadata://posters/com.plexapp.agents.incipit_pick',
             ['upload://posters/' + sha], None)
-        AG.backup_selected_poster(self._helper(), portrait_deferred=True)
+        AG.backup_selected_poster(self._helper())
         self.assertEqual(len(self.writes), 1, 'the pick must still reach cover.jpg')
         self.assertEqual(self.writes[0][1], self.PICKED)
 

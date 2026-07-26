@@ -430,19 +430,39 @@ def promote_picked_cover(helper):
                  tag, cover_path, len(selected))
 
 
-def backup_selected_poster(helper, portrait_deferred=False):
+def backup_selected_poster(helper):
     """
         Mirror the poster Plex is CURRENTLY showing to cover.jpg next to the
         book, so every item ends up with one and it survives a library rebuild
         (the fresh scan re-serves it via prefer_local_cover).
 
-        `portrait_deferred` says the update pass declined to make the local
-        portrait cover.jpg the default. The mirror still runs -- a deliberate
-        pick must land on disk (measured live on Nick Jones / Joseph Bridgeman:
-        a hand-picked poster changed nothing, silently, because the whole
-        mirror used to be gated off for portrait books). What it must NOT do is
-        write the agent's own deferred-to ONLINE default over the operator's
-        file, so that one selection -- and only that one -- is refused below.
+        THE PORTRAIT EXCEPTION IS GONE (v1.3.121). This used to take a
+        `portrait_deferred` flag and refuse exactly one selection: the online
+        cover the deferral itself chose, on the reasoning that mirroring an
+        automatic choice would overwrite the operator's file. The flaw was in
+        what that protected. The only file it could ever protect is one the
+        agent had just POSITIVELY MEASURED as a print jacket -- that is what the
+        deferral means -- and had already refused to display. So it preserved a
+        file nobody wanted, made cover.jpg an unfaithful mirror in precisely the
+        case where the agent had judged the file wrong, and left the book
+        depending on the deferral firing on every future scan rather than being
+        settled on disk.
+
+        Measured live on Douglas Preston / "Extraction" (2026-07-25): the
+        portrait-fix correctly force-selected the square 2400x2400 and this
+        refusal then left cover.jpg as the 31,820-byte jacket.
+
+        Dropping it is self-limiting -- the only write it newly permits replaces
+        a portrait file with the square the agent preferred. A book whose
+        cover.jpg is square never reaches that state (verified against Brandon
+        Sanderson / "The Sunlit Man", whose hand-uploaded 1500x1500 square is
+        already the file on disk). It also removes a per-refresh CDN fetch that
+        existed only to answer the question this no longer asks.
+
+        Residual, worth knowing: a genuinely portrait audiobook cover just over
+        PORTRAIT_RATIO would now be replaced on disk as well as in Plex. The
+        agent already refuses to DISPLAY such a file, so the operator sees it
+        and can pick their own art -- and a deliberate pick still mirrors.
 
         THE RULE (operator's model): cover.jpg is a faithful mirror of the
         current selection, whoever chose it -- a hand-picked upload, the
@@ -571,31 +591,9 @@ def backup_selected_poster(helper, portrait_deferred=False):
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.info('incipit poster-backup: selection is our padded re-select of '
                  'this cover, skip'); return
-    # PORTRAIT DEFERRAL. The update pass declined to default to the local
-    # portrait cover.jpg and made the ONLINE cover the default instead -- with
-    # no human involved. Mirroring that automatic default would overwrite the
-    # operator's file, which is why this mirror used to be skipped WHOLESALE for
-    # portrait books. Wrong scope: it also swallowed every deliberate pick. The
-    # agent only ever auto-selects the online cover it deferred to, so that is
-    # the ONE selection refused here; anything else was a human act and mirrors.
-    # selection_is_artist_art is reused for the comparison because it IS the
-    # comparison: byte identity, plain or our padded form. Fails closed when the
-    # online default cannot be fetched -- a guess must not become a write.
-    if portrait_deferred and existing:
-        online = fetch_url_bytes(helper.thumb) if helper.thumb else None
-        if online is None:
-            log.error('incipit poster-backup: portrait cover.jpg deferred and the '
-                      'online default could not be read -- cannot tell a pick from '
-                      'the default, skipping so the file is not overwritten by a guess')
-            return
-        if selection_is_artist_art(online, selected):
-            log.info('incipit poster-backup: portrait cover.jpg deferred and the '
-                     'selection is the online default we deferred to -- not '
-                     'mirroring the automatic choice over the operator\'s file')
-            return
-        log.warn('incipit poster-backup: portrait cover.jpg deferred but the '
-                 'selection is NOT the deferred default -- honoring it as a '
-                 'deliberate pick')
+    # (The portrait-deferral refusal that used to sit here is gone in v1.3.121 --
+    # see the docstring. It protected a file the agent had itself measured as a
+    # print jacket and refused to display.)
     # POISON GUARD. A fresh book with no poster of its own shows its ARTIST's
     # art, and the first metadata pass fires before a real cover is selected --
     # so the "current selection" is the inherited author photo, and mirroring
@@ -2440,8 +2438,7 @@ class AudiobookAlbum(Agent.Album):
         # exactly ONE selection: the online default the deferral itself made,
         # which is the only selection that can occur without a human act.
         if Prefs['backup_poster_to_cover'] and helper.force:
-            backup_selected_poster(helper,
-                                   portrait_deferred=deferred_portrait_local)
+            backup_selected_poster(helper)
         # Rating.
         helper.set_metadata_rating()
 
