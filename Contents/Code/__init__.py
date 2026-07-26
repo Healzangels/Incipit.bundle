@@ -75,6 +75,21 @@ def search_cache_time(manual=False):
     return CACHE_1HOUR
 
 
+def author_update_cache_time():
+    # An HOUR, not the week-long ASIN-lookup default. The author record is the
+    # one the API actively HEALS after first write -- the monthly scheduler
+    # sweep and the operator's force=1 both fill a portrait/bio that arrived
+    # late (Goodreads answered Roger Zelazny's very first lookup cache-cold and
+    # empty; the record healed minutes later). Behind a week-long cache every
+    # Refresh Metadata replayed the empty pre-heal body (measured live
+    # 2026-07-26: "Fetching '.../authors/B000APXZHK...' from the HTTP cache"),
+    # and nothing short of deleting Plex's cache dir could surface the bio. An
+    # hour still absorbs a scan's per-album re-requests of the same artist.
+    if Prefs['dev_disable_http_cache']:
+        return 0
+    return CACHE_1HOUR
+
+
 def ValidatePrefs():
     log.debug('ValidatePrefs function call')
     # Re-apply on save so flipping the dev toggle takes effect without a restart.
@@ -2011,7 +2026,11 @@ class AudiobookArtist(Agent.Artist):
         """
         update_url = helper.build_url()
         try:
-            request = str(make_request(update_url))
+            # Hour-long cache, not the week default: author records self-heal
+            # server-side and a week-long replay hides the healed bio/portrait
+            # (see author_update_cache_time).
+            request = str(make_request(
+                update_url, cache_time=author_update_cache_time()))
         except Exception as err:
             log.error("Author update request failed: %s", err)
             return False
