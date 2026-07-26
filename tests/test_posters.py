@@ -387,3 +387,134 @@ class PortraitDeferralMirror(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SquareTilePortraitChoice(unittest.TestCase):
+    """
+    Which of two author portraits fills Plex's SQUARE artist tile better.
+
+    The agent used to always select the Audible image (`imageAlt`), because a
+    two-key validate_keys selects the LAST key and the Audible one was appended
+    last. Measured across the live library, that rule is right about half the
+    time and wrong the rest: Robert Harris has a 270x270 Hardcover square and a
+    211x250 Audible photo, William Gibson 500x500 against 219x315 -- in both the
+    discarded image was squarer AND higher resolution.
+
+    The metric is the SHORT EDGE, because that is exactly the resolution left
+    after cropping to a square tile. A 3072x2304 landscape yields 2304px of
+    usable image; a 117x150 thumbnail yields 117 and looks like a postage stamp
+    however square it is. That single number keeps Glen Cook on his 3072x2304
+    photo, which a naive "prefer square" rule would have swapped for the 117x150.
+
+    The squareness tiebreak only applies when the short edges are COMPARABLE
+    (within 25%): there a native square wins, because cropping a tall portrait
+    to a square cuts the top or bottom of the subject, and the pixels given up
+    are few. That is what takes Bryce O'Connor's 820x820 over his 1000x1500.
+    """
+
+    def test_the_bigger_short_edge_wins_outright(self):
+        # Glen Cook: the squarer option is a 117x150 thumbnail. Squareness must
+        # never buy a blurry image.
+        self.assertEqual(
+            AG.better_square_portrait((117, 150), (3072, 2304)), (3072, 2304))
+
+    def test_a_square_wins_when_the_short_edges_are_close(self):
+        # Bryce O'Connor: 820 vs 1000 is within 25%, so the native square wins
+        # and no cropping is needed.
+        self.assertEqual(
+            AG.better_square_portrait((820, 820), (1000, 1500)), (820, 820))
+
+    def test_squarer_AND_larger_is_never_discarded(self):
+        # Robert Harris and William Gibson: the old always-Audible rule threw
+        # away an image that was better on BOTH axes.
+        self.assertEqual(
+            AG.better_square_portrait((270, 270), (211, 250)), (270, 270))
+        self.assertEqual(
+            AG.better_square_portrait((500, 500), (219, 315)), (500, 500))
+
+    def test_a_much_larger_tall_photo_still_wins(self):
+        # Philip Pullman: 419 vs 984 is far outside the tie band, so the extra
+        # resolution decides even though the loser is squarer.
+        self.assertEqual(
+            AG.better_square_portrait((419, 500), (984, 1380)), (984, 1380))
+
+    def test_landscape_and_portrait_are_treated_alike(self):
+        # The short edge is orientation-blind: a wide photo crops the sides,
+        # a tall one crops top and bottom, and both keep min(w, h).
+        self.assertEqual(
+            AG.better_square_portrait((2000, 800), (900, 900)), (900, 900))
+
+    def test_an_unmeasurable_image_never_wins_by_accident(self):
+        # image_dimensions returns None for anything it cannot parse. A None
+        # must lose to a known-good image rather than sort first.
+        self.assertEqual(AG.better_square_portrait(None, (400, 400)), (400, 400))
+        self.assertEqual(AG.better_square_portrait((400, 400), None), (400, 400))
+
+    def test_two_unmeasurable_images_leave_the_order_alone(self):
+        # Nothing to decide with: return None so the caller keeps its default.
+        self.assertIsNone(AG.better_square_portrait(None, None))
+
+    def test_identical_images_are_stable(self):
+        self.assertEqual(
+            AG.better_square_portrait((500, 500), (500, 500)), (500, 500))
+
+
+class BestFitAuthorArtSelect(unittest.TestCase):
+    """
+    The container only decides on a FRESH scan, so an already-scanned artist
+    keeps whatever Plex persisted -- which is why 39 artists in the live library
+    sat on the worse-fitting portrait even after the ordering was fixed.
+
+    `prefer_square_author_art` opts into force-selecting the better fit on an
+    already-scanned artist. OFF by default: it re-selects images the operator
+    may have chosen by hand, and a container key is indistinguishable from a
+    deliberate click (the same reason unpin_hardcover_author_art refuses to
+    touch one). Opting in is the operator saying they want the tile filled.
+    """
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        self.calls = []
+        self.real = AG.converge_author_art
+        AG.converge_author_art = lambda helper, target, other, tag, **kw: \
+            self.calls.append((target, other, tag))
+        self.prefs = dict(plexenv.FakePrefs.DEFAULTS)
+
+    def tearDown(self):
+        AG.converge_author_art = self.real
+        AG.recent_work_memo.clear()
+
+    def _helper(self):
+        class FakeHelper(object):
+            thumb = 'https://hardcover/portrait.jpg'
+            thumb_secondary = 'https://audible/photo.jpg'
+        return FakeHelper()
+
+    def test_it_selects_the_better_fit(self):
+        # Robert Harris: 270x270 square (thumb) beats 211x250 (secondary).
+        AG.select_best_fit_author_art(self._helper(), (270, 270), (211, 250))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][0], 'https://hardcover/portrait.jpg')
+
+    def test_it_selects_the_secondary_when_that_fits_better(self):
+        # Glen Cook: the 3072x2304 secondary beats a 117x150 thumb.
+        AG.select_best_fit_author_art(self._helper(), (117, 150), (3072, 2304))
+        self.assertEqual(self.calls[0][0], 'https://audible/photo.jpg')
+
+    def test_an_unmeasurable_pair_does_nothing_at_all(self):
+        # No evidence, no re-selection: leave the artist exactly as they are.
+        AG.select_best_fit_author_art(self._helper(), None, (400, 400))
+        AG.select_best_fit_author_art(self._helper(), (400, 400), None)
+        AG.select_best_fit_author_art(self._helper(), None, None)
+        self.assertEqual(self.calls, [])
+
+    def test_identical_dimensions_do_nothing(self):
+        # Nothing to gain, and a needless upload/select round trip per refresh.
+        AG.select_best_fit_author_art(self._helper(), (500, 500), (500, 500))
+        self.assertEqual(self.calls, [])
+
+    def test_a_missing_second_image_does_nothing(self):
+        helper = self._helper()
+        helper.thumb_secondary = ''
+        AG.select_best_fit_author_art(helper, (270, 270), (211, 250))
+        self.assertEqual(self.calls, [])

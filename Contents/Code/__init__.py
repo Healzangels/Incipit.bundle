@@ -1091,6 +1091,38 @@ def select_hardcover_author_art(helper):
     )
 
 
+def select_best_fit_author_art(helper, thumb_dims, secondary_dims):
+    """
+        Force-select whichever author portrait fills the square tile better,
+        for an ALREADY-SCANNED artist. Opt-in via `prefer_square_author_art`.
+
+        The container ordering only decides on a fresh scan, so without this the
+        improvement never reaches an existing library -- measured 2026-07-25, 39
+        artists were sitting on the worse-fitting image with no way to converge
+        short of picking each by hand.
+
+        Off by default because this re-selects images the operator may have
+        chosen deliberately, and Plex exposes no way to tell a hand-picked
+        container key from one the agent set (the same limitation that makes
+        unpin_hardcover_author_art refuse to touch container keys). Turning it
+        on is the operator asking for the tile to be filled.
+
+        Does nothing without evidence: an unmeasurable image, a missing second
+        image, or two identically-sized ones all leave the artist alone rather
+        than spend an upload/select round trip to change nothing.
+    """
+    if not helper.thumb or not helper.thumb_secondary:
+        return
+    if not thumb_dims or not secondary_dims or thumb_dims == secondary_dims:
+        return
+    winner = better_square_portrait(thumb_dims, secondary_dims)
+    if winner is thumb_dims:
+        target, other = helper.thumb, helper.thumb_secondary
+    else:
+        target, other = helper.thumb_secondary, helper.thumb
+    converge_author_art(helper, target, other, 'incipit author-art-fit')
+
+
 def select_sole_author_art(helper):
     """
         Force-select the ONE author image we have, for an already-scanned artist.
@@ -1130,6 +1162,53 @@ def select_sole_author_art(helper):
     )
 
 
+# How close two portraits' SHORT EDGES must be before squareness decides
+# instead of resolution. 0.75 = within 25%. Measured against the live library:
+# it takes Bryce O'Connor's 820x820 over his 1000x1500 (820/1000 = 0.82) while
+# leaving Glen Cook on his 3072x2304 rather than a 117x150 thumbnail.
+SQUARE_TIE_BAND = 0.75
+
+
+def better_square_portrait(first, second):
+    """
+        Which of two (width, height) portraits fills a SQUARE tile better.
+
+        Plex renders artist art in a square tile, so the usable resolution is
+        the SHORT EDGE -- what survives the crop. That single number is why a
+        3072x2304 landscape (2304px usable) beats a 117x150 thumbnail however
+        much squarer the thumbnail is, and it is the whole reason this is not a
+        "prefer square" rule: measured on Glen Cook, preferring squareness
+        outright swapped a sharp photo for a postage stamp.
+
+        Squareness only decides when the short edges are COMPARABLE
+        (SQUARE_TIE_BAND): there a native square wins, because the pixels given
+        up are few and cropping a tall portrait cuts the top or bottom off the
+        subject. Orientation-blind on purpose -- a wide photo loses its sides,
+        a tall one its ends, and both keep min(w, h).
+
+        None means "could not measure" (image_dimensions failed) and must never
+        win by accident, so it always loses to a measurable image; two Nones
+        return None so the caller keeps whatever order it already had.
+    """
+    if not first:
+        return second
+    if not second:
+        return first
+    first_short = min(first[0], first[1])
+    second_short = min(second[0], second[1])
+    if first_short <= 0 or second_short <= 0:
+        return first if first_short >= second_short else second
+    smaller = min(first_short, second_short)
+    larger = max(first_short, second_short)
+    if (float(smaller) / float(larger)) >= SQUARE_TIE_BAND:
+        # Comparable resolution: let shape decide.
+        first_off = abs(float(first[0]) / float(first[1]) - 1.0)
+        second_off = abs(float(second[0]) / float(second[1]) - 1.0)
+        if abs(first_off - second_off) > 0.01:
+            return first if first_off < second_off else second
+    return first if first_short >= second_short else second
+
+
 def offer_secondary_author_poster(helper, valid_posters):
     """
         Add the Audible `imageAlt` to the artist's poster container as a
@@ -1140,14 +1219,20 @@ def offer_secondary_author_poster(helper, valid_posters):
         with a single poster and no way to switch in the UI.
     """
     if not helper.thumb_secondary or helper.thumb_secondary == helper.thumb:
-        return valid_posters
+        return valid_posters, None
+    # Dimensions come back with the list so the caller can decide which image
+    # fills a square tile better (see better_square_portrait). Measured here
+    # because this is where the bytes already are -- fetching them again to
+    # measure would double the author-art traffic.
+    secondary_dims = None
     if (helper.thumb_secondary not in helper.metadata.posters or helper.force):
         secondary_data = make_request(helper.thumb_secondary)
         if secondary_data is not None:
             helper.metadata.posters[helper.thumb_secondary] = \
                 Proxy.Media(secondary_data, sort_order=1)
+            secondary_dims = image_dimensions(secondary_data)
     valid_posters.append(helper.thumb_secondary)
-    return valid_posters
+    return valid_posters, secondary_dims
 
 
 def unpin_hardcover_author_art(helper):
@@ -1579,6 +1664,13 @@ class AudiobookArtist(Agent.Artist):
             helper.thumb and helper.thumb not in helper.metadata.posters
         )
         thumb_added = False
+        # BOTH initialised before any branch: the pinned-author path below
+        # skips offer_secondary_author_poster entirely, and an artist with no
+        # thumb skips the whole block -- either way the force-refresh section
+        # still reads these, and an unbound name is a NameError that would
+        # abort the whole artist update.
+        thumb_dims = None
+        secondary_dims = None
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
                 thumb_data = make_request(helper.thumb)
@@ -1587,6 +1679,9 @@ class AudiobookArtist(Agent.Artist):
                         thumb_data, sort_order=0
                     )
                     thumb_added = True
+                    # Measured while the bytes are in hand; see
+                    # better_square_portrait for what it decides.
+                    thumb_dims = image_dimensions(thumb_data)
             else:
                 thumb_added = True
         # Author-image selection. Two authors want the Hardcover portrait, MOST
@@ -1642,9 +1737,18 @@ class AudiobookArtist(Agent.Artist):
                 # The Audible option returns on the next pass.
                 pass
             else:
-                valid_posters = offer_secondary_author_poster(
+                valid_posters, secondary_dims = offer_secondary_author_poster(
                     helper, valid_posters
                 )
+                # validate_keys selects the LAST key, so put the image that
+                # fills a square tile better at the end. Only when BOTH were
+                # measurable and they actually differ -- an unmeasured image
+                # must not change which poster an artist has had for months.
+                if (thumb_dims and secondary_dims
+                        and thumb_dims != secondary_dims
+                        and len(valid_posters) == 2):
+                    if better_square_portrait(thumb_dims, secondary_dims) is thumb_dims:
+                        valid_posters = [helper.thumb_secondary, helper.thumb]
             helper.metadata.posters.validate_keys(valid_posters)
         # On a REFRESH the container can't move Plex's persisted selection, so
         # the upload/select API owns it -- which is also why the Audible photo
@@ -1655,6 +1759,12 @@ class AudiobookArtist(Agent.Artist):
         if helper.force:
             if prefer_hardcover:
                 select_hardcover_author_art(helper)
+            elif Prefs['prefer_square_author_art'] and helper.thumb_secondary:
+                # Opt-in: converge an already-scanned artist onto whichever
+                # portrait fills the square tile better. The container ordering
+                # above only decides on a FRESH scan, so without this an
+                # existing library never benefits.
+                select_best_fit_author_art(helper, thumb_dims, secondary_dims)
             elif helper.thumb and not helper.thumb_secondary:
                 # Exactly one image exists, so there is nothing to defer TO: the
                 # unpin below would leave the artist with no poster at all.
