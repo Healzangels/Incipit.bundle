@@ -1468,18 +1468,20 @@ def select_hardcover_author_art(helper):
 def select_best_fit_author_art(helper, thumb_dims, secondary_dims):
     """
         Force-select whichever author portrait fills the square tile better,
-        for an ALREADY-SCANNED artist. Opt-in via `prefer_square_author_art`.
+        for an ALREADY-SCANNED artist. Gated on `prefer_square_author_art`.
 
         The container ordering only decides on a fresh scan, so without this the
         improvement never reaches an existing library -- measured 2026-07-25, 39
         artists were sitting on the worse-fitting image with no way to converge
         short of picking each by hand.
 
-        Off by default because this re-selects images the operator may have
-        chosen deliberately, and Plex exposes no way to tell a hand-picked
-        container key from one the agent set (the same limitation that makes
-        unpin_hardcover_author_art refuse to touch container keys). Turning it
-        on is the operator asking for the tile to be filled.
+        ON by default since v1.3.132 (operator decision 2026-07-26): the
+        ownership gate in converge_author_art already refuses to touch a USER
+        UPLOAD, so the only thing this can override is a click-pick between the
+        agent's OWN two provider images -- which Plex cannot distinguish from a
+        scan default anyway. The operator's curation convention (upload when it
+        matters) makes that class empty, and default-on turns the census-and-
+        refresh convergence pass into ordinary refresh behaviour.
 
         Does nothing without evidence: an unmeasurable image, a missing second
         image, or two identically-sized ones all leave the artist alone rather

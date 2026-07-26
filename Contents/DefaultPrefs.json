@@ -99,7 +99,7 @@
         "id": "prefer_square_author_art",
         "label": "Prefer the author portrait that best fills the square artist tile",
         "type": "bool",
-        "default": "false"
+        "default": "true"
     },
     {
         "id": "logging_level",
