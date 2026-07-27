@@ -2066,3 +2066,48 @@ class TestPerceptualWithhold(unittest.TestCase):
                         [self.OWN, self.UPLOAD])
         self.assertFalse(AG.duplicate_shown_elsewhere(
             st, self.IMG, self.LOCAL_KEY, 't'))
+
+
+class TestOnlinePerceptualRedundant(unittest.TestCase):
+    """
+        v1.3.150: the ONLINE-cover leg gets the same perceptual fallback as
+        the cross-source withhold. Live specimen (The Knight, rk 128504): our
+        online cover is the Audible-bannered variant of the clean cover.jpg
+        -- byte-different, dHash distance 2 -- so byte-only redundancy
+        re-offered it as a fourth tile of the same picture every refresh.
+        The existing gate (local_set or mirror_skipped) and the fail-open
+        contract are untouched; only the equality widened.
+    """
+
+    IMG = b'\xff\xd8IMAGEBYTES'
+    VARIANT = b'\xff\xd8SAMEPICTUREBANNERED'
+
+    def setUp(self):
+        self.real_consult = AG.images_similar_via_api
+
+    def tearDown(self):
+        AG.images_similar_via_api = self.real_consult
+
+    def test_perceptual_twin_is_redundant(self):
+        AG.images_similar_via_api = lambda a, b, tag: True
+        self.assertTrue(AG.online_copy_is_redundant(
+            self.VARIANT, self.IMG, True, False))
+
+    def test_no_verdict_fails_open(self):
+        AG.images_similar_via_api = lambda a, b, tag: None
+        self.assertFalse(AG.online_copy_is_redundant(
+            self.VARIANT, self.IMG, True, False))
+
+    def test_genuinely_different_still_offered(self):
+        AG.images_similar_via_api = lambda a, b, tag: False
+        self.assertFalse(AG.online_copy_is_redundant(
+            self.VARIANT, self.IMG, True, False))
+
+    def test_gate_still_short_circuits_the_consult(self):
+        # Without local_set/mirror_skipped the bytes are NOT on display
+        # elsewhere, so the consult must not even run.
+        def boom(a, b, tag):
+            raise AssertionError('consult reached past the gate')
+        AG.images_similar_via_api = boom
+        self.assertFalse(AG.online_copy_is_redundant(
+            self.VARIANT, self.IMG, False, False))

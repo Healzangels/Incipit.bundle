@@ -1187,27 +1187,37 @@ def duplicate_shown_elsewhere(state, image_bytes, own_dict_key, tag):
     return False
 
 
-def online_copy_is_redundant(thumb_data, cover_bytes, local_set, mirror_skipped):
+def online_copy_is_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
+                             tag='incipit cover'):
     """
         True when offering (or keeping) the ONLINE cover would just list
-        cover.jpg's bytes a second time. Two ways those bytes are already on
-        display: our own local mirror took the default (local_set), or the
-        mirror offer was withheld because ANOTHER source's poster shows them
+        cover.jpg's picture a second time. Two ways that picture is already
+        on display: our own local mirror took the default (local_set), or the
+        mirror offer was withheld because ANOTHER source's poster shows it
         (mirror_skipped). v1.3.133 keyed this on local_set alone, so the very
         pass that suppressed the local copy re-offered the identical online
         one -- the duplicate came straight back through the other key.
+
+        Since v1.3.150 the equality is perceptual, not just byte-strict: the
+        online cover is often a re-encode or lightly-branded variant of the
+        very art in cover.jpg (The Knight: the Audible-bannered cover next to
+        the clean one, dHash distance 2), and byte-only redundancy re-listed
+        the same picture every refresh. Gate and rails unchanged.
 
         Safe against picked-poster-evaporates by construction: mirror_skipped
         is only ever True when the selection is a NON-incipit key (incipit
         keys are excluded comparison sources in duplicate_shown_elsewhere),
         so suppressing or pruning our online entry can never touch the
-        selection. Fails open on missing bytes, like every dedupe rail.
+        selection. Fails open on missing bytes or no verdict, like every
+        dedupe rail.
     """
     if thumb_data is None or not cover_bytes:
         return False
     if not (local_set or mirror_skipped):
         return False
-    return same_image(cover_bytes, thumb_data)
+    if same_image(cover_bytes, thumb_data):
+        return True
+    return images_similar_via_api(cover_bytes, thumb_data, tag) is True
 
 
 # The local-cover block's decisions, carried from the first track of a pass to
@@ -3086,8 +3096,8 @@ class AudiobookAlbum(Agent.Album):
                 )
                 if online_redundant:
                     log.info(
-                        'incipit cover: online cover is byte-identical to '
-                        'cover.jpg -- not offering a duplicate'
+                        'incipit cover: online cover already shows the '
+                        'cover.jpg picture -- not offering a duplicate'
                     )
                 elif thumb_data is not None:
                     # When the local cover was deferred (portrait print jacket)
