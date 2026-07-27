@@ -2868,13 +2868,17 @@ class AudiobookAlbum(Agent.Album):
                 # track of a curated album re-paid the whole read/fetch bill.
                 (local_set, mirror_skipped, deferred_portrait_local,
                  poisoned_local, online_redundant) = remembered
-            # Per-track guard: Plex calls update() once PER TRACK, so a
-            # multi-part book would re-read the (up to ~1MB) cover.jpg on every
-            # track. Skip the re-read once our poster is already in this pass's
-            # container -- UNLESS force, so a real "Refresh Metadata" (force=1)
-            # always re-reads and picks up a NEWLY dropped/replaced cover.jpg.
-            elif local_key in helper.metadata.posters and not helper.force:
-                local_set = True
+            # NO container-membership fast-path here. The memo above is the
+            # only honest "this pass already did the work" signal: the
+            # container arrives DESERIALIZED, and with two libraries side by
+            # side it arrives pre-populated with a SIBLING library's entries
+            # (bundles are shared per guid) -- measured live on the Testing
+            # library 2026-07-27, an entire fresh scan performed ZERO
+            # cover.jpg reads because every inherited entry satisfied the old
+            # membership check, and no book received its local cover. Cost of
+            # the honest signal: one cover.jpg read per book per pass past
+            # the memo TTL -- which also means a replaced cover.jpg now takes
+            # effect on ANY refresh, not only a forced one.
             else:
                 cover_bytes = local_cover_bytes(helper)
                 # POISON FIRST, independent of shape and of whether the record

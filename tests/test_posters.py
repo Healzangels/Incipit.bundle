@@ -1893,3 +1893,32 @@ class IdenticalPairSelectionRail(unittest.TestCase):
         with open(path) as f:
             src = f.read()
         self.assertIn('the SELECTED secondary -- not listing it twice', src)
+
+class PassGuardIsTheMemoNotContainerMembership(unittest.TestCase):
+    """
+        Two libraries side by side share per-guid metadata bundles, so the
+        DESERIALIZED container arrives pre-populated with a sibling library's
+        entries -- 'local_key in posters' can mean 'inherited', not 'offered
+        earlier this pass'. Measured live on the Testing library (2026-07-27):
+        ZERO cover.jpg reads across an entire fresh scan, no book received
+        its local cover, because every inherited entry satisfied the
+        membership fast-path. The per-pass memo (album_cover_memo, v1.3.136)
+        is the only honest this-pass signal; the membership guard it
+        superseded must not exist.
+    """
+
+    def source(self):
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'Contents', 'Code', '__init__.py'
+        )
+        with open(path) as f:
+            return f.read()
+
+    def test_no_container_membership_fast_path(self):
+        self.assertNotIn('elif local_key in helper.metadata.posters', self.source())
+
+    def test_the_memo_is_still_consulted(self):
+        src = self.source()
+        self.assertIn('album_cover_decision(', src)
+        self.assertIn('remember_album_cover_decision(', src)
