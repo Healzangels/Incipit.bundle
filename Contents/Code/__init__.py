@@ -1038,9 +1038,17 @@ def own_container_key(dict_key):
         bytes; proven live in the v1.3.119 work). This is how a caller asks
         "is the selection the copy I manage?" without fetching anything.
     """
-    # py2 str hashes directly; py2 unicode and py3 str need the encode. bytes
-    # check first so the py2 str (== bytes) path never re-encodes.
-    key_bytes = dict_key if isinstance(dict_key, bytes) else dict_key.encode('utf-8')
+    # NO `bytes` builtin here: the sandbox's whitelist omits that NAME (proven
+    # live 2026-07-26 -- an isinstance check against it killed every album
+    # update with "global name 'bytes' is not defined" while py_compile and
+    # the py3 harness both passed; guarded by TestSandboxBuiltinGuards).
+    # encode() covers every real input instead: py2 str (ascii keys
+    # round-trip), py2 unicode, py3 str; anything without .encode (the py3
+    # harness's byte strings) is already hashable as-is.
+    try:
+        key_bytes = dict_key.encode('utf-8')
+    except (AttributeError, UnicodeDecodeError):
+        key_bytes = dict_key
     return ('metadata://posters/com.plexapp.agents.incipit_'
             + hashlib.sha1(key_bytes).hexdigest())
 

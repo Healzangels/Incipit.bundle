@@ -1440,3 +1440,41 @@ class TestDuplicateShownElsewhere(unittest.TestCase):
         st = self.state(self.UPLOAD, [self.OWN, self.UPLOAD])
         self.assertTrue(AG.duplicate_shown_elsewhere(
             st, self.IMG, self.LOCAL_KEY, 't'))
+
+
+class TestSandboxBuiltinGuards(unittest.TestCase):
+    """
+        The sandbox's builtin whitelist is IRREGULAR (no any/sum, but set()
+        works) and py_compile + this py3 harness both pass code that dies at
+        runtime in Plex. v1.3.133 shipped `isinstance(x, bytes)` and every
+        album update crashed with "global name 'bytes' is not defined" --
+        found only in the live CRITICAL traceback. No harness can catch a
+        whitelist miss, so pin the SOURCE: builtins without in-repo precedent
+        must not appear as bare names.
+    """
+
+    def code_sources(self):
+        code_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'Contents', 'Code'
+        )
+        out = []
+        for name in sorted(os.listdir(code_dir)):
+            if name.endswith('.py'):
+                with open(os.path.join(code_dir, name)) as f:
+                    out.append((name, f.read()))
+        return out
+
+    def test_no_bare_bytes_builtin(self):
+        # `image_bytes`/`cover_bytes` etc. are fine -- only the bare NAME is
+        # forbidden (isinstance second args, bytes(...) calls).
+        import re as re_mod
+        for name, src in self.code_sources():
+            self.assertIsNone(
+                re_mod.search(r'isinstance\([^)]*[,(]\s*bytes\s*[),]', src),
+                '%s uses the bytes builtin, absent from the sandbox whitelist' % name
+            )
+            self.assertIsNone(
+                re_mod.search(r'(?<![A-Za-z0-9_])bytes\(', src),
+                '%s calls bytes(), absent from the sandbox whitelist' % name
+            )
