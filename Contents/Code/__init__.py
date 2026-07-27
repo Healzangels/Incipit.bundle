@@ -2292,44 +2292,6 @@ class AudiobookArtist(Agent.Artist):
         # abort the whole artist update.
         thumb_dims = None
         secondary_dims = None
-        # One container-state read for the cross-source dedupe on BOTH provider
-        # images (v1.3.133): the pirate aba case, where the agent's portrait is
-        # byte-identical to the operator's selected upload and the picker shows
-        # the same face twice. None (fresh scan, sealed sandbox) fails open --
-        # both images offered exactly as before.
-        author_dup_state = None
-        if helper.thumb or helper.thumb_secondary:
-            author_dup_state = read_poster_state(
-                helper.metadata.guid, 'incipit author-offer')
-        thumb_dup = False
-        if helper.thumb:
-            if helper.thumb not in helper.metadata.posters or helper.force:
-                # Bytes, not the HTTPRequest wrapper -- see the twin call in
-                # offer_secondary_author_poster. thumb_dims below is measured
-                # from this, and a wrapper silently measured as None.
-                thumb_data = fetch_url_bytes(helper.thumb)
-                if thumb_data is not None:
-                    # Measured while the bytes are in hand; see
-                    # better_square_portrait for what it decides. Measured even
-                    # for a skipped duplicate: the select machinery below
-                    # compares by URL bytes, not container membership.
-                    thumb_dims = remember_dims(helper.thumb, thumb_data)
-                    thumb_dup = duplicate_shown_elsewhere(
-                        author_dup_state, thumb_data, helper.thumb,
-                        'incipit author-offer')
-                if thumb_data is not None and not thumb_dup:
-                    helper.metadata.posters[helper.thumb] = Proxy.Media(
-                        thumb_data, sort_order=0
-                    )
-                    thumb_added = True
-            else:
-                thumb_added = True
-                # No fetch this pass, so recall the measurement -- otherwise
-                # the reorder below is dims-blind on every pass after the
-                # first and re-asserts DEFAULT order, which is exactly how
-                # multi-book authors ended on the Audible image regardless of
-                # what pass 1 correctly decided (see IMAGE_DIMS_MEMO).
-                thumb_dims = IMAGE_DIMS_MEMO.get(helper.thumb)
         # Author-image selection. Two authors want the Hardcover portrait, MOST
         # want the Audible photo, and there is no reliable signal to tell them
         # apart automatically (both providers return real photos; which looks
@@ -2370,6 +2332,103 @@ class AudiobookArtist(Agent.Artist):
             helper.name, helper.metadata.title, pref_raw,
             'HARDCOVER' if prefer_hardcover else 'audible-default'
         )
+        # On a forced refresh the author-art convergence runs BEFORE the offer
+        # phase, deliberately. The container cannot un-offer what the same
+        # pass already offered: proven live on Ernest Cline (2026-07-27,
+        # v1.3.141) -- converge's validate_keys prune logged success, but the
+        # framework serialized the just-added dict entry regardless, and the
+        # picker showed the freshly-selected image twice for a pass. With the
+        # convergence FIRST, the offer phase's poster-state read (below) sees
+        # the new upload as the selection, the cross-source dedupe withholds
+        # the container copy of the same bytes, and the keep-list prunes the
+        # stored stale entry: single-pass clean, entirely through the
+        # already-proven offer machinery.
+        #
+        # The dims are pre-fetched here because the offer phase has not
+        # measured anything yet; fetch_url_bytes rides the framework HTTP
+        # cache (week default), so the offer phase's own fetch of the same
+        # URLs moments later is served from cache, not the network.
+        #
+        # Also why this is force-gated: on a REFRESH the container cannot move
+        # Plex's persisted selection, so the upload/select API owns it -- and
+        # the unpin direction must run even when the record has no Hardcover
+        # image left, or an uploaded portrait becomes permanently stuck.
+        if helper.force:
+            if helper.thumb:
+                prefetched = fetch_url_bytes(helper.thumb)
+                if prefetched is not None:
+                    thumb_dims = remember_dims(helper.thumb, prefetched)
+            if helper.thumb_secondary:
+                prefetched = fetch_url_bytes(helper.thumb_secondary)
+                if prefetched is not None:
+                    secondary_dims = remember_dims(helper.thumb_secondary, prefetched)
+            if prefer_hardcover:
+                select_hardcover_author_art(helper)
+            elif Prefs['prefer_square_author_art'] and helper.thumb_secondary:
+                # Converge an already-scanned artist onto whichever portrait
+                # fills the square tile better (default-on since v1.3.132).
+                # The container ordering below only decides on a FRESH scan,
+                # so without this an existing library never benefits.
+                #
+                # Default-on also means this branch swallows every two-image
+                # author -- so when the fit has NO VERDICT (unmeasurable or
+                # identical dims), fall through to the pre-1.3.132 remedy:
+                # a stuck agent-upload pin still reverts to the Audible
+                # photo. With a verdict, the convergence IS the policy and
+                # must not be undone.
+                if not select_best_fit_author_art(
+                    helper, thumb_dims, secondary_dims
+                ):
+                    unpin_hardcover_author_art(helper)
+            elif helper.thumb and not helper.thumb_secondary:
+                # Exactly one image exists, so there is nothing to defer TO: the
+                # unpin below would leave the artist with no poster at all.
+                select_sole_author_art(helper)
+            else:
+                # Not pinned. If it WAS pinned before, the portrait we
+                # uploaded (or the container selected on a fresh scan) is
+                # still selected -- undo it. No-ops unless the selection is
+                # agent-owned, so a user's custom upload survives.
+                unpin_hardcover_author_art(helper)
+        # One container-state read for the cross-source dedupe on BOTH provider
+        # images (v1.3.133): the pirate aba case, where the agent's portrait is
+        # byte-identical to the operator's selected upload and the picker shows
+        # the same face twice. None (fresh scan, sealed sandbox) fails open --
+        # both images offered exactly as before. Read AFTER the convergence
+        # above, so a just-landed upload is visible to the dedupe this pass.
+        author_dup_state = None
+        if helper.thumb or helper.thumb_secondary:
+            author_dup_state = read_poster_state(
+                helper.metadata.guid, 'incipit author-offer')
+        thumb_dup = False
+        if helper.thumb:
+            if helper.thumb not in helper.metadata.posters or helper.force:
+                # Bytes, not the HTTPRequest wrapper -- see the twin call in
+                # offer_secondary_author_poster. thumb_dims below is measured
+                # from this, and a wrapper silently measured as None.
+                thumb_data = fetch_url_bytes(helper.thumb)
+                if thumb_data is not None:
+                    # Measured while the bytes are in hand; see
+                    # better_square_portrait for what it decides. Measured even
+                    # for a skipped duplicate: the select machinery below
+                    # compares by URL bytes, not container membership.
+                    thumb_dims = remember_dims(helper.thumb, thumb_data)
+                    thumb_dup = duplicate_shown_elsewhere(
+                        author_dup_state, thumb_data, helper.thumb,
+                        'incipit author-offer')
+                if thumb_data is not None and not thumb_dup:
+                    helper.metadata.posters[helper.thumb] = Proxy.Media(
+                        thumb_data, sort_order=0
+                    )
+                    thumb_added = True
+            else:
+                thumb_added = True
+                # No fetch this pass, so recall the measurement -- otherwise
+                # the reorder below is dims-blind on every pass after the
+                # first and re-asserts DEFAULT order, which is exactly how
+                # multi-book authors ended on the Audible image regardless of
+                # what pass 1 correctly decided (see IMAGE_DIMS_MEMO).
+                thumb_dims = IMAGE_DIMS_MEMO.get(helper.thumb)
         if helper.thumb:
             # A thumb withheld as a cross-source duplicate stays OUT of the
             # membership list too, or its stale entry would linger as the very
@@ -2399,42 +2458,6 @@ class AudiobookArtist(Agent.Artist):
                     if better_square_portrait(thumb_dims, secondary_dims) is thumb_dims:
                         valid_posters = [helper.thumb_secondary, helper.thumb]
             helper.metadata.posters.validate_keys(valid_posters)
-        # On a REFRESH the container can't move Plex's persisted selection, so
-        # the upload/select API owns it -- which is also why the Audible photo
-        # can stay on offer above without stealing the pick. OUTSIDE the
-        # `if helper.thumb:` gate: the unpin direction targets the AUDIBLE
-        # image and must still run when the record has no Hardcover image left,
-        # or an uploaded portrait became permanently stuck.
-        if helper.force:
-            if prefer_hardcover:
-                select_hardcover_author_art(helper)
-            elif Prefs['prefer_square_author_art'] and helper.thumb_secondary:
-                # Converge an already-scanned artist onto whichever portrait
-                # fills the square tile better (default-on since v1.3.132).
-                # The container ordering above only decides on a FRESH scan,
-                # so without this an existing library never benefits.
-                #
-                # Default-on also means this branch swallows every two-image
-                # author -- so when the fit has NO VERDICT (unmeasurable or
-                # identical dims), fall through to the pre-1.3.132 remedy:
-                # a stuck agent-upload pin still reverts to the Audible
-                # photo. With a verdict, the convergence IS the policy and
-                # must not be undone.
-                if not select_best_fit_author_art(
-                    helper, thumb_dims, secondary_dims
-                ):
-                    unpin_hardcover_author_art(helper)
-            elif helper.thumb and not helper.thumb_secondary:
-                # Exactly one image exists, so there is nothing to defer TO: the
-                # unpin below would leave the artist with no poster at all.
-                select_sole_author_art(helper)
-            else:
-                # Not pinned. If it WAS pinned before, the portrait we
-                # uploaded (or the container selected on a fresh scan) is
-                # still selected -- undo it. No-ops unless the selection is
-                # agent-owned, so a user's custom upload survives.
-                unpin_hardcover_author_art(helper)
-
         helper.log_update_metadata()
 
 

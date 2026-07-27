@@ -1720,3 +1720,35 @@ class ConvergePrunesItsOwnDuplicate(unittest.TestCase):
         AG.converge_author_art(
             helper, self.TARGET, self.OTHER, 'incipit author-art-fit')
         self.assertEqual(self.validated, [])
+
+class ConvergenceRunsBeforeTheOffers(unittest.TestCase):
+    """
+        Proven live on Ernest Cline (2026-07-27, v1.3.141): converge's own
+        validate_keys prune logged success, but the framework serializes
+        same-pass dict entries REGARDLESS of the valid-keys list -- the
+        container copy the offer phase had already added survived, and the
+        picker showed the just-selected image twice anyway.
+
+        You cannot un-offer what this pass offered. So on a forced refresh
+        the convergence must run FIRST: the offer phase's poster-state read
+        then sees the fresh upload as the selection, the existing dedupe
+        withholds the container copy of the same bytes, and the keep-list
+        prunes the stored stale entry -- single-pass clean, all through
+        machinery that is already live-proven (the Harris pass-2 trace).
+    """
+
+    def source(self):
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'Contents', 'Code', '__init__.py'
+        )
+        with open(path) as f:
+            return f.read()
+
+    def test_force_select_precedes_the_offer_state_read(self):
+        src = self.source()
+        marker = src.index('author-art convergence runs BEFORE the offer')
+        state_read = src.index('author_dup_state = read_poster_state')
+        fit_call = src.index('if not select_best_fit_author_art(')
+        self.assertLess(marker, state_read)
+        self.assertLess(fit_call, state_read)
