@@ -266,3 +266,37 @@ class TestSidecarIncipitIdQuickMatch(unittest.TestCase):
                     '', 42, None):
             tool = tool_for(sidecar={'incipit_id': bad}, album='Some Book')
             self.assertIsNone(tool.check_for_asin())
+
+
+class TestQuickMatchDisplay(unittest.TestCase):
+    """
+        The Fix Match row for a quick match. ASIN rows keep their historical
+        shape (raw ASIN + upstream's dummy 1969 -- harmless there because the
+        /books/{asin} record's releaseDate overwrites it on update). A sidecar
+        incipit_id pin row must NOT: the raw id read like a mismatch in the
+        dialog, and the pinned OL/Hardcover record can lack a releaseDate, so
+        the dummy 1969 leaked onto the album card as 1969-12-31 (proven live
+        on 2010: Odyssey Two).
+    """
+
+    def test_pin_row_shows_sidecar_title_and_no_year(self):
+        sc = {'title': '2010: Odyssey Two',
+              'incipit_id': 'openlibrary-works-OL36469512W'}
+        tool = tool_for(sidecar=sc, album='Odyssey Two')
+        self.assertEqual(
+            tool.quick_match_display('openlibrary-works-OL36469512W_us'),
+            ('2010: Odyssey Two', None))
+
+    def test_pin_row_falls_back_to_album_then_id(self):
+        tool = tool_for(sidecar={'incipit_id': 'overdrive-9406208'},
+                        album='Some Book')
+        self.assertEqual(tool.quick_match_display('overdrive-9406208_us'),
+                         ('Some Book', None))
+        bare = tool_for(sidecar={'incipit_id': 'overdrive-9406208'})
+        self.assertEqual(bare.quick_match_display('overdrive-9406208_us'),
+                         ('overdrive-9406208_us', None))
+
+    def test_asin_row_keeps_historical_shape(self):
+        tool = tool_for(sidecar=dict(SIDECAR), album='Some Book')
+        self.assertEqual(tool.quick_match_display('B08WF9JR2P_us'),
+                         ('B08WF9JR2P_us', 1969))

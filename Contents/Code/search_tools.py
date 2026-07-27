@@ -624,6 +624,24 @@ class AlbumSearchTool(SearchTool):
             return sc_title
         return None
 
+    def quick_match_display(self, quick_match_id):
+        """
+            (name, year) for the quick-match Fix Match row. ASIN rows keep
+            their historical shape (raw ASIN + upstream's dummy 1969 --
+            harmless there because the /books/{asin} record's releaseDate
+            overwrites it on update). A sidecar incipit_id pin row must not:
+            the raw id read like a mismatch in the dialog, and the pinned
+            OL/Hardcover record can lack a releaseDate, letting the dummy
+            1969 land on the album card as 1969-12-31 (seen live on
+            2010: Odyssey Two).
+        """
+        if quick_match_id.startswith('B0'):
+            return quick_match_id, 1969
+        title = self.sidecar_title()
+        if not title and self.media.album:
+            title = self.media.album
+        return title or quick_match_id, None
+
     def folder_title(self):
         """
             A title recovered from the book folder, or None. Gated on the

@@ -2548,13 +2548,15 @@ class AudiobookAlbum(Agent.Album):
         # Check if we can quick match based on asin
         quick_match_asin = search_helper.check_for_asin()
         if quick_match_asin:
+            display_name, display_year = search_helper.quick_match_display(
+                quick_match_asin)
             results.Append(
                 MetadataSearchResult(
                     id=quick_match_asin,
                     lang=lang,
-                    name=quick_match_asin,
+                    name=display_name,
                     score=100,
-                    year=1969
+                    year=display_year
                 )
             )
             log.info(
