@@ -1163,6 +1163,10 @@ class CoverMirrorModes(unittest.TestCase):
         (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
          AG.make_request, AG.read_poster_state) = self.saved
         AG.Prefs.pop('cover_mirror_mode', None)
+        # Two tests below flip this on; leaking it made every later-ordered
+        # test in the process run with prefer_local defaults it never asked
+        # for (order-dependent greens are how that class of bug hides).
+        AG.Prefs.pop('prefer_local_cover', None)
         AG.recent_work_memo.clear()
 
     def _helper(self, guid='com.plexapp.agents.incipit://MODETEST_us'):
@@ -1334,10 +1338,6 @@ class SquareTieBandCalibration(unittest.TestCase):
                          (3072, 2304))
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class TestDuplicateShownElsewhere(unittest.TestCase):
     """
         v1.3.133: the same picture must not be LISTED twice however many
@@ -1478,3 +1478,126 @@ class TestSandboxBuiltinGuards(unittest.TestCase):
                 re_mod.search(r'(?<![A-Za-z0-9_])bytes\(', src),
                 '%s calls bytes(), absent from the sandbox whitelist' % name
             )
+
+class OnlineCopyRedundancy(unittest.TestCase):
+    """
+        The online cover must not be offered (or kept) when it would just
+        list cover.jpg's bytes a second time. Two ways those bytes are
+        already on display: our local mirror took the default (local_set),
+        or the mirror offer was WITHHELD because another source's poster
+        shows them (mirror_skipped). v1.3.133 keyed the guard on local_set
+        alone -- so the very pass that suppressed the local copy re-offered
+        the identical ONLINE copy, re-creating the duplicate through the
+        other key.
+    """
+
+    IMG = b'\xff\xd8SAMEBYTES'
+    OTHER = b'\xff\xd8DIFFERENT'
+
+    def test_redundant_when_local_mirror_took_the_default(self):
+        self.assertTrue(AG.online_copy_is_redundant(self.IMG, self.IMG, True, False))
+
+    def test_redundant_when_the_mirror_was_skipped_as_a_duplicate(self):
+        # The v1.3.133 hole.
+        self.assertTrue(AG.online_copy_is_redundant(self.IMG, self.IMG, False, True))
+
+    def test_a_unique_online_cover_is_never_suppressed(self):
+        self.assertFalse(AG.online_copy_is_redundant(self.OTHER, self.IMG, True, True))
+
+    def test_missing_bytes_on_either_side_fail_open(self):
+        self.assertFalse(AG.online_copy_is_redundant(None, self.IMG, True, True))
+        self.assertFalse(AG.online_copy_is_redundant(self.IMG, None, True, True))
+
+    def test_no_display_anywhere_means_no_suppression(self):
+        # Neither flag: nothing shows these bytes, the offer must stand.
+        self.assertFalse(AG.online_copy_is_redundant(self.IMG, self.IMG, False, False))
+
+    def test_a_padded_copy_is_still_the_same_picture(self):
+        self.assertTrue(AG.online_copy_is_redundant(self.IMG + PAD, self.IMG, True, False))
+
+
+class AlbumCoverDecisionMemo(unittest.TestCase):
+    """
+        update() runs once per TRACK, and a dup-skip never adds our key to
+        the container -- so the membership guard never engaged and every
+        track of a curated album re-read cover.jpg, re-read the poster
+        state, and re-downloaded up to DUPLICATE_CHECK_MAX_FETCHES container
+        posters to reach the identical decision (a 27-part book: ~200 extra
+        requests per pass). The memo carries the first track's flags to its
+        siblings; the container itself survives between tracks.
+    """
+
+    FLAGS = (True, False, False, False, False)
+
+    def setUp(self):
+        AG.album_cover_memo.clear()
+        self.real_time = AG.time
+
+    def tearDown(self):
+        AG.time = self.real_time
+
+    def test_miss_then_hit(self):
+        self.assertIsNone(AG.album_cover_decision('guid-1', False))
+        AG.remember_album_cover_decision('guid-1', False, self.FLAGS)
+        self.assertEqual(AG.album_cover_decision('guid-1', False), self.FLAGS)
+
+    def test_force_and_scan_passes_never_share_an_entry(self):
+        # force PROMISES a freshly-read cover.jpg; a scan-pass decision must
+        # not satisfy it, nor the other way around.
+        AG.remember_album_cover_decision('guid-2', False, self.FLAGS)
+        self.assertIsNone(AG.album_cover_decision('guid-2', True))
+        AG.remember_album_cover_decision('guid-3', True, self.FLAGS)
+        self.assertIsNone(AG.album_cover_decision('guid-3', False))
+
+    def test_entries_expire(self):
+        # Bounded staleness, same contract as artist_art_memo: an operator
+        # who replaces cover.jpg and refreshes again gets a fresh read once
+        # the window lapses (force passes are also keyed apart, above).
+        AG.remember_album_cover_decision('guid-4', False, self.FLAGS)
+        real = self.real_time
+        AG.time = lambda: real() + AG.ALBUM_COVER_TTL + 1
+        self.assertIsNone(AG.album_cover_decision('guid-4', False))
+
+
+class CoverBlockFlowGuards(unittest.TestCase):
+    """
+        Container-flow facts only the SOURCE can witness (the cover block is
+        inline in update(), driven by framework objects this harness cannot
+        construct): the per-track memo is consulted, both online-offer sites
+        route through online_copy_is_redundant, and a thumb-less record still
+        prunes a skipped mirror's stale entry.
+    """
+
+    def source(self):
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'Contents', 'Code', '__init__.py'
+        )
+        with open(path) as f:
+            return f.read()
+
+    def test_update_consults_the_album_cover_memo(self):
+        src = self.source()
+        self.assertIn('album_cover_decision(', src)
+        self.assertIn('remember_album_cover_decision(', src)
+
+    def test_online_offer_and_keep_list_share_the_redundancy_verdict(self):
+        # The predicate judges where the bytes are in hand (the offer), and
+        # the keep-list plus the sibling-track restore reuse the STORED
+        # verdict -- re-judging with no bytes would fail open and re-open
+        # the S1 asymmetry.
+        src = self.source()
+        self.assertGreaterEqual(src.count('online_copy_is_redundant('), 2)
+        self.assertIn('if online_redundant:', src)
+        self.assertIn('online_redundant) = remembered', src)
+
+    def test_a_thumbless_record_still_prunes_a_skipped_mirror(self):
+        # Hardcover/OpenLibrary book-level matches have no online cover, so
+        # they never enter the `if helper.thumb:` membership pass -- the
+        # stale mirror entry they skipped must be pruned on its own branch.
+        src = self.source()
+        self.assertIn('elif mirror_skipped and local_key in helper.metadata.posters', src)
+
+
+if __name__ == '__main__':
+    unittest.main()

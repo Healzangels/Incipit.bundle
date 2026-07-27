@@ -1109,6 +1109,59 @@ def duplicate_shown_elsewhere(state, image_bytes, own_dict_key, tag):
     return False
 
 
+def online_copy_is_redundant(thumb_data, cover_bytes, local_set, mirror_skipped):
+    """
+        True when offering (or keeping) the ONLINE cover would just list
+        cover.jpg's bytes a second time. Two ways those bytes are already on
+        display: our own local mirror took the default (local_set), or the
+        mirror offer was withheld because ANOTHER source's poster shows them
+        (mirror_skipped). v1.3.133 keyed this on local_set alone, so the very
+        pass that suppressed the local copy re-offered the identical online
+        one -- the duplicate came straight back through the other key.
+
+        Safe against picked-poster-evaporates by construction: mirror_skipped
+        is only ever True when the selection is a NON-incipit key (incipit
+        keys are excluded comparison sources in duplicate_shown_elsewhere),
+        so suppressing or pruning our online entry can never touch the
+        selection. Fails open on missing bytes, like every dedupe rail.
+    """
+    if thumb_data is None or not cover_bytes:
+        return False
+    if not (local_set or mirror_skipped):
+        return False
+    return same_image(cover_bytes, thumb_data)
+
+
+# The local-cover block's decisions, carried from the first track of a pass to
+# its siblings: update() runs once per TRACK, and a dup-skip never adds our key
+# to the container, so the membership guard never engaged and every track of a
+# curated album re-read cover.jpg, re-read the poster state, and re-downloaded
+# up to DUPLICATE_CHECK_MAX_FETCHES container posters to reach the identical
+# decision (a 27-part book: ~200 extra requests per pass). The container itself
+# survives between tracks, so only the FLAGS need restoring. Same idiom as
+# recent_work_memo/artist_art_memo, but it must carry a payload, which
+# should_run's token cannot. Values: ((local_set, mirror_skipped,
+# deferred_portrait_local, poisoned_local, online_redundant), stamp).
+album_cover_memo = {}
+# Short on purpose: long enough to span one album's per-track sweep, short
+# enough that an operator who replaces cover.jpg and refreshes again soon gets
+# a fresh read (force and scan passes are ALSO keyed apart, so a forced
+# refresh never inherits a scan pass's decisions).
+ALBUM_COVER_TTL = 60
+
+
+def album_cover_decision(guid, force):
+    """The memoized flag tuple for this guid and pass kind, or None."""
+    hit = album_cover_memo.get((guid, bool(force)))
+    if hit and (time() - hit[1]) < ALBUM_COVER_TTL:
+        return hit[0]
+    return None
+
+
+def remember_album_cover_decision(guid, force, flags):
+    album_cover_memo[(guid, bool(force))] = (flags, time())
+
+
 # Per-guid cache for the artist poster, because update() runs once per TRACK
 # and helper.force defeats the container re-read guard -- so without this a
 # forced refresh of a 27-part book paid a /library/all round-trip PLUS a full
@@ -2643,6 +2696,13 @@ class AudiobookAlbum(Agent.Album):
         # it was skipped to avoid. Initialized here because the offer code
         # only runs on some paths and the keep-list runs on all of them.
         mirror_skipped = False
+        # Its sibling for the ONLINE copy: set when the online cover's bytes
+        # are already on display (via the local mirror, or via the source
+        # that caused mirror_skipped), so the offer is withheld and the
+        # stale entry pruned. Carried in the album memo like the rest -- a
+        # sibling track has no bytes to re-judge with, and failing open
+        # there would re-offer the very duplicate the first track removed.
+        online_redundant = False
         # Set when a PORTRAIT local cover.jpg was skipped in favour of the square
         # online cover, so the force-select below does not simply re-read the file
         # and re-impose it, and the online cover keeps the default slot.
@@ -2670,13 +2730,25 @@ class AudiobookAlbum(Agent.Album):
         # it, so leaving the assignment there was a NameError whenever the pref
         # was off.
         local_key = 'incipit-local-cover'
+        # Hoisted for the same reason: the online block below consults it, and
+        # it is only ever assigned under prefer_local.
+        remembered = None
         if prefer_local:
+            remembered = album_cover_decision(helper.metadata.guid, helper.force)
+            if remembered is not None:
+                # A sibling track already did the reads and the offers this
+                # pass, and the container survives between tracks -- only the
+                # FLAGS need restoring. Without this, a dup-skip (which never
+                # adds our key) defeated the membership guard below and every
+                # track of a curated album re-paid the whole read/fetch bill.
+                (local_set, mirror_skipped, deferred_portrait_local,
+                 poisoned_local, online_redundant) = remembered
             # Per-track guard: Plex calls update() once PER TRACK, so a
             # multi-part book would re-read the (up to ~1MB) cover.jpg on every
             # track. Skip the re-read once our poster is already in this pass's
             # container -- UNLESS force, so a real "Refresh Metadata" (force=1)
             # always re-reads and picks up a NEWLY dropped/replaced cover.jpg.
-            if local_key in helper.metadata.posters and not helper.force:
+            elif local_key in helper.metadata.posters and not helper.force:
                 local_set = True
             else:
                 cover_bytes = local_cover_bytes(helper)
@@ -2786,23 +2858,32 @@ class AudiobookAlbum(Agent.Album):
         # (primary_order = 1 when preferring local), so the operator can switch to
         # it and a later Refresh mirrors that pick back to cover.jpg.
         if helper.thumb:
-            if helper.thumb not in helper.metadata.posters or helper.force:
+            if remembered is not None:
+                # A sibling track already fetched, judged, and offered (or
+                # withheld) the online cover this pass; online_redundant came
+                # back with the other flags. Re-running the offer here with no
+                # bytes in hand would fail open and re-offer the very
+                # duplicate the first track suppressed.
+                pass
+            elif helper.thumb not in helper.metadata.posters or helper.force:
                 thumb_data = fetch_url_bytes(helper.thumb)
                 # Offering an online cover that is byte-identical to the local
                 # cover.jpg just lists the SAME picture twice in the picker (Plex
                 # keys each source separately, so one image can appear under our
                 # online key, our local key, our upload, and Local Media Assets'
-                # own entries). Skip the redundant one. Re-evaluated on every
-                # refresh against the CURRENT file, so replacing cover.jpg with a
-                # different image makes the online cover an option again -- the
-                # alternative stays available exactly when it is actually an
-                # alternative.
-                if (
-                    thumb_data is not None
-                    and local_set
-                    and cover_bytes
-                    and thumb_data == cover_bytes
-                ):
+                # own entries). Skip the redundant one -- ALSO when the local
+                # copy itself was withheld as a cross-source duplicate
+                # (mirror_skipped): the bytes are on display either way, and
+                # keying this on local_set alone meant the very pass that
+                # suppressed the local copy re-offered the identical online one.
+                # Re-evaluated on every refresh against the CURRENT file, so
+                # replacing cover.jpg with a different image makes the online
+                # cover an option again -- the alternative stays available
+                # exactly when it is actually an alternative.
+                online_redundant = online_copy_is_redundant(
+                    thumb_data, cover_bytes, local_set, mirror_skipped
+                )
+                if online_redundant:
                     log.info(
                         'incipit cover: online cover is byte-identical to '
                         'cover.jpg -- not offering a duplicate'
@@ -2836,13 +2917,51 @@ class AudiobookAlbum(Agent.Album):
                 # becomes the default by sort_order=0; validate_keys is what
                 # decides membership, not priority.
                 keep = [helper.thumb]
+                # The online copy is itself the duplicate when its bytes are
+                # the displayed cover.jpg bytes -- keeping its stale entry
+                # would re-create through the online key the very duplicate
+                # the mirror skip removed. online_redundant was judged where
+                # the bytes were in hand (this track or a sibling's memo);
+                # an unjudged entry fails open.
+                if online_redundant:
+                    keep = []
                 # When the mirror offer was withheld as a cross-source
                 # duplicate, leaving its old entry in the membership list
                 # would defeat the skip -- the stale tile is exactly the
                 # duplicate being removed. Excluding it here prunes it.
                 if local_key in helper.metadata.posters and not mirror_skipped:
                     keep.append(local_key)
-                helper.metadata.posters.validate_keys(keep)
+                try:
+                    helper.metadata.posters.validate_keys(keep)
+                except Exception as e:
+                    log.error('incipit cover: membership prune failed (%s)', e)
+        elif mirror_skipped and local_key in helper.metadata.posters:
+            # A thumb-less record (Hardcover/OpenLibrary book-level match)
+            # never enters the membership pass above -- but its stale mirror
+            # entry is exactly the duplicate the skip exists to remove, and
+            # it was skipped-but-never-pruned, keeping the duplicate tile
+            # forever. mirror_skipped guarantees the selection is a
+            # non-incipit key, so pruning our namespace cannot touch it.
+            try:
+                helper.metadata.posters.validate_keys([])
+                log.info(
+                    'incipit cover: pruned the stale local-mirror entry '
+                    '(no online cover to anchor the keep-list)'
+                )
+            except Exception as e:
+                log.error('incipit cover: stale-mirror prune failed (%s)', e)
+
+        # Carry this track's decisions to its siblings -- AFTER the online
+        # block, so online_redundant is part of the record. Only when this
+        # track actually computed them (a memo hit changes nothing), and only
+        # under prefer_local (with it off, none of these flags can be set).
+        # Recorded even when cover.jpg was absent: "there is nothing to do"
+        # is also a decision the other 26 tracks should not re-derive.
+        if prefer_local and remembered is None:
+            remember_album_cover_decision(
+                helper.metadata.guid, helper.force,
+                (local_set, mirror_skipped, deferred_portrait_local,
+                 poisoned_local, online_redundant))
 
         # Local cover, force-select via the trusted Plex API so a dropped/replaced
         # cover.jpg takes effect on Refresh Metadata even on an ALREADY-scanned
