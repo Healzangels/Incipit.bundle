@@ -115,6 +115,11 @@ def strip_part_index(title):
 # groups on a book-folder name, stripped to recover a clean TITLE from the
 # folder when the album tag is missing. Mid-string parens/brackets are kept
 # (only a run of trailing groups is removed).
+# Synthetic incipit record ids the API can resolve via /books/{id}. B0 ASINs
+# stay in the sidecar's `asin` field with its own guards; this is only for
+# records that have no ASIN at all.
+SIDECAR_INCIPIT_ID_RE = re.compile(
+    r'^(?:openlibrary|hardcover|overdrive)[A-Za-z0-9_-]+$')
 FOLDER_TITLE_YEAR_PREFIX_RE = re.compile(r'^\s*(?:19|20)\d{2}\s*[-_.]\s*')
 FOLDER_TITLE_TRAILING_RE = re.compile(r'(?:\s*[\[\(][^\]\)]*[\]\)]\s*)+$')
 
@@ -218,6 +223,21 @@ class SearchTool:
         """
             Checks filename (for books) and/or search query for ASIN to quick match.
         """
+        # A sidecar `incipit_id` is the operator's hand-written record pin for
+        # a recording no catalog carries (the 2010: Odyssey Two class: an NLS
+        # talking book whose only honest record is a narrator-less OpenLibrary
+        # work row -- confidence scoring can never safely auto-apply one). It
+        # rides the same deterministic quick-match lane as an embedded ASIN,
+        # outranking a filename ASIN because a human wrote it, and like the
+        # filename ASIN it never overrides a TYPED search (the user actively
+        # correcting identity).
+        if self.content_type == 'books' and not self.is_typed_search():
+            incipit_id = self.sidecar_incipit_id()
+            if incipit_id:
+                log.info('incipit id pin found in sidecar: %s', incipit_id)
+                self.check_for_region(incipit_id)
+                return incipit_id + '_' + self.region_override
+
         # Check filename for ASIN if content type is books.
         # NOT on a TYPED Fix Match search: this quick match runs BEFORE
         # build_search_args, so an ungated filename ASIN re-pinned exactly the
@@ -380,6 +400,33 @@ class SearchTool:
             log.error('incipit sidecar: read/parse failed (%s)', e)
         self.sidecar_cache = result
         return result
+
+    def sidecar_incipit_id(self):
+        """
+            The operator's explicit record pin from the sidecar, or None.
+
+            Unlike every other sidecar field this is never machine-written:
+            Audiobookshelf has no such key, so its presence means a human said
+            "this file IS this record". Accepts only synthetic incipit
+            namespaces (openlibrary-*/hardcover-*/overdrive-*) -- a B0 ASIN
+            belongs in the `asin` field, and anything else (URLs, ISBNs,
+            typos) is logged and ignored so a malformed pin degrades to a
+            normal search rather than a bogus quick match.
+        """
+        sidecar = self.sidecar()
+        if not sidecar:
+            return None
+        value = sidecar.get('incipit_id')
+        if not isinstance(value, (str, unicode)):
+            return None
+        value = value.strip()
+        if SIDECAR_INCIPIT_ID_RE.match(value):
+            return value
+        if value:
+            log.info(
+                'incipit id pin: ignoring unrecognized sidecar incipit_id %s',
+                value)
+        return None
 
     def sidecar_names(self, value):
         """

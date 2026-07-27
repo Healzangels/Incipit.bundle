@@ -42,6 +42,7 @@ def tool_for(sidecar=None, filename=None, album=None, artist=None):
     """An AlbumSearchTool wired to one fake book, with no Plex behind it."""
     tool = ST.AlbumSearchTool.__new__(ST.AlbumSearchTool)
     tool.prefs = dict(plexenv.FakePrefs.DEFAULTS)
+    tool.content_type = 'books'
     tool.media = FakeMedia(filename=filename, album=album, artist=artist)
     tool.manual = False
     tool.normalizedName = album or ''
@@ -226,3 +227,42 @@ class TestArtistRecoveryTitle(unittest.TestCase):
     def test_file_basename_remains_the_last_resort(self):
         tool = artist_tool_for(sidecar=None, album=None, filename=self.FN)
         self.assertEqual(tool.artist_album_title(), 'The Hand of Oberon')
+
+
+class TestSidecarIncipitIdQuickMatch(unittest.TestCase):
+    """
+        The operator's record pin for a recording no catalog knows (the
+        2010: Odyssey Two class: an NLS talking book whose only honest match
+        is a narrator-less OpenLibrary work row -- confidence scoring can
+        NEVER safely auto-apply such a record, and shouldn't). A hand-written
+        `incipit_id` in the sidecar says "this file IS this record": it
+        quick-matches at 100 through the same lane as an embedded ASIN,
+        entirely deterministic, and survives every rebuild. Synthetic
+        incipit namespaces only -- B0 ASINs belong in the `asin` field with
+        its own guards -- and like the filename ASIN it never rides a TYPED
+        search, which is the user actively correcting identity.
+    """
+
+    def test_sidecar_incipit_id_quick_matches(self):
+        sc = {'incipit_id': 'openlibrary-works-OL36469512W'}
+        tool = tool_for(sidecar=sc, album='2010: Odyssey Two')
+        self.assertEqual(tool.check_for_asin(), 'openlibrary-works-OL36469512W_us')
+
+    def test_all_synthetic_namespaces_accepted(self):
+        for rid in ('hardcover-edition-666221', 'hardcover-book-429510',
+                    'overdrive-9406208'):
+            tool = tool_for(sidecar={'incipit_id': rid}, album='Some Book')
+            self.assertEqual(tool.check_for_asin(), rid + '_us')
+
+    def test_typed_search_ignores_the_pin(self):
+        tool = tool_for(sidecar={'incipit_id': 'openlibrary-works-OL36469512W'},
+                        album='Odyssey Two')
+        tool.manual = True
+        tool.media.name = 'Odyssey Two'
+        self.assertIsNone(tool.check_for_asin())
+
+    def test_junk_and_foreign_values_are_ignored(self):
+        for bad in ('B017V4NOZ0', 'https://openlibrary.org/OL1W', '../../etc',
+                    '', 42, None):
+            tool = tool_for(sidecar={'incipit_id': bad}, album='Some Book')
+            self.assertIsNone(tool.check_for_asin())
