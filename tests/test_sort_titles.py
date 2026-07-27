@@ -63,3 +63,34 @@ class TestSortTitleHygiene(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HyphenatedWordsSurviveSeriesStrip(unittest.TestCase):
+    """
+        Measured live on Harry Potter and the Half-Blood Prince (2026-07-27):
+        the series-suffix pattern accepted a MID-WORD hyphen as its delimiter
+        ('Half-Blood Prince, Book 6' -> stripped from the '-' on), displaying
+        'Harry Potter and the Half' through two rebuilds. A dash only counts
+        as a series delimiter when whitespace precedes it; colons stay valid
+        unspaced, and the ', Book N' pattern still cleans the tail.
+    """
+
+    def test_the_half_blood_prince_case(self):
+        self.assertEqual(
+            UT.strip_trailing_series('Harry Potter and the Half-Blood Prince, Book 6'),
+            'Harry Potter and the Half-Blood Prince')
+
+    def test_spaced_dash_series_suffix_still_strips(self):
+        self.assertEqual(
+            UT.strip_trailing_series('The Blade Itself - The First Law, Book 1'),
+            'The Blade Itself')
+
+    def test_colon_series_suffix_still_strips(self):
+        self.assertEqual(
+            UT.strip_trailing_series('Wintersteel: Cradle, Book 8'),
+            'Wintersteel')
+
+    def test_hyphenated_title_without_suffix_untouched(self):
+        self.assertEqual(
+            UT.strip_trailing_series('The Well-Favored Man'),
+            'The Well-Favored Man')

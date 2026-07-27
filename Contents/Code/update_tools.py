@@ -30,7 +30,12 @@ SERIES_SUBTITLE_RE = re.compile(
 # -- only an unambiguous series+number tail. Mirrors the incipit-api
 # SERIES_SUFFIX so the DISPLAY title matches how the book was matched.
 SERIES_TITLE_SUFFIX_RE = [
-    re.compile(r'\s*[:\-–—]\s*[^:]*?\bbook\s+\d+\s*$', re.IGNORECASE),
+    # A dash counts as a series delimiter ONLY when whitespace precedes it:
+    # with the bare [\-] class a MID-WORD hyphen qualified, and 'Harry Potter
+    # and the Half-Blood Prince, Book 6' stripped from the '-' on, displaying
+    # 'Harry Potter and the Half' through two rebuilds (2026-07-27). Colons
+    # keep matching unspaced ('Wintersteel: Cradle, Book 8').
+    re.compile(r'(?:\s*:|\s+[\-–—])\s*[^:]*?\bbook\s+\d+\s*$', re.IGNORECASE),
     re.compile(r'\s*\([^)]*#\s*\d+\s*\)\s*$'),
     re.compile(r'\s*,\s*book\s+\d+\s*$', re.IGNORECASE),
 ]
