@@ -38,9 +38,19 @@ class TestAuthorUpdateCacheTime(unittest.TestCase):
         AG.Prefs['dev_disable_http_cache'] = True
         self.assertEqual(AG.author_update_cache_time(), 0)
 
+    def test_an_operator_force_bypasses_it(self):
+        # An explicit Refresh Metadata must see the healed record NOW, not
+        # replay a pre-heal body for up to an hour -- the same rule the
+        # search path already follows (a manual Fix Match passes cache 0).
+        AG.Prefs['dev_disable_http_cache'] = False
+        self.assertEqual(AG.author_update_cache_time(True), 0)
+        self.assertEqual(AG.author_update_cache_time(False), AG.CACHE_1HOUR)
+
     def test_the_author_call_site_passes_it(self):
-        # The TTL only matters if the author call_item_api actually passes it;
-        # a bare make_request(update_url) silently inherits the week default.
+        # The TTL only matters if the author call_item_api actually passes it
+        # (a bare make_request(update_url) silently inherits the week
+        # default) -- and passes the FORCE flag, or the operator's Refresh
+        # replays the cached pre-heal body.
         code_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             'Contents', 'Code'
@@ -49,7 +59,7 @@ class TestAuthorUpdateCacheTime(unittest.TestCase):
             src = f.read()
         start = src.index('Calls the metadata API to get author details')
         window = src[start:start + 800]
-        self.assertIn('cache_time=author_update_cache_time()', window)
+        self.assertIn('cache_time=author_update_cache_time(helper.force)', window)
 
 
 if __name__ == '__main__':
