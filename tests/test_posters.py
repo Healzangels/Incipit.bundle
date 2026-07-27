@@ -1647,3 +1647,76 @@ class CoverBlockFlowGuards(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class ConvergePrunesItsOwnDuplicate(unittest.TestCase):
+    """
+        The instant converge_author_art's upload is selected, the agent's
+        CONTAINER copy of the same image becomes a duplicate -- and the
+        offer-time dedupe cannot see an upload that does not exist yet, so
+        the picker showed the new picture twice for exactly one pass
+        (measured live on Robert Harris, 2026-07-27; the next refresh's
+        author-offer dedupe then withheld it). Prune where the knowledge
+        is: right after the select lands. The OTHER image stays -- byte-
+        identical shown once, unique alternatives never hidden -- and the
+        selection is the upload:// key, so the prune cannot touch it.
+    """
+
+    TARGET = 'https://hardcover/new-portrait.jpg'
+    OTHER = 'https://audible/photo.jpg'
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        self.saved = (AG.read_poster_state, AG.fetch_url_bytes,
+                      AG.upload_and_select_poster)
+        AG.read_poster_state = lambda guid, tag: (
+            '101', 'metadata://posters/com.plexapp.agents.incipit_aaaa',
+            ['metadata://posters/com.plexapp.agents.incipit_aaaa'], None)
+        AG.fetch_url_bytes = lambda url: b'\xff\xd8 the converged image'
+        self.validated = []
+
+    def tearDown(self):
+        (AG.read_poster_state, AG.fetch_url_bytes,
+         AG.upload_and_select_poster) = self.saved
+        AG.recent_work_memo.clear()
+
+    def _helper(self, keys):
+        outer = self
+
+        class FakePosters(dict):
+            def validate_keys(self, keep):
+                outer.validated.append(list(keep))
+
+        class FakeMetadata(object):
+            guid = 'com.plexapp.agents.incipit://CONVTEST_us'
+            posters = FakePosters()
+
+        for k in keys:
+            FakeMetadata.posters[k] = 'proxy'
+
+        class FakeHelper(object):
+            metadata = FakeMetadata()
+
+        return FakeHelper()
+
+    def test_a_successful_select_prunes_the_container_copy(self):
+        AG.upload_and_select_poster = lambda *a, **kw: True
+        helper = self._helper([self.TARGET, self.OTHER])
+        AG.converge_author_art(
+            helper, self.TARGET, self.OTHER, 'incipit author-art-fit')
+        self.assertEqual(self.validated, [[self.OTHER]])
+
+    def test_a_declined_select_prunes_nothing(self):
+        # The stand-down paths (user upload, de-selection respected, spent
+        # pad budget) leave the container exactly as it was.
+        AG.upload_and_select_poster = lambda *a, **kw: False
+        helper = self._helper([self.TARGET, self.OTHER])
+        AG.converge_author_art(
+            helper, self.TARGET, self.OTHER, 'incipit author-art-fit')
+        self.assertEqual(self.validated, [])
+
+    def test_no_container_copy_means_no_prune(self):
+        AG.upload_and_select_poster = lambda *a, **kw: True
+        helper = self._helper([self.OTHER])
+        AG.converge_author_art(
+            helper, self.TARGET, self.OTHER, 'incipit author-art-fit')
+        self.assertEqual(self.validated, [])

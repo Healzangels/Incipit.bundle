@@ -1517,8 +1517,30 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
     # v1.3.112 "a de-selection is a person's choice" stand-down misreads it and
     # wedges the pref after one round trip. The ownership gate above has already
     # established no USER upload is being overridden.
-    upload_and_select_poster(guid, target_bytes, tag, token=target_url,
-                             state=state, pref_asserted=True)
+    acted = upload_and_select_poster(guid, target_bytes, tag, token=target_url,
+                                     state=state, pref_asserted=True)
+    # The instant the select lands, the upload displays these bytes -- and the
+    # agent's own CONTAINER copy of the same image is a duplicate the picker
+    # will show alongside it until the NEXT pass's offer-time dedupe catches
+    # up (measured live on Robert Harris, 2026-07-27: the new picture listed
+    # twice for exactly one refresh). Prune it here, where the knowledge is.
+    # The OTHER image stays offered -- byte-identical shown once, unique
+    # alternatives never hidden -- and the selection is the upload:// key, so
+    # this cannot touch it. On the stand-down paths (acted False) the
+    # container is left exactly as it was.
+    if acted:
+        try:
+            if target_url in helper.metadata.posters:
+                keep = []
+                if other_url and other_url in helper.metadata.posters:
+                    keep.append(other_url)
+                helper.metadata.posters.validate_keys(keep)
+                log.info(
+                    '%s: pruned our container copy of the just-selected image',
+                    tag
+                )
+        except Exception as e:
+            log.error('%s: container prune failed (%s)', tag, e)
 
 
 def correct_portrait_selection(helper, cover_bytes, square_bytes):
