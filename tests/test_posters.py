@@ -1922,3 +1922,147 @@ class PassGuardIsTheMemoNotContainerMembership(unittest.TestCase):
         src = self.source()
         self.assertIn('album_cover_decision(', src)
         self.assertIn('remember_album_cover_decision(', src)
+
+
+class TestPerceptualConsult(unittest.TestCase):
+    """
+        v1.3.149: byte identity misses re-encodes of the SAME picture (census
+        2026-07-27: four artists showed a hand-uploaded author photo next to
+        our byte-different copy -- distances 0-2, invisible to same_image, so
+        refreshes could never heal them). images_similar_via_api asks the
+        api's POST /images/similar for a perceptual verdict; every failure
+        answers None and callers treat None as "not similar" (fail-open: a
+        duplicate tile is cosmetic, a hidden poster option is not).
+
+        Memo contract: definitive verdicts (similar / dissimilar /
+        undecodable) are remembered for the process lifetime because the same
+        two blobs recur on every refresh pass; TRANSIENT failures are NOT
+        memoized, so one network blip cannot pin a pair to "no verdict"
+        until the next Plex restart.
+    """
+
+    A = b'\xff\xd8AAAA'
+    B = b'\xff\xd8BBBB'
+
+    def setUp(self):
+        import types as T
+        self.T = T
+        self.calls = []
+        self.real_http = AG.HTTP
+        AG.Prefs['api_base_url'] = 'http://api.test:3737'
+        AG.PERCEPTUAL_MEMO.clear()
+
+    def tearDown(self):
+        AG.HTTP = self.real_http
+        AG.Prefs.pop('api_base_url', None)
+        AG.PERCEPTUAL_MEMO.clear()
+
+    def http_answering(self, body):
+        def request(url, **kw):
+            self.calls.append((url, kw))
+            return self.T.SimpleNamespace(content=body)
+        AG.HTTP = self.T.SimpleNamespace(Request=request)
+
+    def http_failing(self):
+        def request(url, **kw):
+            self.calls.append((url, kw))
+            raise Exception('connection refused')
+        AG.HTTP = self.T.SimpleNamespace(Request=request)
+
+    def test_no_api_base_url_no_call(self):
+        AG.Prefs.pop('api_base_url', None)  # falls to the blank default
+        self.http_answering('{"similar": true}')
+        self.assertIsNone(AG.images_similar_via_api(self.A, self.B, 't'))
+        self.assertEqual(self.calls, [])
+
+    def test_similar_verdict_comes_back_true(self):
+        self.http_answering(
+            '{"similar": true, "distance": 1, "undecodable": false}')
+        self.assertIs(AG.images_similar_via_api(self.A, self.B, 't'), True)
+        url, kw = self.calls[0]
+        self.assertTrue(url.endswith('/images/similar'))
+        self.assertIn('"a"', kw['data'])
+
+    def test_dissimilar_verdict_comes_back_false(self):
+        self.http_answering(
+            '{"similar": false, "distance": 31, "undecodable": false}')
+        self.assertIs(AG.images_similar_via_api(self.A, self.B, 't'), False)
+
+    def test_verdicts_are_memoized_either_order(self):
+        self.http_answering(
+            '{"similar": true, "distance": 0, "undecodable": false}')
+        AG.images_similar_via_api(self.A, self.B, 't')
+        self.assertIs(AG.images_similar_via_api(self.B, self.A, 't'), True)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_undecodable_is_a_memoized_none(self):
+        self.http_answering(
+            '{"similar": false, "distance": null, "undecodable": true}')
+        self.assertIsNone(AG.images_similar_via_api(self.A, self.B, 't'))
+        self.assertIsNone(AG.images_similar_via_api(self.A, self.B, 't'))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_transient_failure_is_not_memoized(self):
+        self.http_failing()
+        self.assertIsNone(AG.images_similar_via_api(self.A, self.B, 't'))
+        self.http_answering(
+            '{"similar": true, "distance": 2, "undecodable": false}')
+        self.assertIs(AG.images_similar_via_api(self.A, self.B, 't'), True)
+        self.assertEqual(len(self.calls), 2)
+
+
+class TestPerceptualWithhold(unittest.TestCase):
+    """
+        duplicate_shown_elsewhere falls back to the perceptual consult when
+        bytes differ -- and every existing rail stays exactly as strong: the
+        consult is only reached where the byte check already ran, so no
+        selection, fresh scan, or own-key state can be affected by it.
+    """
+
+    IMG = b'\xff\xd8IMAGEBYTES'
+    REENCODE = b'\xff\xd8SAMEPICTUREOTHERBYTES'
+    OWN = 'metadata://posters/com.plexapp.agents.incipit_124a757ccdffc12d2dbe1a4bdf291e5c6bebf1cc'
+    UPLOAD = 'upload://posters/aaaa0000bbbb1111cccc2222dddd3333eeee4444'
+    LOCAL_KEY = 'incipit-local-cover'
+
+    def setUp(self):
+        self.real_pfb = AG.poster_file_bytes
+        self.real_consult = AG.images_similar_via_api
+        self.store = {}
+        AG.poster_file_bytes = lambda rk, key, tag: self.store.get(key)
+
+    def tearDown(self):
+        AG.poster_file_bytes = self.real_pfb
+        AG.images_similar_via_api = self.real_consult
+
+    def state(self, selected, keys):
+        return ('101', selected, keys, None)
+
+    def test_perceptual_twin_withheld(self):
+        self.store[self.UPLOAD] = self.REENCODE
+        AG.images_similar_via_api = lambda a, b, tag: True
+        st = self.state(self.UPLOAD, [self.OWN, self.UPLOAD])
+        self.assertTrue(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_no_verdict_fails_open(self):
+        self.store[self.UPLOAD] = self.REENCODE
+        AG.images_similar_via_api = lambda a, b, tag: None
+        st = self.state(self.UPLOAD, [self.OWN, self.UPLOAD])
+        self.assertFalse(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_genuinely_different_still_offered(self):
+        self.store[self.UPLOAD] = self.REENCODE
+        AG.images_similar_via_api = lambda a, b, tag: False
+        st = self.state(self.UPLOAD, [self.OWN, self.UPLOAD])
+        self.assertFalse(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_own_key_selected_rail_beats_the_consult(self):
+        self.store[self.UPLOAD] = self.REENCODE
+        AG.images_similar_via_api = lambda a, b, tag: True
+        st = self.state(AG.own_container_key(self.LOCAL_KEY),
+                        [self.OWN, self.UPLOAD])
+        self.assertFalse(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))

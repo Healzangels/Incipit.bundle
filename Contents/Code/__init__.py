@@ -1066,6 +1066,64 @@ def own_container_key(dict_key):
 DUPLICATE_CHECK_MAX_FETCHES = 6
 
 
+# Perceptual verdicts per unordered byte-pair, for the process lifetime: the
+# same two blobs are re-compared on every refresh pass. Only DEFINITIVE
+# verdicts are stored (similar / dissimilar / undecodable-None); transient
+# network failures are not, so one blip cannot pin a pair to "no verdict"
+# until the next Plex restart.
+PERCEPTUAL_MEMO = {}
+PERCEPTUAL_MEMO_MAX = 512
+
+
+def images_similar_via_api(first, second, tag):
+    """
+        True when the api judges `first` and `second` to be the SAME picture
+        in different bytes (a re-encode or resize), False when genuinely
+        different, None when no verdict is available (api_base_url unset,
+        network failure, undecodable image). Callers must treat None exactly
+        like False -- fail-open, because a duplicate tile is cosmetic and a
+        hidden poster option is not.
+
+        Exists because byte identity misses re-encodes: census 2026-07-27
+        found four artists showing a hand-uploaded author photo next to our
+        byte-different copy of the same picture, invisible to same_image, so
+        no refresh could ever heal them.
+    """
+    try:
+        base = Prefs['api_base_url']
+    except Exception:
+        return None
+    if not base or not first or not second:
+        return None
+    key_a = hashlib.sha1(first).hexdigest()
+    key_b = hashlib.sha1(second).hexdigest()
+    memo_key = key_a + key_b if key_a < key_b else key_b + key_a
+    if memo_key in PERCEPTUAL_MEMO:
+        return PERCEPTUAL_MEMO[memo_key]
+    try:
+        payload = json.dumps({
+            'a': String.Base64Encode(first),
+            'b': String.Base64Encode(second),
+        })
+        answer = json.loads(HTTP.Request(
+            base.rstrip('/') + '/images/similar',
+            data=payload,
+            headers={'Content-Type': 'application/json'},
+            timeout=10, cacheTime=0
+        ).content)
+    except Exception as e:
+        log.info('%s: perceptual consult unavailable (%s)', tag, e)
+        return None
+    if answer.get('undecodable'):
+        verdict = None
+    else:
+        verdict = bool(answer.get('similar'))
+    if len(PERCEPTUAL_MEMO) >= PERCEPTUAL_MEMO_MAX:
+        PERCEPTUAL_MEMO.clear()
+    PERCEPTUAL_MEMO[memo_key] = verdict
+    return verdict
+
+
 def duplicate_shown_elsewhere(state, image_bytes, own_dict_key, tag):
     """
         True when a NON-incipit container poster (an upload, Local Media
@@ -1112,6 +1170,18 @@ def duplicate_shown_elsewhere(state, image_bytes, own_dict_key, tag):
             log.info(
                 '%s: %s already shows this image -- not listing our copy',
                 tag, key
+            )
+            return True
+        # Byte identity missed; ask the api whether it is the same PICTURE
+        # in different bytes (re-encode/resize of a hand upload, LMA's copy
+        # of the embedded art). `is True` because None means "no verdict"
+        # and must fail open like every other dedupe rail.
+        if data is not None and images_similar_via_api(
+            image_bytes, data, tag
+        ) is True:
+            log.info(
+                '%s: %s already shows this picture (re-encode) -- '
+                'not listing our copy', tag, key
             )
             return True
     return False

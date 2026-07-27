@@ -115,6 +115,11 @@ def _make_framework():
         StripDiacritics=_strip_diacritics,
         Quote=urllib.parse.quote,
         Unquote=urllib.parse.unquote,
+        # Plex's String.Base64Encode takes str bytes (py2) and returns the
+        # ascii b64 str; the py3 shim accepts both bytes and str.
+        Base64Encode=lambda data: __import__('base64').b64encode(
+            data if isinstance(data, bytes) else data.encode('utf-8')
+        ).decode('ascii'),
     )
     Util = types.SimpleNamespace(LevenshteinDistance=_levenshtein)
     Locale = types.SimpleNamespace(
