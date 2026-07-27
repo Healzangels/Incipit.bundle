@@ -1634,18 +1634,24 @@ def select_best_fit_author_art(helper, thumb_dims, secondary_dims):
 
         Does nothing without evidence: an unmeasurable image, a missing second
         image, or two identically-sized ones all leave the artist alone rather
-        than spend an upload/select round trip to change nothing.
+        than spend an upload/select round trip to change nothing -- and SAYS
+        so: returns True only when a verdict was formed. The caller needs the
+        difference, because with the pref defaulting on this branch swallows
+        every two-image author, and a silent no-op here made the unpin
+        fallback (the pre-1.3.132 stuck-pin remedy) unreachable for exactly
+        the authors it exists to heal.
     """
     if not helper.thumb or not helper.thumb_secondary:
-        return
+        return False
     if not thumb_dims or not secondary_dims or thumb_dims == secondary_dims:
-        return
+        return False
     winner = better_square_portrait(thumb_dims, secondary_dims)
     if winner is thumb_dims:
         target, other = helper.thumb, helper.thumb_secondary
     else:
         target, other = helper.thumb_secondary, helper.thumb
     converge_author_art(helper, target, other, 'incipit author-art-fit')
+    return True
 
 
 def select_sole_author_art(helper):
@@ -2372,11 +2378,21 @@ class AudiobookArtist(Agent.Artist):
             if prefer_hardcover:
                 select_hardcover_author_art(helper)
             elif Prefs['prefer_square_author_art'] and helper.thumb_secondary:
-                # Opt-in: converge an already-scanned artist onto whichever
-                # portrait fills the square tile better. The container ordering
-                # above only decides on a FRESH scan, so without this an
-                # existing library never benefits.
-                select_best_fit_author_art(helper, thumb_dims, secondary_dims)
+                # Converge an already-scanned artist onto whichever portrait
+                # fills the square tile better (default-on since v1.3.132).
+                # The container ordering above only decides on a FRESH scan,
+                # so without this an existing library never benefits.
+                #
+                # Default-on also means this branch swallows every two-image
+                # author -- so when the fit has NO VERDICT (unmeasurable or
+                # identical dims), fall through to the pre-1.3.132 remedy:
+                # a stuck agent-upload pin still reverts to the Audible
+                # photo. With a verdict, the convergence IS the policy and
+                # must not be undone.
+                if not select_best_fit_author_art(
+                    helper, thumb_dims, secondary_dims
+                ):
+                    unpin_hardcover_author_art(helper)
             elif helper.thumb and not helper.thumb_secondary:
                 # Exactly one image exists, so there is nothing to defer TO: the
                 # unpin below would leave the artist with no poster at all.

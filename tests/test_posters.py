@@ -506,11 +506,13 @@ class BestFitAuthorArtSelect(unittest.TestCase):
     keeps whatever Plex persisted -- which is why 39 artists in the live library
     sat on the worse-fitting portrait even after the ordering was fixed.
 
-    `prefer_square_author_art` opts into force-selecting the better fit on an
-    already-scanned artist. OFF by default: it re-selects images the operator
-    may have chosen by hand, and a container key is indistinguishable from a
-    deliberate click (the same reason unpin_hardcover_author_art refuses to
-    touch one). Opting in is the operator saying they want the tile filled.
+    `prefer_square_author_art` force-selects the better fit on an
+    already-scanned artist. ON by default since v1.3.132 (operator decision:
+    the ownership gate already refuses user uploads, so the only overridable
+    class is the agent's own two provider images). Because the default-on
+    elif now swallows every two-image author in update(), the function must
+    REPORT whether it formed a verdict -- a silent no-op made the unpin
+    fallback unreachable for exactly the stuck-pin class it exists to heal.
     """
 
     def setUp(self):
@@ -559,6 +561,35 @@ class BestFitAuthorArtSelect(unittest.TestCase):
         helper.thumb_secondary = ''
         AG.select_best_fit_author_art(helper, (270, 270), (211, 250))
         self.assertEqual(self.calls, [])
+
+    def test_a_verdict_is_reported_to_the_caller(self):
+        self.assertTrue(AG.select_best_fit_author_art(
+            self._helper(), (270, 270), (211, 250)))
+
+    def test_no_evidence_is_reported_as_no_verdict(self):
+        # The caller needs to KNOW nothing was decided, so the pre-1.3.132
+        # remedy (unpin a stuck agent pin) can still run on the no-opinion
+        # paths. A silent no-op left the pin stuck forever.
+        self.assertFalse(AG.select_best_fit_author_art(
+            self._helper(), None, None))
+        self.assertFalse(AG.select_best_fit_author_art(
+            self._helper(), (500, 500), (500, 500)))
+        helper = self._helper()
+        helper.thumb_secondary = ''
+        self.assertFalse(AG.select_best_fit_author_art(
+            helper, (270, 270), (211, 250)))
+
+    def test_update_falls_through_to_unpin_when_no_verdict(self):
+        # The elif in update() swallows every two-image author now that the
+        # pref defaults ON; without this fall-through the unpin branch is
+        # unreachable for them and a stuck agent-upload pin never reverts.
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'Contents', 'Code', '__init__.py'
+        )
+        with open(path) as f:
+            src = f.read()
+        self.assertIn('if not select_best_fit_author_art(', src)
 
 
 class SelectionAlreadyShowsThisImage(unittest.TestCase):
