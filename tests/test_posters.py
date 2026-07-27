@@ -1496,6 +1496,21 @@ class TestSandboxBuiltinGuards(unittest.TestCase):
                     out.append((name, f.read()))
         return out
 
+    def test_no_unicode_error_names_in_except_clauses(self):
+        # UnicodeDecodeError / UnicodeEncodeError have no in-repo whitelist
+        # precedent -- the same class as the bytes kill, made worse by py2
+        # evaluating except TUPLES lazily: a missing name becomes a NameError
+        # at the exact moment the fallback should fire, aborting the whole
+        # update on precisely the input the fallback exists to survive.
+        # ValueError is their superclass (Unicode*Error < UnicodeError <
+        # ValueError) and HAS precedent (json_decode) -- catch that instead.
+        import re as re_mod
+        for name, src in self.code_sources():
+            self.assertIsNone(
+                re_mod.search(r'except[^\n]*Unicode\w*Error', src),
+                '%s catches a Unicode error by NAME; use ValueError' % name
+            )
+
     def test_no_bare_bytes_builtin(self):
         # `image_bytes`/`cover_bytes` etc. are fine -- only the bare NAME is
         # forbidden (isinstance second args, bytes(...) calls).

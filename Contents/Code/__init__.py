@@ -1044,10 +1044,15 @@ def own_container_key(dict_key):
     # the py3 harness both passed; guarded by TestSandboxBuiltinGuards).
     # encode() covers every real input instead: py2 str (ascii keys
     # round-trip), py2 unicode, py3 str; anything without .encode (the py3
-    # harness's byte strings) is already hashable as-is.
+    # harness's byte strings) is already hashable as-is. ValueError, not the
+    # Unicode error names: those have no whitelist precedent either, and py2
+    # evaluates except tuples LAZILY -- an unwhitelisted name in the tuple is
+    # a NameError at the exact moment the fallback should fire. Unicode
+    # decode/encode errors both subclass ValueError, which json_decode
+    # already proves whitelisted.
     try:
         key_bytes = dict_key.encode('utf-8')
-    except (AttributeError, UnicodeDecodeError):
+    except (AttributeError, ValueError):
         key_bytes = dict_key
     return ('metadata://posters/com.plexapp.agents.incipit_'
             + hashlib.sha1(key_bytes).hexdigest())

@@ -1502,13 +1502,19 @@ class ArtistSearchTool(SearchTool):
         """The decoded file path for this artist's album, or None. The artist
            search media carries media.filename (confirmed live). decode() is
            py2-only (the harness's unquote returns py3 str), so fall back to
-           the raw value -- path comparisons work on it either way."""
+           the raw value -- path comparisons work on it either way.
+           ValueError, not the Unicode error names: py2 unicode.decode
+           round-trips through an implicit ASCII encode, so a non-ASCII path
+           raises the ENCODE error, and neither Unicode name has a sandbox
+           whitelist precedent (a missing name in a lazily-evaluated except
+           tuple is a NameError right when the fallback should fire). Both
+           directions subclass ValueError, which is proven whitelisted."""
         try:
             if self.media.filename:
                 raw = urllib.unquote(self.media.filename)
                 try:
                     return raw.decode('utf8')
-                except (AttributeError, UnicodeDecodeError):
+                except (AttributeError, ValueError):
                     return raw
         except Exception as e:
             log.error('incipit artist_path failed: %s', e)
