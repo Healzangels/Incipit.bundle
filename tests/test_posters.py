@@ -1336,3 +1336,107 @@ class SquareTieBandCalibration(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestDuplicateShownElsewhere(unittest.TestCase):
+    """
+        v1.3.133: the same picture must not be LISTED twice however many
+        sources hold it, while a unique alternative is never hidden (operator
+        rule, 2026-07-26). duplicate_shown_elsewhere is the predicate: True
+        when a NON-incipit container poster (an upload, Local Media Assets)
+        already displays the bytes we are about to offer.
+
+        Rails, each with a test:
+          * no state / no selection yet -> False (a fresh scan needs our key
+            offered so it can be SELECTED -- the container is the only
+            selection mechanism at that point);
+          * our own key is the selection -> False (pruning the selected key is
+            the picked-poster-evaporates failure);
+          * fetch failures -> False (fail-open: a duplicate tile is cosmetic,
+            a missing poster option is not).
+    """
+
+    IMG = b'\xff\xd8IMAGEBYTES'
+    OTHER = b'\xff\xd8DIFFERENT'
+    LOCAL_KEY = 'incipit-local-cover'
+    OWN = 'metadata://posters/com.plexapp.agents.incipit_124a757ccdffc12d2dbe1a4bdf291e5c6bebf1cc'
+    UPLOAD = 'upload://posters/aaaa0000bbbb1111cccc2222dddd3333eeee4444'
+    LMA = 'metadata://posters/com.plexapp.agents.localmedia_9999888877776666555544443333222211110000'
+    ONLINE = 'metadata://posters/com.plexapp.agents.incipit_ffffeeeeddddccccbbbbaaaa99998888777766'
+
+    def setUp(self):
+        self.real_pfb = AG.poster_file_bytes
+        self.store = {}
+        AG.poster_file_bytes = lambda rk, key, tag: self.store.get(key)
+
+    def tearDown(self):
+        AG.poster_file_bytes = self.real_pfb
+
+    def state(self, selected, keys):
+        return ('101', selected, keys, None)
+
+    def test_own_container_key_matches_the_live_local_cover_key(self):
+        # The real-world anchor: sha1('incipit-local-cover') is the container
+        # key every local-cover selection has used since 1.3.31.
+        self.assertEqual(AG.own_container_key(self.LOCAL_KEY), self.OWN)
+
+    def test_no_state_offers_as_always(self):
+        self.assertFalse(AG.duplicate_shown_elsewhere(
+            None, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_fresh_scan_no_selection_offers_as_always(self):
+        self.store[self.UPLOAD] = self.IMG
+        st = self.state(None, [self.OWN, self.UPLOAD])
+        self.assertFalse(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_own_key_selected_offers_as_always(self):
+        # Even with an identical copy elsewhere: never undercut the selection.
+        self.store[self.UPLOAD] = self.IMG
+        st = self.state(self.OWN, [self.OWN, self.UPLOAD])
+        self.assertFalse(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_identical_selected_upload_skips_our_copy(self):
+        self.store[self.UPLOAD] = self.IMG
+        st = self.state(self.UPLOAD, [self.OWN, self.UPLOAD])
+        self.assertTrue(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_identical_lma_copy_skips_ours_even_when_unselected(self):
+        # Selection is our ONLINE cover (a different incipit key), and Local
+        # Media Assets holds a byte-identical copy of cover.jpg: our mirror
+        # adds nothing the picker doesn't already show.
+        self.store[self.LMA] = self.IMG
+        st = self.state(self.ONLINE, [self.ONLINE, self.OWN, self.LMA])
+        self.assertTrue(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_unique_alternatives_always_offered(self):
+        self.store[self.UPLOAD] = self.OTHER
+        self.store[self.LMA] = self.OTHER
+        st = self.state(self.UPLOAD, [self.OWN, self.UPLOAD, self.LMA])
+        self.assertFalse(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_incipit_keys_are_not_comparison_sources(self):
+        # Intra-agent duplication is handled where the images are OFFERED (the
+        # online-vs-local guard); this predicate only looks across sources.
+        self.store[self.ONLINE] = self.IMG
+        st = self.state(self.UPLOAD, [self.ONLINE, self.OWN, self.UPLOAD])
+        self.store[self.UPLOAD] = self.OTHER
+        self.assertFalse(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_fetch_failure_fails_open(self):
+        st = self.state(self.UPLOAD, [self.OWN, self.UPLOAD])
+        # store empty -> poster_file_bytes returns None
+        self.assertFalse(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))
+
+    def test_padded_reselect_copy_still_counts_as_the_same_picture(self):
+        padded = self.IMG + AG.RESELECT_PAD
+        self.store[self.UPLOAD] = padded
+        st = self.state(self.UPLOAD, [self.OWN, self.UPLOAD])
+        self.assertTrue(AG.duplicate_shown_elsewhere(
+            st, self.IMG, self.LOCAL_KEY, 't'))

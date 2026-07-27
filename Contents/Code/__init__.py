@@ -1013,6 +1013,94 @@ def selected_poster_bytes(rk, selected_key, tag):
         return (None, False)
 
 
+def poster_file_bytes(rk, key, tag):
+    """
+        Bytes of ANY container poster (by its ratingKey form) via the local
+        /file endpoint, or None. The generalization of selected_poster_bytes'
+        fetch, for callers comparing against posters that are NOT the
+        selection (the cross-source duplicate check).
+    """
+    if not rk or not key:
+        return None
+    try:
+        url = (PMS + '/library/metadata/' + rk + '/file?url='
+               + urllib.quote(key, ''))
+        return HTTP.Request(url, timeout=8, cacheTime=0).content
+    except Exception as e:
+        log.error('%s: could not read container poster %s (%s)', tag, key, e)
+        return None
+
+
+def own_container_key(dict_key):
+    """
+        The container ratingKey form Plex assigns to OUR poster offered under
+        `dict_key` -- the agent id plus sha1 of the key STRING (never the image
+        bytes; proven live in the v1.3.119 work). This is how a caller asks
+        "is the selection the copy I manage?" without fetching anything.
+    """
+    # py2 str hashes directly; py2 unicode and py3 str need the encode. bytes
+    # check first so the py2 str (== bytes) path never re-encodes.
+    key_bytes = dict_key if isinstance(dict_key, bytes) else dict_key.encode('utf-8')
+    return ('metadata://posters/com.plexapp.agents.incipit_'
+            + hashlib.sha1(key_bytes).hexdigest())
+
+
+# Cross-source comparisons are bounded: containers are small (2-10 posters),
+# but a runaway one must not turn a refresh into a fetch storm.
+DUPLICATE_CHECK_MAX_FETCHES = 6
+
+
+def duplicate_shown_elsewhere(state, image_bytes, own_dict_key, tag):
+    """
+        True when a NON-incipit container poster (an upload, Local Media
+        Assets, any other agent) already displays `image_bytes` -- so offering
+        our copy would just list the same picture twice.
+
+        Operator rule (2026-07-26): byte-identical means shown ONCE however
+        many sources hold it; a UNIQUE alternative is never hidden. This
+        predicate implements the first half; the always-offer contract keeps
+        the second.
+
+        Rails, in order:
+          * state None (fresh scan mid-flight, sealed sandbox) -> False;
+          * no selection yet -> False: on a fresh scan the container is the
+            ONLY selection mechanism, and our key must exist to be selected;
+          * the selection IS our own key for this image -> False: pruning the
+            selected key out from under Plex is the picked-poster-evaporates
+            failure, and a selected copy is by definition not clutter.
+        Every failure fails OPEN (offer as always): a duplicate tile is
+        cosmetic, a missing poster option is not.
+    """
+    if state is None or not image_bytes:
+        return False
+    rk, selected_key, keys = state[0], state[1], state[2]
+    if not selected_key:
+        return False
+    if selected_key == own_container_key(own_dict_key):
+        return False
+    fetched = 0
+    # The selection first: it is the copy most likely to be the duplicate
+    # (a hand upload of the same art), and one match ends the scan.
+    ordered = [k for k in keys if k == selected_key]
+    ordered += [k for k in keys if k != selected_key]
+    for key in ordered:
+        # Our own keys are managed where they are OFFERED (the online-vs-local
+        # guard); this check looks only ACROSS sources.
+        if 'com.plexapp.agents.incipit' in key:
+            continue
+        if fetched >= DUPLICATE_CHECK_MAX_FETCHES:
+            break
+        fetched += 1
+        data = poster_file_bytes(rk, key, tag)
+        if data is not None and same_image(image_bytes, data):
+            log.info(
+                '%s: %s already shows this image -- not listing our copy',
+                tag, key
+            )
+            return True
+    return False
+
+
 # Per-guid cache for the artist poster, because update() runs once per TRACK
 # and helper.force defeats the container re-read guard -- so without this a
 # forced refresh of a 27-part book paid a /library/all round-trip PLUS a full
@@ -1615,14 +1703,19 @@ def better_square_portrait(first, second):
     return first if first_short >= second_short else second
 
 
-def offer_secondary_author_poster(helper, valid_posters):
+def offer_secondary_author_poster(helper, valid_posters, dup_state=None):
     """
         Add the Audible `imageAlt` to the artist's poster container as a
         selectable option, and return the updated validate_keys list.
 
         Kept as an OPTION even for pinned authors: not wanting it selected is not
         the same as not wanting it available, and pruning it left those authors
-        with a single poster and no way to switch in the UI.
+        with a single poster and no way to switch in the UI. The one thing that
+        withholds it (v1.3.133) is byte-identity: a copy of a picture the
+        container already shows under another source's key is not an
+        alternative, so it is skipped -- and dropped from the membership list,
+        pruning any stale entry. Same rails as duplicate_shown_elsewhere:
+        fresh scans and selected keys are never touched.
     """
     if not helper.thumb_secondary or helper.thumb_secondary == helper.thumb:
         return valid_posters, None
@@ -1631,6 +1724,7 @@ def offer_secondary_author_poster(helper, valid_posters):
     # because this is where the bytes already are -- fetching them again to
     # measure would double the author-art traffic.
     secondary_dims = None
+    secondary_dup = False
     if (helper.thumb_secondary not in helper.metadata.posters or helper.force):
         # fetch_url_bytes, NOT make_request: the latter returns Plex's lazy
         # HTTPRequest wrapper, and image_dimensions below slices it -- which
@@ -1641,15 +1735,22 @@ def offer_secondary_author_poster(helper, valid_posters):
         # unnoticed from v1.3.118.
         secondary_data = fetch_url_bytes(helper.thumb_secondary)
         if secondary_data is not None:
+            # Measured even for a skipped duplicate -- the select machinery
+            # compares by URL bytes, not container membership.
+            secondary_dims = remember_dims(helper.thumb_secondary, secondary_data)
+            secondary_dup = duplicate_shown_elsewhere(
+                dup_state, secondary_data, helper.thumb_secondary,
+                'incipit author-offer')
+        if secondary_data is not None and not secondary_dup:
             helper.metadata.posters[helper.thumb_secondary] = \
                 Proxy.Media(secondary_data, sort_order=1)
-            secondary_dims = remember_dims(helper.thumb_secondary, secondary_data)
     if secondary_dims is None:
         # A pass that did not fetch (image already in the container) must still
         # KNOW the dims, or the square-fit ordering decided on pass 1 reverts
         # on pass 2 -- see IMAGE_DIMS_MEMO.
         secondary_dims = IMAGE_DIMS_MEMO.get(helper.thumb_secondary)
-    valid_posters.append(helper.thumb_secondary)
+    if not secondary_dup:
+        valid_posters.append(helper.thumb_secondary)
     return valid_posters, secondary_dims
 
 
@@ -2093,6 +2194,16 @@ class AudiobookArtist(Agent.Artist):
         # abort the whole artist update.
         thumb_dims = None
         secondary_dims = None
+        # One container-state read for the cross-source dedupe on BOTH provider
+        # images (v1.3.133): the pirate aba case, where the agent's portrait is
+        # byte-identical to the operator's selected upload and the picker shows
+        # the same face twice. None (fresh scan, sealed sandbox) fails open --
+        # both images offered exactly as before.
+        author_dup_state = None
+        if helper.thumb or helper.thumb_secondary:
+            author_dup_state = read_poster_state(
+                helper.metadata.guid, 'incipit author-offer')
+        thumb_dup = False
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
                 # Bytes, not the HTTPRequest wrapper -- see the twin call in
@@ -2100,13 +2211,19 @@ class AudiobookArtist(Agent.Artist):
                 # from this, and a wrapper silently measured as None.
                 thumb_data = fetch_url_bytes(helper.thumb)
                 if thumb_data is not None:
+                    # Measured while the bytes are in hand; see
+                    # better_square_portrait for what it decides. Measured even
+                    # for a skipped duplicate: the select machinery below
+                    # compares by URL bytes, not container membership.
+                    thumb_dims = remember_dims(helper.thumb, thumb_data)
+                    thumb_dup = duplicate_shown_elsewhere(
+                        author_dup_state, thumb_data, helper.thumb,
+                        'incipit author-offer')
+                if thumb_data is not None and not thumb_dup:
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=0
                     )
                     thumb_added = True
-                    # Measured while the bytes are in hand; see
-                    # better_square_portrait for what it decides.
-                    thumb_dims = remember_dims(helper.thumb, thumb_data)
             else:
                 thumb_added = True
                 # No fetch this pass, so recall the measurement -- otherwise
@@ -2156,7 +2273,10 @@ class AudiobookArtist(Agent.Artist):
             'HARDCOVER' if prefer_hardcover else 'audible-default'
         )
         if helper.thumb:
-            valid_posters = [helper.thumb]
+            # A thumb withheld as a cross-source duplicate stays OUT of the
+            # membership list too, or its stale entry would linger as the very
+            # tile the skip removed.
+            valid_posters = [] if thumb_dup else [helper.thumb]
             if prefer_hardcover and first_offer and thumb_added:
                 # FIRST match of a pinned author: the container is the ONLY
                 # thing that can set the selection (the upload/select API has no
@@ -2169,7 +2289,7 @@ class AudiobookArtist(Agent.Artist):
                 pass
             else:
                 valid_posters, secondary_dims = offer_secondary_author_poster(
-                    helper, valid_posters
+                    helper, valid_posters, dup_state=author_dup_state
                 )
                 # validate_keys selects the LAST key, so put the image that
                 # fills a square tile better at the end. Only when BOTH were
@@ -2508,6 +2628,13 @@ class AudiobookAlbum(Agent.Album):
         # readable cover.jpg and NO poster at all on a normal incremental scan.
         # The local cover does not depend on the online one existing.
         local_set = False
+        # Set when the mirror offer was withheld because another source's
+        # poster already displays cover.jpg's exact bytes (v1.3.133 dedupe).
+        # Consulted by the membership list at the end of the block, so the
+        # stale mirror entry is PRUNED rather than lingering as the duplicate
+        # it was skipped to avoid. Initialized here because the offer code
+        # only runs on some paths and the keep-list runs on all of them.
+        mirror_skipped = False
         # Set when a PORTRAIT local cover.jpg was skipped in favour of the square
         # online cover, so the force-select below does not simply re-read the file
         # and re-impose it, and the online cover keeps the default slot.
@@ -2611,7 +2738,19 @@ class AudiobookAlbum(Agent.Album):
                         '-- deferring to the square online cover as the default'
                     )
                     deferred_portrait_local = True
+                # Cross-source dedupe (v1.3.133): when an upload or Local Media
+                # Assets already displays these exact bytes -- and neither the
+                # fresh-scan anchor nor the selection needs OUR copy (see the
+                # rails in duplicate_shown_elsewhere) -- offering the mirror
+                # just lists the same picture twice. mirror_skipped also keeps
+                # the stale mirror entry OUT of the membership list below, so
+                # the old duplicate tile is pruned rather than lingering.
                 if cover_bytes:
+                    dup_state = read_poster_state(
+                        helper.metadata.guid, 'incipit cover-offer')
+                    mirror_skipped = duplicate_shown_elsewhere(
+                        dup_state, cover_bytes, local_key, 'incipit cover-offer')
+                if cover_bytes and not mirror_skipped:
                     try:
                         # A DEFERRED portrait cover is still OFFERED, just not the
                         # default: dropping it entirely left the operator unable to
@@ -2689,7 +2828,11 @@ class AudiobookAlbum(Agent.Album):
                 # becomes the default by sort_order=0; validate_keys is what
                 # decides membership, not priority.
                 keep = [helper.thumb]
-                if local_key in helper.metadata.posters:
+                # When the mirror offer was withheld as a cross-source
+                # duplicate, leaving its old entry in the membership list
+                # would defeat the skip -- the stale tile is exactly the
+                # duplicate being removed. Excluding it here prunes it.
+                if local_key in helper.metadata.posters and not mirror_skipped:
                     keep.append(local_key)
                 helper.metadata.posters.validate_keys(keep)
 
