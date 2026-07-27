@@ -3127,17 +3127,26 @@ def make_request(url, cache_time=None):
             log.error(
                 "Failed http request attempt #%d: %s" % (attempt + 1, url))
             log.error(err)
-            # An ANSWERED 4xx (except 429) is a permanent no: the server parsed
-            # the request and rejected it, so retrying with backoff burns ~7s
-            # per call teaching nothing (measured live on /authors?name=4,
-            # answered 400). Transport failures carry no code and 5xx/429 are
-            # the transients the ladder exists for -- those keep retrying.
+            # An ANSWERED 4xx FROM OUR OWN API is a permanent no: the server
+            # parsed the request and rejected it, so retrying with backoff
+            # burns ~7s per call teaching nothing (measured live on
+            # /authors?name=4, answered 400). Everything else keeps the
+            # ladder: transport failures carry no code, 5xx/429 are the
+            # transients it exists for, 408/425 are 4xx by number but
+            # transient by meaning, and THIRD-PARTY 4xx (Audible's edge
+            # serves one-off bot-check 403s, image CDNs blip) are exactly
+            # what the 2s retry has always absorbed -- aborting on those
+            # turns a blip into an unmatched book for the whole pass.
             # err.code read without getattr (blocked in the sandbox).
             try:
                 err_code = err.code
             except Exception:
                 err_code = None
-            if err_code is not None and 400 <= err_code < 500 and err_code != 429:
+            if (
+                err_code is not None and 400 <= err_code < 500
+                and err_code not in (408, 425, 429)
+                and is_api_host(url)
+            ):
                 break
             # No point sleeping after the final attempt.
             if attempt < num_retries - 1:

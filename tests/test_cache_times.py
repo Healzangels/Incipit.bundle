@@ -58,22 +58,29 @@ if __name__ == '__main__':
 
 class TestMakeRequest4xx(unittest.TestCase):
     """
-        An answered 4xx is a PERMANENT no -- retrying it four times with
-        exponential backoff (measured live on /authors?name=4, which the API
-        answered 400) just burns ~7s per search teaching nothing. Transport
-        failures and 5xx/429 keep the full retry ladder: those are the blips
-        the ladder exists for.
+        An answered 4xx FROM OUR OWN API is a PERMANENT no -- retrying it four
+        times with exponential backoff (measured live on /authors?name=4,
+        which the API answered 400) just burns ~7s per search teaching
+        nothing. Everything else keeps the full retry ladder: transport
+        failures and 5xx/429 are the blips the ladder exists for, 408/425 are
+        transient by definition even though they are 4xx, and THIRD-PARTY 4xx
+        (Audible's edge serves one-off bot-check 403s; image CDNs blip) are
+        exactly what the 2s retry has been absorbing -- aborting on those
+        turns a blip into an unmatched book.
     """
 
     def setUp(self):
         self.real_request = AG.HTTP.Request
         self.real_sleep = AG.sleep
         AG.sleep = lambda n: None
+        # The abort applies only to our own configured API host.
+        AG.Prefs['api_base_url'] = 'http://api.test'
         self.calls = []
 
     def tearDown(self):
         AG.HTTP.Request = self.real_request
         AG.sleep = self.real_sleep
+        AG.Prefs.pop('api_base_url', None)
 
     def raiser(self, code):
         calls = self.calls
@@ -114,5 +121,20 @@ class TestMakeRequest4xx(unittest.TestCase):
             calls.append(url)
             raise IOError('connection refused')
         AG.HTTP.Request = request
+        self.assertIsNone(AG.make_request('http://api.test/x'))
+        self.assertEqual(len(self.calls), 4)
+
+    def test_a_third_party_403_keeps_the_full_ladder(self):
+        # Audible's edge serves one-off bot-check 403s that the retry has
+        # been absorbing for the whole life of this agent; a stock-mode scan
+        # that aborts on the first one loses the book for the pass.
+        AG.HTTP.Request = self.raiser(403)
+        self.assertIsNone(AG.make_request('https://api.audible.com/1.0/catalog'))
+        self.assertEqual(len(self.calls), 4)
+
+    def test_a_transient_408_keeps_the_full_ladder_even_from_the_api(self):
+        # 408 Request Timeout (and 425 Too Early) are 4xx by number and
+        # transient by meaning -- a proxy hiccup, not a parsed rejection.
+        AG.HTTP.Request = self.raiser(408)
         self.assertIsNone(AG.make_request('http://api.test/x'))
         self.assertEqual(len(self.calls), 4)
