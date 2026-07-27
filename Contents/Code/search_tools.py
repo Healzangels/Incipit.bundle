@@ -1500,17 +1500,40 @@ class ArtistSearchTool(SearchTool):
 
     def artist_path(self):
         """The decoded file path for this artist's album, or None. The artist
-           search media carries media.filename (confirmed live)."""
+           search media carries media.filename (confirmed live). decode() is
+           py2-only (the harness's unquote returns py3 str), so fall back to
+           the raw value -- path comparisons work on it either way."""
         try:
             if self.media.filename:
-                return urllib.unquote(self.media.filename).decode('utf8')
+                raw = urllib.unquote(self.media.filename)
+                try:
+                    return raw.decode('utf8')
+                except (AttributeError, UnicodeDecodeError):
+                    return raw
         except Exception as e:
             log.error('incipit artist_path failed: %s', e)
         return None
 
     def artist_album_title(self):
-        """The album/book title to search for. media.album / media.name carry it
-           on the artist search; fall back to the file's basename."""
+        """The album/book title to search for: the SIDECAR title first, then
+           media.album / media.name, then the file's basename.
+
+           Sidecar first because the tag can be rip-tool junk: measured live on
+           The Hand of Oberon (2026-07-26), whose album tag is
+           'coa_04_The Hand of Oberon Unabridged' -- the recovery book search
+           on it returns ZERO rows, while the sidecar's title plus the file
+           duration answers the right book at confidence 1.0 with exactly the
+           author the recovery needs. The sidecar is machine-written truth and
+           already preferred everywhere else a title matters; this was the one
+           consumer still reading the raw tag first."""
+        try:
+            sc = self.sidecar()
+            if sc:
+                sc_title = sc.get('title')
+                if isinstance(sc_title, (str, unicode)) and sc_title.strip():
+                    return sc_title.strip()
+        except Exception as e:
+            log.error('incipit artist_album_title sidecar read failed: %s', e)
         for getter in (lambda: self.media.album, lambda: self.media.name):
             try:
                 val = getter()

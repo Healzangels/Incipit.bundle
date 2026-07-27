@@ -2992,6 +2992,18 @@ def make_request(url, cache_time=None):
             log.error(
                 "Failed http request attempt #%d: %s" % (attempt + 1, url))
             log.error(err)
+            # An ANSWERED 4xx (except 429) is a permanent no: the server parsed
+            # the request and rejected it, so retrying with backoff burns ~7s
+            # per call teaching nothing (measured live on /authors?name=4,
+            # answered 400). Transport failures carry no code and 5xx/429 are
+            # the transients the ladder exists for -- those keep retrying.
+            # err.code read without getattr (blocked in the sandbox).
+            try:
+                err_code = err.code
+            except Exception:
+                err_code = None
+            if err_code is not None and 400 <= err_code < 500 and err_code != 429:
+                break
             # No point sleeping after the final attempt.
             if attempt < num_retries - 1:
                 sleep(sleep_time)

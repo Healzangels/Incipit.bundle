@@ -172,3 +172,57 @@ class TestResultRowContract(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FakeArtistMedia(object):
+    def __init__(self, filename=None, album=None, artist=None, name=None):
+        self.filename = filename
+        self.album = album
+        self.artist = artist
+        self.name = name
+        self.title = None
+        self.tracks = None
+        self.children = None
+
+
+def artist_tool_for(sidecar=None, album=None, filename=None):
+    tool = ST.ArtistSearchTool.__new__(ST.ArtistSearchTool)
+    tool.prefs = dict(plexenv.FakePrefs.DEFAULTS)
+    tool.media = FakeArtistMedia(filename=filename, album=album)
+    tool.manual = False
+    tool.sidecar_cache = sidecar
+    return tool
+
+
+class TestArtistRecoveryTitle(unittest.TestCase):
+    """
+        The artist-recovery book search must prefer the SIDECAR title.
+
+        Measured live on The Hand of Oberon (2026-07-26): the file's album tag
+        is rip-tool junk ('coa_04_The Hand of Oberon Unabridged'), and the
+        /books recovery search on it returns ZERO rows -- while the sidecar's
+        title ('The Hand of Oberon') plus the file duration answers the right
+        book at confidence 1.0 with the author the recovery needs. The sidecar
+        is machine-written truth and already preferred everywhere else the
+        title matters; the recovery was the one consumer still reading the raw
+        tag.
+    """
+
+    JUNK = 'coa_04_The Hand of Oberon Unabridged'
+    FN = ('%2Fdata%2Fmedia%2Faudiobooks-updated%2FRoger%20Zelazny'
+          '%2FAmber%20-%20The%20Corwin%20Cycle%2F4%20-%20The%20Hand%20of%20Oberon'
+          '%2FThe%20Hand%20of%20Oberon%2Em4b')
+
+    def test_sidecar_title_wins_over_the_album_tag(self):
+        tool = artist_tool_for(
+            sidecar={'title': 'The Hand of Oberon'},
+            album=self.JUNK, filename=self.FN)
+        self.assertEqual(tool.artist_album_title(), 'The Hand of Oberon')
+
+    def test_album_tag_still_used_without_a_sidecar(self):
+        tool = artist_tool_for(sidecar=None, album=self.JUNK, filename=self.FN)
+        self.assertEqual(tool.artist_album_title(), self.JUNK)
+
+    def test_file_basename_remains_the_last_resort(self):
+        tool = artist_tool_for(sidecar=None, album=None, filename=self.FN)
+        self.assertEqual(tool.artist_album_title(), 'The Hand of Oberon')

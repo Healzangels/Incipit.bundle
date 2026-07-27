@@ -54,3 +54,65 @@ class TestAuthorUpdateCacheTime(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestMakeRequest4xx(unittest.TestCase):
+    """
+        An answered 4xx is a PERMANENT no -- retrying it four times with
+        exponential backoff (measured live on /authors?name=4, which the API
+        answered 400) just burns ~7s per search teaching nothing. Transport
+        failures and 5xx/429 keep the full retry ladder: those are the blips
+        the ladder exists for.
+    """
+
+    def setUp(self):
+        self.real_request = AG.HTTP.Request
+        self.real_sleep = AG.sleep
+        AG.sleep = lambda n: None
+        self.calls = []
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real_request
+        AG.sleep = self.real_sleep
+
+    def raiser(self, code):
+        calls = self.calls
+        class FakeHttpError(Exception):
+            pass
+        def request(url, **kwargs):
+            calls.append(url)
+            err = FakeHttpError('HTTP %s' % code)
+            err.code = code
+            raise err
+        return request
+
+    def test_a_400_stops_after_one_attempt(self):
+        AG.HTTP.Request = self.raiser(400)
+        self.assertIsNone(AG.make_request('http://api.test/x'))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_404_stops_after_one_attempt(self):
+        AG.HTTP.Request = self.raiser(404)
+        self.assertIsNone(AG.make_request('http://api.test/x'))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_500_keeps_the_full_ladder(self):
+        AG.HTTP.Request = self.raiser(500)
+        self.assertIsNone(AG.make_request('http://api.test/x'))
+        self.assertEqual(len(self.calls), 4)
+
+    def test_a_429_keeps_the_full_ladder(self):
+        # A rate-limit push-back is transient by definition.
+        AG.HTTP.Request = self.raiser(429)
+        self.assertIsNone(AG.make_request('http://api.test/x'))
+        self.assertEqual(len(self.calls), 4)
+
+    def test_no_code_keeps_the_full_ladder(self):
+        # A refused connection / timeout carries no HTTP code at all.
+        calls = self.calls
+        def request(url, **kwargs):
+            calls.append(url)
+            raise IOError('connection refused')
+        AG.HTTP.Request = request
+        self.assertIsNone(AG.make_request('http://api.test/x'))
+        self.assertEqual(len(self.calls), 4)
