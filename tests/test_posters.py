@@ -1823,3 +1823,73 @@ class IdenticalSecondaryIsNotAnAlternative(unittest.TestCase):
         posters, _ = AG.offer_secondary_author_poster(
             helper, [helper.thumb], thumb_data=None)
         self.assertIn(helper.thumb_secondary, helper.metadata.posters)
+
+class IdenticalPairSelectionRail(unittest.TestCase):
+    """
+        Measured live on Aleron Kong AFTER v1.3.143: the withhold fired on
+        both passes and the duplicate survived anyway, because the SELECTED
+        poster was the secondary's own container entry -- Plex retains a
+        selected entry regardless of what the agent lists (the server-side
+        picked-poster-evaporates protection), so withholding the selection
+        achieves nothing. The rail every other guard already has: never
+        withhold the selected copy -- the withholdable copy of an identical
+        pair is the NON-selected one, whichever side it is.
+    """
+
+    OWN_SECONDARY = None  # filled in setUp from own_container_key
+
+    def setUp(self):
+        self.real_fetch = AG.fetch_url_bytes
+        self.media = []
+        outer = self
+        real_media = AG.Proxy.Media
+        AG.Proxy.Media = lambda data, **kw: outer.media.append(data) or ('media', 0)
+        self.real_media = real_media
+        self.OWN_SECONDARY = AG.own_container_key('https://audible/photo.jpg')
+
+    def tearDown(self):
+        AG.fetch_url_bytes = self.real_fetch
+        AG.Proxy.Media = self.real_media
+
+    def _helper(self):
+        class FakePosters(dict):
+            def validate_keys(self, keys):
+                self.validated = keys
+
+        class FakeHelper(object):
+            thumb = 'https://hardcover/portrait.jpg'
+            thumb_secondary = 'https://audible/photo.jpg'
+            force = True
+
+            class metadata(object):
+                posters = FakePosters()
+        return FakeHelper()
+
+    def test_a_selected_identical_secondary_is_NOT_withheld(self):
+        AG.fetch_url_bytes = lambda url: _jpeg(900, 900)
+        helper = self._helper()
+        state = ('101', self.OWN_SECONDARY, [self.OWN_SECONDARY], None)
+        posters, _ = AG.offer_secondary_author_poster(
+            helper, [helper.thumb], dup_state=state, thumb_data=_jpeg(900, 900))
+        self.assertIn(helper.thumb_secondary, helper.metadata.posters)
+        self.assertIn(helper.thumb_secondary, posters)
+
+    def test_an_unselected_identical_secondary_is_still_withheld(self):
+        AG.fetch_url_bytes = lambda url: _jpeg(900, 900)
+        helper = self._helper()
+        other_sel = AG.own_container_key(helper.thumb)
+        state = ('101', other_sel, [other_sel], None)
+        posters, _ = AG.offer_secondary_author_poster(
+            helper, [helper.thumb], dup_state=state, thumb_data=_jpeg(900, 900))
+        self.assertNotIn(helper.thumb_secondary, helper.metadata.posters)
+
+    def test_update_withholds_the_thumb_when_the_selected_twin_is_the_secondary(self):
+        # The thumb side of the rail lives inline in the artist update();
+        # only the source can witness it.
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'Contents', 'Code', '__init__.py'
+        )
+        with open(path) as f:
+            src = f.read()
+        self.assertIn('the SELECTED secondary -- not listing it twice', src)

@@ -1842,7 +1842,15 @@ def offer_secondary_author_poster(helper, valid_posters, dup_state=None,
             # Measured even for a skipped duplicate -- the select machinery
             # compares by URL bytes, not container membership.
             secondary_dims = remember_dims(helper.thumb_secondary, secondary_data)
-            if thumb_data is not None and same_image(thumb_data, secondary_data):
+            sel_key = dup_state[1] if dup_state else None
+            if (thumb_data is not None
+                    and same_image(thumb_data, secondary_data)
+                    and sel_key != own_container_key(helper.thumb_secondary)):
+                # The selection rail (measured live on Aleron Kong): when the
+                # SELECTED poster is this very container entry, withholding it
+                # achieves nothing -- Plex retains a selected entry regardless
+                # of what the agent lists -- and the withholdable copy of the
+                # pair is the THUMB (see the twin rail in the artist update).
                 secondary_dup = True
                 log.info(
                     'incipit author-offer: the secondary is the same picture '
@@ -2367,15 +2375,20 @@ class AudiobookArtist(Agent.Artist):
         # Plex's persisted selection, so the upload/select API owns it -- and
         # the unpin direction must run even when the record has no Hardcover
         # image left, or an uploaded portrait becomes permanently stuck.
+        # Bytes retained past the dims measurement: the identical-pair rail
+        # below needs to compare them. None on non-force passes -- the rail
+        # fails open there and the pair heals on any forced refresh.
+        thumb_prefetch = None
+        secondary_prefetch = None
         if helper.force:
             if helper.thumb:
-                prefetched = fetch_url_bytes(helper.thumb)
-                if prefetched is not None:
-                    thumb_dims = remember_dims(helper.thumb, prefetched)
+                thumb_prefetch = fetch_url_bytes(helper.thumb)
+                if thumb_prefetch is not None:
+                    thumb_dims = remember_dims(helper.thumb, thumb_prefetch)
             if helper.thumb_secondary:
-                prefetched = fetch_url_bytes(helper.thumb_secondary)
-                if prefetched is not None:
-                    secondary_dims = remember_dims(helper.thumb_secondary, prefetched)
+                secondary_prefetch = fetch_url_bytes(helper.thumb_secondary)
+                if secondary_prefetch is not None:
+                    secondary_dims = remember_dims(helper.thumb_secondary, secondary_prefetch)
             if prefer_hardcover:
                 select_hardcover_author_art(helper)
             elif Prefs['prefer_square_author_art'] and helper.thumb_secondary:
@@ -2415,6 +2428,24 @@ class AudiobookArtist(Agent.Artist):
             author_dup_state = read_poster_state(
                 helper.metadata.guid, 'incipit author-offer')
         thumb_dup = False
+        # The identical-pair rail, THUMB side (measured live on Aleron Kong,
+        # 2026-07-27, after the v1.3.143 secondary-side guard alone failed):
+        # when both provider images are the same picture AND the current
+        # selection is the SECONDARY's own container entry, the secondary
+        # guard's selection rail refuses to withhold it -- correctly: Plex
+        # retains a selected entry regardless of what the agent lists, so
+        # withholding the selection achieves nothing. The withholdable copy
+        # of the pair is the THUMB. Reuses the thumb_dup flow: skipped from
+        # the offer and from the membership list.
+        if (thumb_prefetch is not None and secondary_prefetch is not None
+                and author_dup_state is not None
+                and same_image(thumb_prefetch, secondary_prefetch)
+                and author_dup_state[1] == own_container_key(helper.thumb_secondary)):
+            thumb_dup = True
+            log.info(
+                'incipit author-offer: the primary is the same picture as '
+                'the SELECTED secondary -- not listing it twice'
+            )
         # Hoisted: offer_secondary_author_poster compares the secondary's
         # bytes against these (the Kong identical-pair guard); stays None on
         # every path that does not fetch, and the guard fails open on None.
@@ -2431,9 +2462,14 @@ class AudiobookArtist(Agent.Artist):
                     # for a skipped duplicate: the select machinery below
                     # compares by URL bytes, not container membership.
                     thumb_dims = remember_dims(helper.thumb, thumb_data)
-                    thumb_dup = duplicate_shown_elsewhere(
-                        author_dup_state, thumb_data, helper.thumb,
-                        'incipit author-offer')
+                    # `not thumb_dup`: the identical-pair rail above may have
+                    # already withheld the thumb -- its verdict must not be
+                    # overwritten by a scan that skips incipit keys and so
+                    # cannot see that duplicate at all.
+                    if not thumb_dup:
+                        thumb_dup = duplicate_shown_elsewhere(
+                            author_dup_state, thumb_data, helper.thumb,
+                            'incipit author-offer')
                 if thumb_data is not None and not thumb_dup:
                     helper.metadata.posters[helper.thumb] = Proxy.Media(
                         thumb_data, sort_order=0
