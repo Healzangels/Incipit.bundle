@@ -1800,19 +1800,26 @@ def better_square_portrait(first, second):
     return first if first_short >= second_short else second
 
 
-def offer_secondary_author_poster(helper, valid_posters, dup_state=None):
+def offer_secondary_author_poster(helper, valid_posters, dup_state=None,
+                                  thumb_data=None):
     """
         Add the Audible `imageAlt` to the artist's poster container as a
         selectable option, and return the updated validate_keys list.
 
         Kept as an OPTION even for pinned authors: not wanting it selected is not
         the same as not wanting it available, and pruning it left those authors
-        with a single poster and no way to switch in the UI. The one thing that
-        withholds it (v1.3.133) is byte-identity: a copy of a picture the
-        container already shows under another source's key is not an
-        alternative, so it is skipped -- and dropped from the membership list,
+        with a single poster and no way to switch in the UI. What withholds it
+        is byte-identity, two flavors: a copy of a picture the container
+        already shows under ANOTHER SOURCE's key (v1.3.133, via dup_state),
+        and a copy of the PRIMARY image itself (v1.3.143, via `thumb_data` --
+        measured live on Aleron Kong, whose API record served the same
+        picture as both image and imageAlt under different URLs, so the URL
+        inequality check above proved nothing and the tile listed it twice
+        forever: the cross-source dedupe deliberately skips the agent's own
+        keys). Either way the copy is dropped from the membership list too,
         pruning any stale entry. Same rails as duplicate_shown_elsewhere:
-        fresh scans and selected keys are never touched.
+        fresh scans and selected keys are never touched, and no bytes in
+        hand means fail open.
     """
     if not helper.thumb_secondary or helper.thumb_secondary == helper.thumb:
         return valid_posters, None
@@ -1835,9 +1842,16 @@ def offer_secondary_author_poster(helper, valid_posters, dup_state=None):
             # Measured even for a skipped duplicate -- the select machinery
             # compares by URL bytes, not container membership.
             secondary_dims = remember_dims(helper.thumb_secondary, secondary_data)
-            secondary_dup = duplicate_shown_elsewhere(
-                dup_state, secondary_data, helper.thumb_secondary,
-                'incipit author-offer')
+            if thumb_data is not None and same_image(thumb_data, secondary_data):
+                secondary_dup = True
+                log.info(
+                    'incipit author-offer: the secondary is the same picture '
+                    'as the primary -- not listing it twice'
+                )
+            else:
+                secondary_dup = duplicate_shown_elsewhere(
+                    dup_state, secondary_data, helper.thumb_secondary,
+                    'incipit author-offer')
         if secondary_data is not None and not secondary_dup:
             helper.metadata.posters[helper.thumb_secondary] = \
                 Proxy.Media(secondary_data, sort_order=1)
@@ -2401,6 +2415,10 @@ class AudiobookArtist(Agent.Artist):
             author_dup_state = read_poster_state(
                 helper.metadata.guid, 'incipit author-offer')
         thumb_dup = False
+        # Hoisted: offer_secondary_author_poster compares the secondary's
+        # bytes against these (the Kong identical-pair guard); stays None on
+        # every path that does not fetch, and the guard fails open on None.
+        thumb_data = None
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
                 # Bytes, not the HTTPRequest wrapper -- see the twin call in
@@ -2446,7 +2464,8 @@ class AudiobookArtist(Agent.Artist):
                 pass
             else:
                 valid_posters, secondary_dims = offer_secondary_author_poster(
-                    helper, valid_posters, dup_state=author_dup_state
+                    helper, valid_posters, dup_state=author_dup_state,
+                    thumb_data=thumb_data
                 )
                 # validate_keys selects the LAST key, so put the image that
                 # fills a square tile better at the end. Only when BOTH were

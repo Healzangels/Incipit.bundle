@@ -1752,3 +1752,74 @@ class ConvergenceRunsBeforeTheOffers(unittest.TestCase):
         fit_call = src.index('if not select_best_fit_author_art(')
         self.assertLess(marker, state_read)
         self.assertLess(fit_call, state_read)
+
+class IdenticalSecondaryIsNotAnAlternative(unittest.TestCase):
+    """
+        Measured live on Aleron Kong (2026-07-27): the API served the SAME
+        picture as both image and imageAlt -- byte-identical (sha-equal,
+        96516 bytes) under two different provider URLs -- so the artist tile
+        listed it twice, permanently: the cross-source dedupe deliberately
+        never compares the agent's own two images against each other, and
+        nothing else did either. A copy of the primary is not an
+        alternative: withhold it and keep it out of the membership list,
+        exactly like the cross-source skip. Fails open without the primary's
+        bytes in hand.
+    """
+
+    def setUp(self):
+        self.real_fetch = AG.fetch_url_bytes
+        self.media = []
+        outer = self
+        real_media = AG.Proxy.Media
+        AG.Proxy.Media = lambda data, **kw: outer.media.append(data) or ('media', 0)
+        self.real_media = real_media
+
+    def tearDown(self):
+        AG.fetch_url_bytes = self.real_fetch
+        AG.Proxy.Media = self.real_media
+
+    def _helper(self):
+        class FakePosters(dict):
+            def validate_keys(self, keys):
+                self.validated = keys
+
+        class FakeHelper(object):
+            thumb = 'https://hardcover/portrait.jpg'
+            thumb_secondary = 'https://audible/photo.jpg'
+            force = True
+
+            class metadata(object):
+                posters = FakePosters()
+        return FakeHelper()
+
+    def test_a_byte_identical_secondary_is_withheld(self):
+        AG.fetch_url_bytes = lambda url: _jpeg(900, 900)
+        helper = self._helper()
+        posters, dims = AG.offer_secondary_author_poster(
+            helper, [helper.thumb], thumb_data=_jpeg(900, 900))
+        self.assertNotIn(helper.thumb_secondary, helper.metadata.posters)
+        self.assertEqual(posters, [helper.thumb])
+        # Still measured: the select machinery compares by URL bytes.
+        self.assertEqual(dims, (900, 900))
+
+    def test_a_padded_copy_counts_as_identical(self):
+        AG.fetch_url_bytes = lambda url: _jpeg(900, 900) + PAD
+        helper = self._helper()
+        posters, _ = AG.offer_secondary_author_poster(
+            helper, [helper.thumb], thumb_data=_jpeg(900, 900))
+        self.assertNotIn(helper.thumb_secondary, helper.metadata.posters)
+
+    def test_a_different_secondary_is_still_offered(self):
+        AG.fetch_url_bytes = lambda url: _jpeg(800, 600)
+        helper = self._helper()
+        posters, _ = AG.offer_secondary_author_poster(
+            helper, [helper.thumb], thumb_data=_jpeg(900, 900))
+        self.assertIn(helper.thumb_secondary, helper.metadata.posters)
+        self.assertIn(helper.thumb_secondary, posters)
+
+    def test_no_primary_bytes_fails_open(self):
+        AG.fetch_url_bytes = lambda url: _jpeg(900, 900)
+        helper = self._helper()
+        posters, _ = AG.offer_secondary_author_poster(
+            helper, [helper.thumb], thumb_data=None)
+        self.assertIn(helper.thumb_secondary, helper.metadata.posters)
