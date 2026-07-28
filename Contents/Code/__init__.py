@@ -1118,6 +1118,26 @@ PERCEPTUAL_MEMO_MAX = 512
 # verdict and must not read as a miss. Module-level so it is one object, and
 # deliberately not underscore-prefixed (the sandbox rejects those outright).
 PERCEPTUAL_MISSING = object()
+# Per-IMAGE signatures the api mints on every full verdict (api c49ed61):
+# keyed by the image's byte sha, replayable in place of the base64 body. The
+# verdict memo above only helps a REPEATED pair; the dedupe sweep compares
+# one image against up to six container posters, so each poster's bytes were
+# re-uploaded once per PAIR. With signatures each image uploads once per
+# process and rides as a ~600-byte token after that. An older api that
+# returns no signatures simply never populates this and every call stays
+# bytes -- no version coupling.
+PERCEPTUAL_SIG_MEMO = {}
+PERCEPTUAL_SIG_MEMO_MAX = 256
+
+
+def perceptual_consult_request(base, body):
+    """One POST /images/similar round-trip, parsed. Raises on any failure."""
+    return json.loads(HTTP.Request(
+        base.rstrip('/') + '/images/similar',
+        data=json.dumps(body),
+        headers={'Content-Type': 'application/json'},
+        timeout=10, cacheTime=0
+    ).content)
 
 
 def images_similar_via_api(first, second, tag):
@@ -1168,23 +1188,51 @@ def images_similar_via_api(first, second, tag):
     if cached is not PERCEPTUAL_MISSING:
         return cached
     try:
-        payload = json.dumps({
-            'a': String.Base64Encode(first),
-            'b': String.Base64Encode(second),
-        })
-        answer = json.loads(HTTP.Request(
-            base.rstrip('/') + '/images/similar',
-            data=payload,
-            headers={'Content-Type': 'application/json'},
-            timeout=10, cacheTime=0
-        ).content)
+        # Send a cached per-image signature in place of the bytes when we
+        # have one; the api compares signatures and bytes interchangeably.
+        sig_a = PERCEPTUAL_SIG_MEMO.get(key_a)
+        sig_b = PERCEPTUAL_SIG_MEMO.get(key_b)
+        body = {}
+        if sig_a:
+            body['aSig'] = sig_a
+        else:
+            body['a'] = String.Base64Encode(first)
+        if sig_b:
+            body['bSig'] = sig_b
+        else:
+            body['b'] = String.Base64Encode(second)
+        answer = perceptual_consult_request(base, body)
         # Inside the try on purpose: a proxy answering valid non-object JSON
         # (null, [], "ok") made `.get` raise AttributeError straight through
         # update(), turning the documented fail-open into a fail-crash.
         if not isinstance(answer, dict):
             raise ValueError('non-object answer %r' % (answer,))
+        if answer.get('staleSig') and (sig_a or sig_b):
+            # A cached signature no longer decodes (the api retuned its grid
+            # geometry across a deploy). Forget both sides and replay ONCE
+            # with full bytes -- that response re-mints fresh signatures.
+            # Guarded on having SENT a sig, so a server oddly claiming
+            # staleSig on a bytes-only call cannot loop the replay.
+            PERCEPTUAL_SIG_MEMO.pop(key_a, None)
+            PERCEPTUAL_SIG_MEMO.pop(key_b, None)
+            log.info('%s: perceptual signatures stale, replaying with bytes',
+                     tag)
+            answer = perceptual_consult_request(base, {
+                'a': String.Base64Encode(first),
+                'b': String.Base64Encode(second),
+            })
+            if not isinstance(answer, dict):
+                raise ValueError('non-object answer %r' % (answer,))
         undecodable = answer.get('undecodable')
         similar = answer.get('similar')
+        # Bank the minted signatures for both sides. isinstance guards a
+        # malformed field; an older api simply has none to bank.
+        for side_key, field in ((key_a, 'aSig'), (key_b, 'bSig')):
+            sig = answer.get(field)
+            if isinstance(sig, (str, unicode)) and sig:
+                if len(PERCEPTUAL_SIG_MEMO) >= PERCEPTUAL_SIG_MEMO_MAX:
+                    PERCEPTUAL_SIG_MEMO.clear()
+                PERCEPTUAL_SIG_MEMO[side_key] = sig
     except Exception as e:
         log.info('%s: perceptual consult unavailable (%s)', tag, e)
         return None

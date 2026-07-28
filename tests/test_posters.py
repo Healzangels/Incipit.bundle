@@ -2895,3 +2895,107 @@ class SweepFetchesEachPosterOnce(unittest.TestCase):
         data, known = AG.selected_poster_bytes('306', self.OWN, 't')
         self.assertTrue(known, 'the selection read must retry, not inherit '
                                'the sweep memo\'s failure')
+
+
+class TestPerceptualSignatureReplay(unittest.TestCase):
+    """
+        The signature client for POST /images/similar (api c49ed61): every
+        full verdict returns a per-image signature; the bundle banks them by
+        byte sha and replays tokens in place of the base64 bodies, so an
+        image uploads once per process instead of once per PAIR. staleSig
+        (the api retuned its grid across a deploy) drops both cached sides
+        and replays ONCE with bytes; an older api that mints no signatures
+        leaves every call bytes-only with no other behavior change.
+    """
+
+    A = b'\xff\xd8AAAA'
+    B = b'\xff\xd8BBBB'
+    C = b'\xff\xd8CCCC'
+
+    VERDICT = ('{"similar": false, "distance": 17, "undecodable": false,'
+               ' "aSig": "g1.SIGA", "bSig": "g1.SIGB"}')
+
+    def setUp(self):
+        import types as T
+        self.T = T
+        self.calls = []
+        self.real_http = AG.HTTP
+        AG.Prefs['api_base_url'] = 'http://api.test:3737'
+        AG.PERCEPTUAL_MEMO.clear()
+        AG.PERCEPTUAL_SIG_MEMO.clear()
+
+    def tearDown(self):
+        AG.HTTP = self.real_http
+        AG.Prefs.pop('api_base_url', None)
+        AG.PERCEPTUAL_MEMO.clear()
+        AG.PERCEPTUAL_SIG_MEMO.clear()
+
+    def http_answering_seq(self, bodies):
+        """Each call consumes the next body; the last repeats."""
+        state = {'i': 0}
+
+        def request(url, **kw):
+            self.calls.append((url, kw))
+            body = bodies[min(state['i'], len(bodies) - 1)]
+            state['i'] += 1
+            return self.T.SimpleNamespace(content=body)
+        AG.HTTP = self.T.SimpleNamespace(Request=request)
+
+    def sent(self, call_index):
+        import json as J
+        return J.loads(self.calls[call_index][1]['data'])
+
+    def test_a_known_image_rides_as_a_signature(self):
+        self.http_answering_seq([self.VERDICT])
+        AG.images_similar_via_api(self.A, self.B, 't')
+        first = self.sent(0)
+        self.assertIn('a', first)
+        self.assertIn('b', first)
+        # A new pair sharing image A: A goes as its token, C as bytes.
+        AG.images_similar_via_api(self.A, self.C, 't')
+        second = self.sent(1)
+        self.assertEqual(second.get('aSig'), 'g1.SIGA')
+        self.assertNotIn('a', second)
+        self.assertIn('b', second)
+
+    def test_stale_sig_drops_the_cache_and_replays_with_bytes_once(self):
+        stale = '{"similar": false, "distance": null, "undecodable": true, "staleSig": true}'
+        fresh = ('{"similar": true, "distance": 2, "undecodable": false,'
+                 ' "aSig": "g2.NEWA", "bSig": "g2.NEWC"}')
+        self.http_answering_seq([self.VERDICT, stale, fresh])
+        AG.images_similar_via_api(self.A, self.B, 't')
+        # This consult sends A's cached sig, is told it is stale, and must
+        # recover to the fresh verdict IN THIS CALL via a bytes replay.
+        self.assertIs(AG.images_similar_via_api(self.A, self.C, 't'), True)
+        self.assertEqual(len(self.calls), 3)
+        replay = self.sent(2)
+        self.assertIn('a', replay)
+        self.assertIn('b', replay)
+        self.assertNotIn('aSig', replay)
+        # ...and the re-minted signatures replaced the stale ones.
+        self.assertEqual(AG.PERCEPTUAL_SIG_MEMO.get(
+            AG.hashlib.sha1(self.A).hexdigest()), 'g2.NEWA')
+
+    def test_an_older_api_without_signatures_stays_bytes_only(self):
+        self.http_answering_seq(
+            ['{"similar": false, "distance": 17, "undecodable": false}'])
+        AG.images_similar_via_api(self.A, self.B, 't')
+        AG.images_similar_via_api(self.A, self.C, 't')
+        self.assertEqual(AG.PERCEPTUAL_SIG_MEMO, {})
+        second = self.sent(1)
+        self.assertIn('a', second)
+        self.assertNotIn('aSig', second)
+
+    def test_the_verdict_memo_still_short_circuits_before_any_request(self):
+        self.http_answering_seq([self.VERDICT])
+        AG.images_similar_via_api(self.A, self.B, 't')
+        AG.images_similar_via_api(self.A, self.B, 't')
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_bytes_only_stale_claim_cannot_loop(self):
+        # No sig was sent, so a server claiming staleSig on bytes gets no
+        # replay -- one call, no verdict, fail-open.
+        stale = '{"similar": false, "distance": null, "undecodable": true, "staleSig": true}'
+        self.http_answering_seq([stale])
+        self.assertIsNone(AG.images_similar_via_api(self.A, self.B, 't'))
+        self.assertEqual(len(self.calls), 1)
