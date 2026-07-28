@@ -16,7 +16,14 @@ log = Logging()
 asin_regex = re.compile(r'B0[A-Z\d]{8}')
 # The regions the API will accept, taken from the one table that defines them
 # rather than a second hand-maintained list.
-KNOWN_REGIONS = frozenset(available_regions.keys())
+#
+# `available_regions` IS the membership test -- no derived collection. The
+# first cut built a frozenset here, and `frozenset` is one of the sandbox's
+# blocked builtins, so the NameError fired at IMPORT and took the entire
+# plugin down: no matching at all, and the only evidence was a CRITICAL
+# "Exception starting plug-in" in the agent log (live, 2026-07-28). Dict
+# membership needs no builtin and is the same O(1) test.
+KNOWN_REGIONS = available_regions
 # A TYPED search is the most explicit identity a user can give, so it keeps
 # the historical shape-only form.
 typed_asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')

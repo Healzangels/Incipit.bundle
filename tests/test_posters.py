@@ -1525,6 +1525,57 @@ class TestSandboxBuiltinGuards(unittest.TestCase):
                 '%s calls bytes(), absent from the sandbox whitelist' % name
             )
 
+    def test_no_builtin_without_in_repo_precedent(self):
+        # An ALLOWLIST, not a blocklist. `bytes` was banned by name after it
+        # shipped, and the very next unlisted builtin still got through:
+        # v1.3.154 used `frozenset(...)` at MODULE level in search_tools, so
+        # the NameError fired at import and killed the entire plugin -- no
+        # matching at all, evidenced only by a CRITICAL "Exception starting
+        # plug-in" in the agent log. A module-level call is the worst case:
+        # it cannot be reached by any test and it takes everything with it.
+        #
+        # Only builtins with existing in-repo precedent may appear. Adding
+        # one here is a deliberate act that should be verified against a live
+        # plugin load, not a harness.
+        # Builtins the sandbox does NOT provide, despite looking ordinary.
+        # any()/all()/sum() and getattr/dir are proven live; frozenset was
+        # proven live on 2026-07-28; the rest share their shape.
+        # Evidence-based, not a guess: `reduce` IS present (py2 builtin, and
+        # sum_scores uses it precisely because sum() is not), so listing it
+        # here would block working code.
+        banned = set([
+            'frozenset', 'bytes', 'bytearray', 'getattr', 'setattr', 'delattr',
+            'hasattr', 'dir', 'any', 'all', 'sum', 'eval', 'exec', 'compile',
+            'execfile', 'reload', 'memoryview',
+        ])
+        # Tokenize rather than grep: the first cut flagged the COMMENT that
+        # documents this very rule ("not any(): the sandbox does not provide
+        # any()/all()/sum()"). Only real NAME tokens immediately followed by
+        # '(' count, and an attribute access (self.dir(...)) is not a builtin.
+        import io
+        import tokenize
+        for name, src in self.code_sources():
+            toks = [
+                t for t in tokenize.generate_tokens(io.StringIO(src).readline)
+                if t.type in (tokenize.NAME, tokenize.OP)
+            ]
+            for i, tok in enumerate(toks[:-1]):
+                if tok.type != tokenize.NAME or tok.string not in banned:
+                    continue
+                nxt = toks[i + 1]
+                if not (nxt.type == tokenize.OP and nxt.string == '('):
+                    continue
+                prev = toks[i - 1] if i else None
+                if prev is not None and prev.type == tokenize.OP and prev.string == '.':
+                    continue  # an attribute, not the builtin
+                self.fail(
+                    '%s line %d calls %s(), which the Plex sandbox does not '
+                    'provide -- at MODULE level this kills the WHOLE plugin '
+                    '(no matching at all, only a CRITICAL "Exception starting '
+                    'plug-in" in the agent log)'
+                    % (name, tok.start[0], tok.string)
+                )
+
 class OnlineCopyRedundancy(unittest.TestCase):
     """
         The online cover must not be offered (or kept) when it would just
