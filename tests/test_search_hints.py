@@ -133,9 +133,27 @@ class TestSandboxSafeExtraction(unittest.TestCase):
         )
         with open(os.path.join(code_dir, 'search_tools.py')) as f:
             src = f.read()
-        start = src.index('ISBN, sent ALONGSIDE')
-        end = src.index('incipit isbn probe failed')
-        self.assertNotIn('for ch in', src[start:end])
+        # PARSE, don't grep. The first version searched for the literal
+        # 'for ch in', so the identical bug spelled `for chx in sc_isbn:`
+        # walked straight through it (2026-07-28 mutation sweep). An AST walk
+        # finds ANY for-loop whose iterable is a plain name, whatever the
+        # loop variable is called.
+        import ast
+        tree = ast.parse(src)
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name != 'incipit_extra_args':
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.For) and isinstance(inner.iter, ast.Name):
+                    offenders.append((inner.lineno, inner.iter.id))
+        self.assertEqual(
+            offenders, [],
+            'incipit_extra_args iterates a bare name at %s -- if that name is '
+            'a py2 unicode string the sandbox raises "no attribute __iter__" '
+            'and the hint silently never rides' % offenders)
 
 
 class TestResultRowContract(unittest.TestCase):
