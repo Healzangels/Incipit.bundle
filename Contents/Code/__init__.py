@@ -1073,6 +1073,10 @@ DUPLICATE_CHECK_MAX_FETCHES = 6
 # until the next Plex restart.
 PERCEPTUAL_MEMO = {}
 PERCEPTUAL_MEMO_MAX = 512
+# Sentinel for the memo lookup: a memoized None (undecodable) is a real
+# verdict and must not read as a miss. Module-level so it is one object, and
+# deliberately not underscore-prefixed (the sandbox rejects those outright).
+PERCEPTUAL_MISSING = object()
 
 
 def images_similar_via_api(first, second, tag):
@@ -1095,11 +1099,33 @@ def images_similar_via_api(first, second, tag):
         return None
     if not base or not first or not second:
         return None
-    key_a = hashlib.sha1(first).hexdigest()
-    key_b = hashlib.sha1(second).hexdigest()
+    # str() both sides BEFORE hashing: Plex hands back `unicode` for anything
+    # it read as text (a CDN interstitial served 200 text/html is the live
+    # case), and py2 sha1 on non-ASCII unicode raises UnicodeEncodeError --
+    # uncaught here, that killed the whole album update mid-write. Same
+    # family as the v1.3.139 Unicode fix; the answer is a no-verdict, which
+    # every caller already treats as "offer as always".
+    # TEXT, not image bytes: Plex decodes anything it read as text/* into
+    # `unicode`, and py2 sha1 on non-ASCII unicode raises UnicodeEncodeError
+    # -- uncaught, that killed the album update mid-write. (The `bytes`
+    # builtin is unavailable in the sandbox; `unicode` is the test this file
+    # uses everywhere else, and it is correct under the py3 harness too.)
+    if isinstance(first, unicode) or isinstance(second, unicode):
+        log.info('%s: perceptual consult skipped (not image bytes)', tag)
+        return None
+    try:
+        key_a = hashlib.sha1(first).hexdigest()
+        key_b = hashlib.sha1(second).hexdigest()
+    except Exception as e:
+        log.info('%s: perceptual consult skipped (unhashable: %s)', tag, e)
+        return None
     memo_key = key_a + key_b if key_a < key_b else key_b + key_a
-    if memo_key in PERCEPTUAL_MEMO:
-        return PERCEPTUAL_MEMO[memo_key]
+    # .get with a sentinel, never `in` then `[]`: a concurrent agent thread
+    # can clear the memo between those two statements (KeyError out of an
+    # update). MISSING is a unique object, so a memoized None is still a hit.
+    cached = PERCEPTUAL_MEMO.get(memo_key, PERCEPTUAL_MISSING)
+    if cached is not PERCEPTUAL_MISSING:
+        return cached
     try:
         payload = json.dumps({
             'a': String.Base64Encode(first),
@@ -1111,17 +1137,119 @@ def images_similar_via_api(first, second, tag):
             headers={'Content-Type': 'application/json'},
             timeout=10, cacheTime=0
         ).content)
+        # Inside the try on purpose: a proxy answering valid non-object JSON
+        # (null, [], "ok") made `.get` raise AttributeError straight through
+        # update(), turning the documented fail-open into a fail-crash.
+        if not isinstance(answer, dict):
+            raise ValueError('non-object answer %r' % (answer,))
+        undecodable = answer.get('undecodable')
+        similar = answer.get('similar')
     except Exception as e:
         log.info('%s: perceptual consult unavailable (%s)', tag, e)
         return None
-    if answer.get('undecodable'):
-        verdict = None
-    else:
-        verdict = bool(answer.get('similar'))
+    verdict = None if undecodable else bool(similar)
     if len(PERCEPTUAL_MEMO) >= PERCEPTUAL_MEMO_MAX:
         PERCEPTUAL_MEMO.clear()
     PERCEPTUAL_MEMO[memo_key] = verdict
     return verdict
+
+
+def perceptual_dedupe_enabled():
+    """
+        The operator's one switch for perceptual (as opposed to byte-exact)
+        duplicate suppression. Gating only ONE of the two legs -- which is
+        what v1.3.151 shipped -- let the cross-source leg reach an ungated
+        consult, so unchecking the box did not restore variant covers, the
+        single thing its label promises. Fails CLOSED (no perceptual
+        suppression) so an unreadable pref can never hide art.
+    """
+    try:
+        return bool(Prefs['online_perceptual_dedupe'])
+    except Exception:
+        return False
+
+
+def same_picture(first, second, tag):
+    """
+        (same, byte_exact) for two image blobs: byte identity first, then the
+        pref-gated perceptual consult. ONE primitive so the gate, and any
+        future widening, cannot drift between call sites the way the byte
+        check already had to be fixed twice.
+
+        `byte_exact` is the caller's licence to PRUNE: identical bytes prove
+        the picture is on display elsewhere, so dropping our entry loses
+        nothing. A merely SIMILAR verdict does not prove that -- it may be a
+        variant -- so it may withhold an offer but must never delete.
+    """
+    if not first or not second:
+        return False, False
+    if same_image(first, second):
+        return True, True
+    if not perceptual_dedupe_enabled():
+        return False, False
+    if not aspect_could_match(first, second):
+        return False, False
+    return images_similar_via_api(first, second, tag) is True, False
+
+
+def aspect_could_match(first, second):
+    """
+        False only when both blobs' shapes are KNOWN and clearly different.
+
+        A re-encode or resize preserves aspect ratio, so a shape mismatch
+        rules out "the same picture" without asking anyone -- and
+        image_dimensions reads it from the header in microseconds with no
+        network, where the consult costs a multi-megabyte round trip. That
+        rejects the whole square-cover-vs-portrait-photo class up front.
+        Unknown dimensions fail toward ASKING, so an unparsed header can
+        never silently disable dedupe.
+    """
+    try:
+        first_dims = image_dimensions(first)
+        second_dims = image_dimensions(second)
+    except Exception:
+        return True
+    if not first_dims or not second_dims:
+        return True
+    if not first_dims[1] or not second_dims[1]:
+        return True
+    first_ratio = float(first_dims[0]) / first_dims[1]
+    second_ratio = float(second_dims[0]) / second_dims[1]
+    wider = max(first_ratio, second_ratio)
+    narrower = min(first_ratio, second_ratio)
+    if narrower <= 0:
+        return True
+    # 6% covers rounding and an odd pixel of crop; the classes this rejects
+    # (square vs 2:3 portrait) differ by 50% or more.
+    return (wider / narrower) <= 1.06
+
+
+def online_prune_allowed(state, thumb_key):
+    """
+        False when the ONLINE cover is itself the selection -- pruning it is
+        the picked-poster-evaporates failure. The author flow has carried
+        this rail since v1.3.144 (`sel_key != own_container_key(...)`); the
+        album keep-list never did, and the comment claiming safety "by
+        construction" reasoned about comparison SOURCES, which says nothing
+        about which key is SELECTED. No state means no evidence of a
+        selection, which is the pre-rail behaviour.
+    """
+    if not state:
+        return True
+    selected_key = state[1]
+    if not selected_key:
+        return True
+    return selected_key != own_container_key(thumb_key)
+
+
+def mirror_withheld(state, image_bytes, own_dict_key, tag):
+    """
+        (withheld, byte_exact) for the local mirror -- `duplicate_shown_elsewhere`
+        plus the evidence grade behind the verdict, so the caller can withhold
+        the offer on similarity but only PRUNE the operator's curated cover.jpg
+        on byte identity.
+    """
+    return duplicate_shown_detail(state, image_bytes, own_dict_key, tag)
 
 
 def online_offer_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
@@ -1149,10 +1277,20 @@ def online_offer_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
 
 
 def duplicate_shown_elsewhere(state, image_bytes, own_dict_key, tag):
+    """True when another source already displays this picture (see detail)."""
+    return duplicate_shown_detail(state, image_bytes, own_dict_key, tag)[0]
+
+
+def duplicate_shown_detail(state, image_bytes, own_dict_key, tag):
     """
-        True when a NON-incipit container poster (an upload, Local Media
-        Assets, any other agent) already displays `image_bytes` -- so offering
-        our copy would just list the same picture twice.
+        (shown, byte_exact) when a NON-incipit container poster (an upload,
+        Local Media Assets, any other agent) already displays `image_bytes` --
+        so offering our copy would just list the same picture twice.
+
+        `byte_exact` grades the evidence: identical bytes PROVE the picture is
+        already on display, so the caller may prune our entry; a perceptual
+        verdict only suggests it, so the caller may withhold the offer but
+        must never delete the operator's own art on that basis.
 
         Operator rule (2026-07-26): byte-identical means shown ONCE however
         many sources hold it; a UNIQUE alternative is never hidden. This
@@ -1170,12 +1308,12 @@ def duplicate_shown_elsewhere(state, image_bytes, own_dict_key, tag):
         cosmetic, a missing poster option is not.
     """
     if state is None or not image_bytes:
-        return False
+        return False, False
     rk, selected_key, keys = state[0], state[1], state[2]
     if not selected_key:
-        return False
+        return False, False
     if selected_key == own_container_key(own_dict_key):
-        return False
+        return False, False
     fetched = 0
     # The selection first: it is the copy most likely to be the duplicate
     # (a hand upload of the same art), and one match ends the scan.
@@ -1190,25 +1328,19 @@ def duplicate_shown_elsewhere(state, image_bytes, own_dict_key, tag):
             break
         fetched += 1
         data = poster_file_bytes(rk, key, tag)
-        if data is not None and same_image(image_bytes, data):
+        if data is None:
+            continue
+        # same_picture is byte identity, then the pref-gated perceptual
+        # consult -- one primitive, so the gate cannot drift between the
+        # legs the way it did in v1.3.151.
+        shown, byte_exact = same_picture(image_bytes, data, tag)
+        if shown:
             log.info(
-                '%s: %s already shows this image -- not listing our copy',
-                tag, key
+                '%s: %s already shows this %s -- not listing our copy',
+                tag, key, 'image' if byte_exact else 'picture (re-encode)'
             )
-            return True
-        # Byte identity missed; ask the api whether it is the same PICTURE
-        # in different bytes (re-encode/resize of a hand upload, LMA's copy
-        # of the embedded art). `is True` because None means "no verdict"
-        # and must fail open like every other dedupe rail.
-        if data is not None and images_similar_via_api(
-            image_bytes, data, tag
-        ) is True:
-            log.info(
-                '%s: %s already shows this picture (re-encode) -- '
-                'not listing our copy', tag, key
-            )
-            return True
-    return False
+            return True, byte_exact
+    return False, False
 
 
 def online_copy_is_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
@@ -1228,31 +1360,17 @@ def online_copy_is_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
         the clean one, dHash distance 2), and byte-only redundancy re-listed
         the same picture every refresh. Gate and rails unchanged.
 
-        Safe against picked-poster-evaporates by construction: mirror_skipped
-        is only ever True when the selection is a NON-incipit key (incipit
-        keys are excluded comparison sources in duplicate_shown_elsewhere),
-        so suppressing or pruning our online entry can never touch the
-        selection. Fails open on missing bytes or no verdict, like every
-        dedupe rail.
+        This says nothing about which key is SELECTED -- an earlier version of
+        this docstring claimed it did, and the 2026-07-28 review confirmed the
+        keep-list could prune a selected online cover on the strength of it.
+        The selection rail lives in `online_prune_allowed`, at the prune.
+        Fails open on missing bytes or no verdict, like every dedupe rail.
     """
     if thumb_data is None or not cover_bytes:
         return False
     if not (local_set or mirror_skipped):
         return False
-    if same_image(cover_bytes, thumb_data):
-        return True
-    # The perceptual branch is the operator's dial (Option A, 2026-07-27):
-    # ON keeps the picker clean while LMA's tiles carry any branded
-    # variants; OFF (the documented step before disabling LMA) re-offers
-    # every perceptually-suppressed online cover on the next refresh --
-    # suppression is stateless, so variants are only unlisted, never lost.
-    # Byte-identical suppression above stays unconditional (zero-loss).
-    try:
-        if not Prefs['online_perceptual_dedupe']:
-            return False
-    except Exception:
-        return False
-    return images_similar_via_api(cover_bytes, thumb_data, tag) is True
+    return same_picture(cover_bytes, thumb_data, tag)[0]
 
 
 # The local-cover block's decisions, carried from the first track of a pass to
@@ -2938,6 +3056,9 @@ class AudiobookAlbum(Agent.Album):
         # it was skipped to avoid. Initialized here because the offer code
         # only runs on some paths and the keep-list runs on all of them.
         mirror_skipped = False
+        # Was that skip byte-exact? Only then may the mirror entry be PRUNED
+        # (a perceptual verdict withholds the offer but never deletes).
+        mirror_byte_exact = False
         # The poster-container state, fetched at most once per pass: the
         # mirror leg reads it when cover.jpg exists, and the online leg's
         # cross-source check (v1.3.152) needs it even when cover.jpg is
@@ -3080,7 +3201,7 @@ class AudiobookAlbum(Agent.Album):
                 if cover_bytes:
                     dup_state = read_poster_state(
                         helper.metadata.guid, 'incipit cover-offer')
-                    mirror_skipped = duplicate_shown_elsewhere(
+                    mirror_skipped, mirror_byte_exact = mirror_withheld(
                         dup_state, cover_bytes, local_key, 'incipit cover-offer')
                 if cover_bytes and not mirror_skipped:
                     try:
@@ -3179,25 +3300,43 @@ class AudiobookAlbum(Agent.Album):
                 # the mirror skip removed. online_redundant was judged where
                 # the bytes were in hand (this track or a sibling's memo);
                 # an unjudged entry fails open.
-                if online_redundant:
+                # ...but NEVER when that online entry is the selection
+                # (2026-07-28 review, CONFIRMED): pruning the key the operator
+                # picked is the picked-poster-evaporates failure, and the
+                # perceptual case does not self-heal -- the same inputs
+                # re-derive the verdict on every later pass.
+                if online_redundant and online_prune_allowed(
+                    dup_state, helper.thumb
+                ):
                     keep = []
                 # When the mirror offer was withheld as a cross-source
                 # duplicate, leaving its old entry in the membership list
                 # would defeat the skip -- the stale tile is exactly the
                 # duplicate being removed. Excluding it here prunes it.
-                if local_key in helper.metadata.posters and not mirror_skipped:
+                # Only on BYTE identity: a perceptual verdict may withhold
+                # the offer, but deleting the operator's curated cover.jpg
+                # entry on a similarity guess is the one thing this whole
+                # subsystem exists not to do.
+                if local_key in helper.metadata.posters and not (
+                    mirror_skipped and mirror_byte_exact
+                ):
                     keep.append(local_key)
                 try:
                     helper.metadata.posters.validate_keys(keep)
                 except Exception as e:
                     log.error('incipit cover: membership prune failed (%s)', e)
-        elif mirror_skipped and local_key in helper.metadata.posters:
+        elif (
+            mirror_skipped and mirror_byte_exact
+            and local_key in helper.metadata.posters
+        ):
             # A thumb-less record (Hardcover/OpenLibrary book-level match)
             # never enters the membership pass above -- but its stale mirror
             # entry is exactly the duplicate the skip exists to remove, and
             # it was skipped-but-never-pruned, keeping the duplicate tile
             # forever. mirror_skipped guarantees the selection is a
             # non-incipit key, so pruning our namespace cannot touch it.
+            # BYTE identity only: on a mere perceptual verdict this is the
+            # operator's curated cover.jpg being deleted from the picker.
             try:
                 helper.metadata.posters.validate_keys([])
                 log.info(

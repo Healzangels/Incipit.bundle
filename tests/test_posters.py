@@ -1641,8 +1641,18 @@ class CoverBlockFlowGuards(unittest.TestCase):
         # Hardcover/OpenLibrary book-level matches have no online cover, so
         # they never enter the `if helper.thumb:` membership pass -- the
         # stale mirror entry they skipped must be pruned on its own branch.
+        # Since the 2026-07-28 review that prune is gated on BYTE identity:
+        # a perceptual verdict withholds the offer but must never delete the
+        # operator's curated cover.jpg entry.
         src = self.source()
-        self.assertIn('elif mirror_skipped and local_key in helper.metadata.posters', src)
+        self.assertIn('mirror_skipped and mirror_byte_exact', src)
+        self.assertIn('and local_key in helper.metadata.posters', src)
+
+    def test_the_online_prune_consults_the_selection(self):
+        # The confirmed finding of the 2026-07-28 review: `keep = []` had no
+        # selection rail, so a SELECTED online cover could be pruned.
+        src = self.source()
+        self.assertIn('online_prune_allowed(', src)
 
 
 if __name__ == '__main__':
@@ -2215,3 +2225,221 @@ class TestOnlineOfferRedundant(unittest.TestCase):
     def test_no_bytes_fails_open(self):
         self.assertFalse(AG.online_offer_redundant(
             None, self.COVER, True, False, self.state(self.UPLOAD, []), self.THUMB_KEY))
+
+
+class TestPerceptualRailsAfterReview(unittest.TestCase):
+    """
+        The 2026-07-28 review's confirmed poster findings, as executable rails.
+
+        1. SELECTION RAIL ON THE ONLINE PRUNE. The keep-list at the end of the
+           album-cover block never consulted the selection, so a SELECTED
+           online cover could be pruned by `keep = []`. The docstring's
+           "safe by construction" argument was fallacious: excluding incipit
+           keys as comparison SOURCES says nothing about which key is
+           SELECTED. Byte-identical suppression only costs a tile (cover.jpg
+           holds the same picture), but the perceptual verdict prunes a
+           variant the operator actually picked and never re-offers it.
+
+        2. ONE GATE FOR THE PERCEPTUAL CONSULT. `online_perceptual_dedupe`
+           gated only `online_copy_is_redundant`, while the cross-source leg
+           reached the ungated consult inside `duplicate_shown_elsewhere` --
+           so unchecking the pref did not restore variant covers, which is
+           the one thing its label promises.
+
+        3. A PERCEPTUAL VERDICT MUST NOT PRUNE THE LOCAL MIRROR. Byte
+           identity means the picture is provably on display elsewhere;
+           mere similarity does not, and the mirror is the operator's
+           curated cover.jpg. It may be withheld as an offer, never deleted.
+    """
+
+    IMG = b'\xff\xd8ONLINEBYTES'
+    VARIANT = b'\xff\xd8SAMEPICTUREBANNERED'
+    THUMB = 'https://cdn.example/cover.jpg'
+    LMA = 'metadata://posters/com.plexapp.agents.localmedia_9999888877776666555544443333222211110000'
+    UPLOAD = 'upload://posters/aaaa0000bbbb1111cccc2222dddd3333eeee4444'
+
+    def setUp(self):
+        self.real_consult = AG.images_similar_via_api
+        self.real_pfb = AG.poster_file_bytes
+        self.store = {}
+        AG.poster_file_bytes = lambda rk, key, tag: self.store.get(key)
+
+    def tearDown(self):
+        AG.images_similar_via_api = self.real_consult
+        AG.poster_file_bytes = self.real_pfb
+        AG.Prefs.pop('online_perceptual_dedupe', None)
+
+    def state(self, selected, keys):
+        return ('101', selected, keys, None)
+
+    # 1. selection rail
+    def test_selected_online_cover_is_never_pruned(self):
+        own_online = AG.own_container_key(self.THUMB)
+        st = self.state(own_online, [own_online, self.LMA])
+        self.assertFalse(AG.online_prune_allowed(st, self.THUMB))
+
+    def test_prune_allowed_when_the_selection_is_elsewhere(self):
+        own_online = AG.own_container_key(self.THUMB)
+        st = self.state(self.UPLOAD, [own_online, self.UPLOAD])
+        self.assertTrue(AG.online_prune_allowed(st, self.THUMB))
+
+    def test_prune_allowed_without_state(self):
+        # No state = no evidence of a selection; the pre-review behaviour.
+        self.assertTrue(AG.online_prune_allowed(None, self.THUMB))
+
+    # 2. one gate
+    def test_pref_off_disables_the_cross_source_consult_too(self):
+        self.store[self.LMA] = self.VARIANT
+        AG.images_similar_via_api = lambda a, b, tag: True
+        AG.Prefs['online_perceptual_dedupe'] = False
+        st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
+        self.assertFalse(AG.online_offer_redundant(
+            self.IMG, None, False, False, st, self.THUMB))
+
+    def test_pref_on_still_withholds_the_cross_source_twin(self):
+        self.store[self.LMA] = self.VARIANT
+        AG.images_similar_via_api = lambda a, b, tag: True
+        st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
+        self.assertTrue(AG.online_offer_redundant(
+            self.IMG, None, False, False, st, self.THUMB))
+
+    def test_byte_identity_ignores_the_pref(self):
+        # Zero-loss by definition: the very same bytes are already listed.
+        self.store[self.LMA] = self.IMG
+        AG.Prefs['online_perceptual_dedupe'] = False
+        st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
+        self.assertTrue(AG.online_offer_redundant(
+            self.IMG, None, False, False, st, self.THUMB))
+
+    # 3. a perceptual verdict never prunes the mirror
+    def test_perceptual_mirror_skip_does_not_prune(self):
+        self.store[self.LMA] = self.VARIANT
+        AG.images_similar_via_api = lambda a, b, tag: True
+        st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
+        skipped, byte_exact = AG.mirror_withheld(st, self.IMG, 'k', 't')
+        self.assertTrue(skipped)
+        self.assertFalse(byte_exact)
+
+    def test_byte_mirror_skip_still_prunes(self):
+        self.store[self.LMA] = self.IMG
+        st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
+        skipped, byte_exact = AG.mirror_withheld(st, self.IMG, 'k', 't')
+        self.assertTrue(skipped)
+        self.assertTrue(byte_exact)
+
+
+class TestConsultNeverKillsTheUpdate(unittest.TestCase):
+    """
+        The consult sits inside `update()`, so anything it raises aborts the
+        album mid-write (the mirror already in `metadata.posters`, the select
+        and the cover backup never run). The 2026-07-28 review found three
+        uncaught paths, all reachable with the api merely misbehaving rather
+        than being down: sha1 over a py2 `unicode` body (a CDN interstitial
+        served as text/html), `.get()` on non-object JSON, and a check-then-
+        index race against a concurrent `.clear()` of the module memo.
+    """
+
+    def setUp(self):
+        import types as T
+        self.T = T
+        self.real_http = AG.HTTP
+        AG.Prefs['api_base_url'] = 'http://api.test:3737'
+        AG.Prefs['online_perceptual_dedupe'] = True
+        AG.PERCEPTUAL_MEMO.clear()
+
+    def tearDown(self):
+        AG.HTTP = self.real_http
+        AG.Prefs.pop('api_base_url', None)
+        AG.Prefs.pop('online_perceptual_dedupe', None)
+        AG.PERCEPTUAL_MEMO.clear()
+
+    def answer(self, body):
+        AG.HTTP = self.T.SimpleNamespace(
+            Request=lambda url, **kw: self.T.SimpleNamespace(content=body))
+
+    def test_unicode_body_yields_no_verdict_instead_of_raising(self):
+        self.answer('{"similar": true, "distance": 0, "undecodable": false}')
+        html = u'<html>rate limited — try later</html>'
+        self.assertIsNone(AG.images_similar_via_api(html, b'\xff\xd8REAL', 't'))
+
+    def test_non_object_json_yields_no_verdict_instead_of_raising(self):
+        for body in ('null', '[]', '"ok"', '42'):
+            AG.PERCEPTUAL_MEMO.clear()
+            self.answer(body)
+            self.assertIsNone(
+                AG.images_similar_via_api(b'\xff\xd8A', b'\xff\xd8B', 't'))
+
+    def test_memo_lookup_survives_a_concurrent_clear(self):
+        # Simulate the race: the dict answers "present" then empties.
+        class RacyDict(dict):
+            def __contains__(self, key):
+                return True
+        AG.PERCEPTUAL_MEMO = RacyDict()
+        try:
+            self.answer('{"similar": true, "distance": 1, "undecodable": false}')
+            self.assertIs(
+                AG.images_similar_via_api(b'\xff\xd8A', b'\xff\xd8B', 't'), True)
+        finally:
+            AG.PERCEPTUAL_MEMO = {}
+
+
+class TestConsultIsCheapAndBounded(unittest.TestCase):
+    """
+        The consult POSTs both images (base64-inflated) over the network, so
+        the 2026-07-28 review measured up to 6 multi-megabyte round trips per
+        call and up to 60s of blocking inside one update() when the api is
+        unreachable. Two guards, both free:
+
+        * ASPECT PRE-FILTER: a re-encode or resize PRESERVES aspect ratio, so
+          two blobs whose shapes differ cannot be the same picture. The bundle
+          already parses dimensions from headers in microseconds with no
+          network, which rejects the whole square-cover-vs-portrait-photo
+          class before any POST.
+        * ONE FAILURE ENDS THE PASS: transient failures are deliberately not
+          memoized, so without this the next key, the next call site and the
+          next track each pay the full timeout again.
+    """
+
+    SQUARE = 'square-bytes'
+    TALL = 'tall-bytes'
+    OTHER = 'other-square'
+
+    def setUp(self):
+        self.real_dims = AG.image_dimensions
+        self.real_consult = AG.images_similar_via_api
+        self.calls = []
+        dims = {self.SQUARE: (1000, 1000), self.TALL: (600, 900),
+                self.OTHER: (500, 500)}
+        AG.image_dimensions = lambda data: dims.get(data)
+        AG.Prefs['online_perceptual_dedupe'] = True
+
+    def tearDown(self):
+        AG.image_dimensions = self.real_dims
+        AG.images_similar_via_api = self.real_consult
+        AG.Prefs.pop('online_perceptual_dedupe', None)
+
+    def consult(self, verdict):
+        def fn(a, b, tag):
+            self.calls.append((a, b))
+            return verdict
+        AG.images_similar_via_api = fn
+
+    def test_different_aspect_never_reaches_the_api(self):
+        self.consult(True)
+        self.assertEqual(
+            AG.same_picture(self.SQUARE, self.TALL, 't'), (False, False))
+        self.assertEqual(self.calls, [])
+
+    def test_same_aspect_still_consults(self):
+        self.consult(True)
+        self.assertEqual(
+            AG.same_picture(self.SQUARE, self.OTHER, 't'), (True, False))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_unknown_dimensions_still_consult(self):
+        # Fails OPEN toward asking: an unparsed header must not silently
+        # disable dedupe.
+        self.consult(True)
+        self.assertEqual(
+            AG.same_picture('mystery-a', 'mystery-b', 't'), (True, False))
+        self.assertEqual(len(self.calls), 1)

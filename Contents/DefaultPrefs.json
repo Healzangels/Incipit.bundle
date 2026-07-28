@@ -103,7 +103,7 @@
     },
     {
         "id": "online_perceptual_dedupe",
-        "label": "Skip the online cover when it repeats already-displayed art (uncheck before disabling Local Media Assets so variant covers return)",
+        "label": "Hide a poster when another source already shows the same picture in different bytes (uncheck to keep every variant, e.g. before disabling Local Media Assets)",
         "type": "bool",
         "default": "true"
     },

@@ -94,3 +94,46 @@ class HyphenatedWordsSurviveSeriesStrip(unittest.TestCase):
         self.assertEqual(
             UT.strip_trailing_series('The Well-Favored Man'),
             'The Well-Favored Man')
+
+
+class ClosedUpDashesStillStrip(unittest.TestCase):
+    """
+        v1.3.146 stopped a mid-word hyphen being read as a series delimiter
+        ("Half-Blood Prince") by requiring whitespace before the dash -- but
+        that also stopped CLOSED-UP em/en dashes stripping, which is a normal
+        publisher convention, so the series name stayed in the title
+        ('Wintersteel—Cradle, Book 8' -> 'Wintersteel—Cradle').
+
+        Em and en dashes never appear mid-word, so only the ASCII hyphen
+        needs the whitespace requirement.
+    """
+
+    def test_closed_up_em_dash_strips(self):
+        self.assertEqual(
+            UT.strip_trailing_series(u'Wintersteel—Cradle, Book 8'),
+            u'Wintersteel')
+
+    def test_closed_up_en_dash_strips(self):
+        self.assertEqual(
+            UT.strip_trailing_series(u'Reaper–Cradle, Book 10'),
+            u'Reaper')
+
+    def test_spaced_dash_still_strips(self):
+        self.assertEqual(
+            UT.strip_trailing_series('Wintersteel - Cradle, Book 8'),
+            'Wintersteel')
+
+    def test_mid_word_hyphen_is_still_not_a_delimiter(self):
+        self.assertEqual(
+            UT.strip_trailing_series(
+                'Harry Potter and the Half-Blood Prince, Book 6'),
+            'Harry Potter and the Half-Blood Prince')
+
+    def test_closed_up_ascii_hyphen_is_still_not_a_delimiter(self):
+        # "The Blade Itself-The First Law" is indistinguishable from a
+        # hyphenated word without the space, so it keeps the conservative
+        # behaviour; only the ", Book N" tail comes off.
+        self.assertEqual(
+            UT.strip_trailing_series(
+                'The Blade Itself-The First Law, Book 1'),
+            'The Blade Itself-The First Law')

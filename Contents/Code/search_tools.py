@@ -118,8 +118,13 @@ def strip_part_index(title):
 # Synthetic incipit record ids the API can resolve via /books/{id}. B0 ASINs
 # stay in the sidecar's `asin` field with its own guards; this is only for
 # records that have no ASIN at all.
+# The separator is REQUIRED and underscores are NOT allowed in the body: the
+# quick-match id is joined as `id + '_' + region` and the update splits on the
+# FIRST underscore, so `hardcover_12345` would resolve to namespace
+# "hardcover", region "12345" -- a permanent 404 applied at score 100. A
+# separator-less `overdrive9406208` is equally unresolvable provider-side.
 SIDECAR_INCIPIT_ID_RE = re.compile(
-    r'^(?:openlibrary|hardcover|overdrive)[A-Za-z0-9_-]+$')
+    r'^(?:openlibrary|hardcover|overdrive)-[A-Za-z0-9-]+$')
 FOLDER_TITLE_YEAR_PREFIX_RE = re.compile(r'^\s*(?:19|20)\d{2}\s*[-_.]\s*')
 FOLDER_TITLE_TRAILING_RE = re.compile(r'(?:\s*[\[\(][^\]\)]*[\]\)]\s*)+$')
 
@@ -235,7 +240,23 @@ class SearchTool:
             incipit_id = self.sidecar_incipit_id()
             if incipit_id:
                 log.info('incipit id pin found in sidecar: %s', incipit_id)
-                self.check_for_region(incipit_id)
+                # The region marker lives in the PATH ("[uk]"), never in a
+                # synthetic id -- passing the id here silently defaulted every
+                # pinned book to the operator's global region and baked that
+                # into metadata.id permanently (2026-07-28 review).
+                region_source = incipit_id
+                if self.media.filename:
+                    try:
+                        region_source = urllib.unquote(self.media.filename)
+                        try:
+                            region_source = region_source.decode('utf8')
+                        except Exception:
+                            # py2 str decodes; a py3 str has no .decode and is
+                            # already text. The marker is ASCII either way.
+                            pass
+                    except Exception as e:
+                        log.error('incipit id pin: region read failed (%s)', e)
+                self.check_for_region(region_source)
                 return incipit_id + '_' + self.region_override
 
         # Check filename for ASIN if content type is books.

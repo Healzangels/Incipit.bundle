@@ -300,3 +300,46 @@ class TestQuickMatchDisplay(unittest.TestCase):
         tool = tool_for(sidecar=dict(SIDECAR), album='Some Book')
         self.assertEqual(tool.quick_match_display('B08WF9JR2P_us'),
                          ('B08WF9JR2P_us', 1969))
+
+
+class TestPinRegexAndRegion(unittest.TestCase):
+    """
+        Two 2026-07-28 review findings on the sidecar pin.
+
+        1. The namespace needed a SEPARATOR. `^(?:openlibrary|hardcover|
+           overdrive)[A-Za-z0-9_-]+$` accepted `overdrive9406208` and
+           `hardcover_12345`, and since the quick-match id is joined as
+           `id + '_' + region` and later split on the FIRST '_', an
+           underscored pin resolved to the bare namespace: the update
+           requested /books/hardcover?region=12345 forever, at score 100,
+           with nothing logged. The docstring promised malformed pins
+           degrade to a normal search; now they do.
+
+        2. The region came from the WRONG STRING. The pin branch passed the
+           id to check_for_region, so a '[uk]' marker in the path was
+           discarded and '_us' was baked into metadata.id permanently.
+    """
+
+    def test_separator_is_required(self):
+        for bad in ('overdrive9406208', 'hardcoverX', 'openlibraryZZZ'):
+            tool = tool_for(sidecar={'incipit_id': bad}, album='Some Book')
+            self.assertIsNone(tool.check_for_asin(), bad)
+
+    def test_underscores_are_rejected(self):
+        for bad in ('overdrive_9406208', 'openlibrary_works_OL1W',
+                    'hardcover_edition_666221'):
+            tool = tool_for(sidecar={'incipit_id': bad}, album='Some Book')
+            self.assertIsNone(tool.check_for_asin(), bad)
+
+    def test_real_hyphenated_ids_still_pin(self):
+        for good in ('openlibrary-works-OL36469512W', 'hardcover-edition-666221',
+                     'hardcover-book-429510', 'overdrive-9406208'):
+            tool = tool_for(sidecar={'incipit_id': good}, album='Some Book')
+            self.assertEqual(tool.check_for_asin(), good + '_us')
+
+    def test_region_comes_from_the_filename_not_the_id(self):
+        tool = tool_for(
+            sidecar={'incipit_id': 'hardcover-edition-666221'},
+            album='Some Book',
+            filename='/data/media/Author/Title%20%5Buk%5D/book.m4b')
+        self.assertEqual(tool.check_for_asin(), 'hardcover-edition-666221_uk')
