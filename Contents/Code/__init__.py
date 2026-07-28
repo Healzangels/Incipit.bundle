@@ -1189,7 +1189,42 @@ def same_picture(first, second, tag):
         return False, False
     if not aspect_could_match(first, second):
         return False, False
-    return images_similar_via_api(first, second, tag) is True, False
+    if images_similar_via_api(first, second, tag) is not True:
+        return False, False
+    # The same picture -- but the agent can only ever withhold ITS OWN tile,
+    # so whichever copy is left standing is the other source's. Keep the
+    # BETTER one: Men at Arms held our 739KB poster next to Local Media
+    # Assets' 67KB re-encode of the same design (2026-07-28), and withholding
+    # unconditionally would have left the operator with only the small one --
+    # a loss that widening the perceptual threshold makes MORE likely, not
+    # less. A duplicate tile is cosmetic; losing the good copy is not.
+    if not other_copy_is_good_enough(first, second):
+        log.info('%s: keeping our higher-resolution copy of this picture', tag)
+        return False, False
+    return True, False
+
+
+def other_copy_is_good_enough(ours, theirs):
+    """
+        True unless THEIR copy is clearly lower resolution than ours.
+
+        Unknown dimensions fail toward withholding, which is the pre-existing
+        behaviour -- an unparsed header must not silently disable dedupe. The
+        10% margin keeps an ordinary re-encode at the same nominal size from
+        reading as a downgrade.
+    """
+    try:
+        our_dims = image_dimensions(ours)
+        their_dims = image_dimensions(theirs)
+    except Exception:
+        return True
+    if not our_dims or not their_dims:
+        return True
+    our_pixels = our_dims[0] * our_dims[1]
+    their_pixels = their_dims[0] * their_dims[1]
+    if not our_pixels or not their_pixels:
+        return True
+    return their_pixels >= our_pixels * 0.9
 
 
 def aspect_could_match(first, second):

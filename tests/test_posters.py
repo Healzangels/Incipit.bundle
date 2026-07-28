@@ -2460,8 +2460,11 @@ class TestConsultIsCheapAndBounded(unittest.TestCase):
         self.real_dims = AG.image_dimensions
         self.real_consult = AG.images_similar_via_api
         self.calls = []
+        # OTHER is the same shape AND size as SQUARE: this class tests the
+        # aspect pre-filter, so the resolution-preference rule added on
+        # 2026-07-28 must not be what decides these cases.
         dims = {self.SQUARE: (1000, 1000), self.TALL: (600, 900),
-                self.OTHER: (500, 500)}
+                self.OTHER: (1000, 1000)}
         AG.image_dimensions = lambda data: dims.get(data)
         AG.Prefs['online_perceptual_dedupe'] = True
 
@@ -2705,3 +2708,78 @@ class TestSandboxIdentifierGuard(unittest.TestCase):
                     if self.re_mod.search(r'(?<![\w.])%s\s*\(' % builtin, line):
                         offenders.append('%s:%d %s' % (name, lineno, builtin))
         self.assertEqual(offenders, [], 'sandbox-blocked builtins: %s' % offenders)
+
+
+class TestTheBetterCopySurvives(unittest.TestCase):
+    """
+        When two sources show the same picture, the one that SURVIVES must be
+        the higher-quality one.
+
+        The agent can only ever withhold ITS OWN tile -- another agent's entry
+        is not ours to remove -- so withholding unconditionally means the copy
+        left standing is whatever the other source happens to hold. Measured
+        on Men at Arms (2026-07-28): our poster is 739KB at full resolution,
+        Local Media Assets holds a 67KB re-encode of the same design. Dropping
+        ours leaves the operator with only the small one, which is the
+        opposite of the intent -- and raising the perceptual threshold made
+        that MORE likely, not less.
+
+        So: byte-identical is a free swap (same pixels, keep theirs, drop
+        ours). A merely SIMILAR match only justifies withholding when their
+        copy is at least as detailed as ours. When ours is clearly better we
+        keep it and accept the extra tile -- a duplicate tile is cosmetic,
+        losing the good copy is not.
+    """
+
+    OURS = 'ours-big'
+    THEIRS_SMALL = 'theirs-small'
+    THEIRS_BIG = 'theirs-big'
+    LMA = 'metadata://posters/com.plexapp.agents.localmedia_9999888877776666555544443333222211110000'
+    UPLOAD = 'upload://posters/aaaa0000bbbb1111cccc2222dddd3333eeee4444'
+
+    def setUp(self):
+        self.real_dims = AG.image_dimensions
+        self.real_consult = AG.images_similar_via_api
+        self.real_pfb = AG.poster_file_bytes
+        dims = {self.OURS: (2400, 2400), self.THEIRS_SMALL: (500, 500),
+                self.THEIRS_BIG: (3000, 3000)}
+        AG.image_dimensions = lambda d: dims.get(d)
+        AG.images_similar_via_api = lambda a, b, tag: True
+        AG.Prefs['online_perceptual_dedupe'] = True
+        self.store = {}
+        AG.poster_file_bytes = lambda rk, key, tag: self.store.get(key)
+
+    def tearDown(self):
+        AG.image_dimensions = self.real_dims
+        AG.images_similar_via_api = self.real_consult
+        AG.poster_file_bytes = self.real_pfb
+        AG.Prefs.pop('online_perceptual_dedupe', None)
+
+    def test_we_keep_ours_when_theirs_is_lower_resolution(self):
+        same, byte_exact = AG.same_picture(self.OURS, self.THEIRS_SMALL, 't')
+        self.assertFalse(same)
+        self.assertFalse(byte_exact)
+
+    def test_we_withhold_ours_when_theirs_is_equal_or_better(self):
+        self.assertEqual(AG.same_picture(self.OURS, self.THEIRS_BIG, 't'),
+                         (True, False))
+
+    def test_byte_identical_is_always_a_free_swap(self):
+        # Same pixels: nothing is lost by dropping our copy.
+        AG.image_dimensions = lambda d: (100, 100)
+        self.assertEqual(AG.same_picture(b'\xff\xd8SAME', b'\xff\xd8SAME', 't'),
+                         (True, True))
+
+    def test_unknown_dimensions_still_withhold(self):
+        # Fail toward the existing behaviour rather than silently disabling
+        # dedupe whenever a header cannot be parsed.
+        AG.image_dimensions = lambda d: None
+        self.assertEqual(AG.same_picture('mystery-a', 'mystery-b', 't'),
+                         (True, False))
+
+    def test_the_container_scan_keeps_our_better_copy(self):
+        # End to end through the predicate the offer paths actually call.
+        self.store[self.LMA] = self.THEIRS_SMALL
+        st = ('101', self.UPLOAD, [self.UPLOAD, self.LMA], None)
+        shown, byte_exact = AG.duplicate_shown_detail(st, self.OURS, 'k', 't')
+        self.assertFalse(shown)
