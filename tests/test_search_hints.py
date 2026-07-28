@@ -554,3 +554,81 @@ class TestTypedSearchStaysContextFree(unittest.TestCase):
         self.assertIsNone(
             self.typed(sidecar={'incipit_id': 'openlibrary-works-OL1W'}
                        ).check_for_asin())
+
+
+class TestDurationCompleteness(unittest.TestCase):
+    """
+        The multi-file duration completeness guard (v1.3.95).
+
+        A multi-file book mid-analysis reports real durations for the parts
+        Plex has analyzed and -1 (or nothing) for the rest. Summing only the
+        analyzed parts yields a too-SHORT total that reads as a runtime
+        mismatch against the CORRECT edition -- turning the duration veto,
+        the main wrong-edition guard, onto the right match. A partial sum is
+        worse than none, so one missing part withholds duration entirely.
+
+        The holistic review's mutation sweep showed the guard unpinned:
+        `if total and complete:` -> `if total:` stayed green. These pin it.
+    """
+
+    class Part(object):
+        def __init__(self, duration):
+            self.duration = duration
+
+    class Item(object):
+        def __init__(self, parts):
+            self.parts = parts
+
+    class Track(object):
+        def __init__(self, *durations):
+            self.items = [TestDurationCompleteness.Item(
+                [TestDurationCompleteness.Part(d) for d in durations])]
+
+    def extra_for(self, tracks):
+        tool = tool_for()
+        tool.media.tracks = tracks
+        return tool.incipit_extra_args()
+
+    def duration_param(self, tracks):
+        extra = self.extra_for(tracks)
+        for piece in extra.split('&'):
+            if piece.startswith('duration='):
+                return piece[len('duration='):]
+        return None
+
+    def test_fully_analyzed_parts_sum_and_ride(self):
+        # Plex exposes part durations as STRINGS; the legacy album media
+        # object keys tracks by index, so values() is what must be iterated
+        # (iterating the dict itself yields string keys and no durations).
+        tracks = {1: self.Track('3600000'), 2: self.Track('1800000')}
+        self.assertEqual(self.duration_param(tracks), '5400000')
+
+    def test_one_unanalyzed_part_withholds_the_whole_sum(self):
+        # 3600000 alone would be a plausible-looking, WRONG total.
+        tracks = {1: self.Track('3600000'), 2: self.Track('-1')}
+        self.assertIsNone(self.duration_param(tracks))
+
+    def test_a_missing_duration_counts_as_unanalyzed(self):
+        tracks = {1: self.Track('3600000'), 2: self.Track(None)}
+        self.assertIsNone(self.duration_param(tracks))
+
+    def test_a_malformed_duration_counts_as_unanalyzed_not_zero(self):
+        tracks = {1: self.Track('3600000'), 2: self.Track('soon')}
+        self.assertIsNone(self.duration_param(tracks))
+
+    def test_multi_part_track_needs_every_part(self):
+        # Incompleteness INSIDE one track (an mp3 book's parts) counts too.
+        tracks = {1: self.Track('3600000', '-1')}
+        self.assertIsNone(self.duration_param(tracks))
+
+    def test_no_tracks_sends_no_duration(self):
+        self.assertIsNone(self.duration_param(None))
+        self.assertIsNone(self.duration_param({}))
+
+    def test_list_shaped_tracks_still_sum(self):
+        # Newer container shapes hand over a list (no .values()); the
+        # fallback iterates it directly.
+        self.assertEqual(
+            self.duration_param([self.Track('3600000'),
+                                 self.Track('600000')]),
+            '4200000')

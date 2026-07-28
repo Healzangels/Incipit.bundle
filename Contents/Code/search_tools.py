@@ -985,7 +985,12 @@ class AlbumSearchTool(SearchTool):
             artist = self.media.artist
             if not artist or not self.media.filename:
                 return None
-            path = urllib.unquote(self.media.filename).decode('utf8')
+            path = urllib.unquote(self.media.filename)
+            # py2 unquote returns bytes needing the decode; a str already
+            # decoded (the py3 test harness) must not be decoded again -- the
+            # AttributeError was silently disabling this whole leg under test.
+            if not isinstance(path, unicode):
+                path = path.decode('utf8')
             akey = name_key(artist)
             if not akey:
                 return None
