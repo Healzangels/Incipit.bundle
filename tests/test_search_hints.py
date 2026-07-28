@@ -410,3 +410,129 @@ class TestFilenameAsinNeedsTheB0Anchor(unittest.TestCase):
         # user can give; that branch is unchanged.
         tool = tool_for(album='B08WF9JR2P')
         self.assertEqual(tool.check_for_asin(), 'B08WF9JR2P_us')
+
+
+class TestBuiltQueryCarriesTheHints(unittest.TestCase):
+    """
+        THE QUERY, not the helper.
+
+        The 2026-07-28 mutation sweep turned `query += self.incipit_extra_args()`
+        into a bare `self.incipit_extra_args()` -- result discarded -- and the
+        whole hint suite stayed green, because every test called the helper
+        directly. That mutation silently drops EVERY signal at once: the
+        duration veto (the primary wrong-edition guard), the sidecar ASIN and
+        ISBN pins, narrator and series. Nothing else in the system notices; the
+        symptom is a slow drift into wrong editions with no error anywhere.
+
+        These drive build_search_args and assert on the string actually sent.
+    """
+
+    def album_tool(self, sidecar=None, album='A Title', artist='An Author',
+                   manual=False, typed=None):
+        tool = ST.AlbumSearchTool.__new__(ST.AlbumSearchTool)
+        tool.prefs = dict(plexenv.FakePrefs.DEFAULTS)
+        tool.prefs['api_base_url'] = 'http://api.test:3737'
+        tool.content_type = 'books'
+        tool.media = FakeMedia(album=album, artist=artist)
+        tool.media.name = typed
+        tool.manual = manual
+        tool.normalizedName = album or ''
+        tool.sidecar_cache = sidecar
+        tool.resolved_title = None
+        return tool
+
+    def test_the_query_carries_the_sidecar_hints(self):
+        tool = self.album_tool(sidecar=dict(SIDECAR))
+        query = tool.build_search_args()
+        self.assertIn('title=', query)
+        self.assertIn('&isbn=9780593399439', query)
+        self.assertIn('&asin=B08WF9JR2P', query)
+        self.assertIn('&narrator=', query)
+        self.assertIn('&series=', query)
+
+    def test_the_query_is_not_just_title_and_author(self):
+        # The exact shape the discarded-result mutation produces.
+        tool = self.album_tool(sidecar=dict(SIDECAR))
+        query = tool.build_search_args()
+        stripped = query.replace('title=', '').replace('&author=', '')
+        self.assertTrue(
+            len(query) > len('title=A%20Title&author=An%20Author') + 10,
+            'query carries no hints beyond title/author: %r' % query)
+        self.assertTrue(stripped)
+
+    def test_a_typed_search_is_marked_and_context_free(self):
+        tool = self.album_tool(sidecar=dict(SIDECAR), manual=True,
+                               typed='Some Typed Query')
+        query = tool.build_search_args()
+        self.assertIn('&manual=1', query)
+        # The typed flow is deliberately context-free: hints must NOT ride.
+        self.assertNotIn('&isbn=', query)
+        self.assertNotIn('&narrator=', query)
+
+    def test_an_automatic_search_is_not_marked_manual(self):
+        tool = self.album_tool(sidecar=dict(SIDECAR))
+        self.assertNotIn('&manual=1', tool.build_search_args())
+
+
+class TestTypedSearchStaysContextFree(unittest.TestCase):
+    """
+        The TYPED Fix Match flow is deliberately context-free.
+
+        Two flows exist and must not converge: the dialog's AUTO-fired list
+        re-runs the automatic match (full context: sidecar title, author,
+        duration, pins -- so it scores like the scan it repeats), while a
+        query the user TYPES into Search Options is them correcting a wrong
+        identity. Feeding the old context back into that search re-pins
+        exactly what they are trying to escape -- a leak this codebase has
+        shipped before ("Project Hail Mary" typed under the Brian Jacques
+        artist could not surface Andy Weir's book).
+
+        The 2026-07-28 mutation sweep found 5 of the 7 `is_typed_search()`
+        gates entirely unpinned: each could be deleted with a green suite.
+        These assert the BEHAVIOUR of each gate, so a deleted one fails.
+    """
+
+    def typed(self, **kw):
+        tool = tool_for(**kw)
+        tool.manual = True
+        tool.media.name = 'Project Hail Mary'
+        tool.resolved_title = None
+        return tool
+
+    def auto(self, **kw):
+        tool = tool_for(**kw)
+        tool.resolved_title = None
+        return tool
+
+    def test_sidecar_title_is_ignored_when_the_user_typed_one(self):
+        # Otherwise Fix Match silently searches the sidecar's title instead
+        # of what was typed, whenever a metadata.json exists.
+        self.assertIsNone(self.typed(sidecar=dict(SIDECAR)).sidecar_title())
+        self.assertEqual(
+            self.auto(sidecar=dict(SIDECAR)).sidecar_title(),
+            'The Lost Stories Collection')
+
+    def test_no_author_is_attached_to_a_typed_query(self):
+        # The scanner's artist is the WRONG author by assumption here.
+        typed = self.typed(sidecar=dict(SIDECAR), artist='Brian Jacques')
+        self.assertIsNone(typed.resolve_author())
+        self.assertTrue(self.auto(sidecar=dict(SIDECAR),
+                                  artist='Brian Jacques').resolve_author())
+
+    def test_no_hints_ride_a_typed_query(self):
+        self.assertEqual(
+            self.typed(sidecar=dict(SIDECAR)).incipit_extra_args(), '')
+        self.assertNotEqual(
+            self.auto(sidecar=dict(SIDECAR)).incipit_extra_args(), '')
+
+    def test_a_filename_asin_never_repins_a_typed_correction(self):
+        # The quick-match lane runs BEFORE the query is built, so an ungated
+        # filename ASIN re-pinned the exact identity being corrected and the
+        # typed query never executed at all.
+        name = '/data/media/Author/Title/B0ABCDEFGH - book.m4b'
+        self.assertIsNone(self.typed(filename=name).check_for_asin())
+
+    def test_a_sidecar_pin_never_repins_a_typed_correction(self):
+        self.assertIsNone(
+            self.typed(sidecar={'incipit_id': 'openlibrary-works-OL1W'}
+                       ).check_for_asin())
