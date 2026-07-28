@@ -2152,3 +2152,66 @@ class TestOnlinePerceptualPref(unittest.TestCase):
         AG.Prefs['online_perceptual_dedupe'] = False
         self.assertTrue(AG.online_copy_is_redundant(
             self.IMG, self.IMG, True, False))
+
+
+class TestOnlineOfferRedundant(unittest.TestCase):
+    """
+        v1.3.152: the ONLINE-cover offer finally gets the same cross-source
+        check as the mirror. Measured post-sweep (2026-07-27, 27 of 246
+        albums): a rip often embeds the very CDN file the record's cover URL
+        serves, so LMA displays bytes IDENTICAL to our online cover, the
+        selection is a third picture, and the online leg -- which only ever
+        compared against cover.jpg -- re-offered the duplicate on every
+        forced refresh. File surgery could not remove what the agent
+        recreates each pass; only this check can.
+    """
+
+    IMG = b'\xff\xd8ONLINEBYTES'
+    COVER = b'\xff\xd8COVERBYTES'
+    THUMB_KEY = 'https://cdn.example/king-of-duels.jpg'
+    LMA = 'metadata://posters/com.plexapp.agents.localmedia_9999888877776666555544443333222211110000'
+    UPLOAD = 'upload://posters/aaaa0000bbbb1111cccc2222dddd3333eeee4444'
+
+    def setUp(self):
+        self.real_pfb = AG.poster_file_bytes
+        self.store = {}
+        AG.poster_file_bytes = lambda rk, key, tag: self.store.get(key)
+
+    def tearDown(self):
+        AG.poster_file_bytes = self.real_pfb
+
+    def state(self, selected, keys):
+        return ('101', selected, keys, None)
+
+    def test_cover_jpg_leg_still_fires_first(self):
+        self.assertTrue(AG.online_offer_redundant(
+            self.IMG, self.IMG, True, False, None, self.THUMB_KEY))
+
+    def test_lma_identical_bytes_withhold_the_online_copy(self):
+        # King of Duels: LMA's embedded art == the online cover bytes, the
+        # selection is a different hand-picked upload.
+        self.store[self.LMA] = self.IMG
+        st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
+        self.assertTrue(AG.online_offer_redundant(
+            self.IMG, self.COVER, True, False, st, self.THUMB_KEY))
+
+    def test_selected_online_copy_is_never_undercut(self):
+        self.store[self.LMA] = self.IMG
+        own = AG.own_container_key(self.THUMB_KEY)
+        st = self.state(own, [own, self.LMA])
+        self.assertFalse(AG.online_offer_redundant(
+            self.IMG, self.COVER, True, False, st, self.THUMB_KEY))
+
+    def test_unique_online_cover_still_offered(self):
+        self.store[self.LMA] = self.COVER
+        st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
+        self.assertFalse(AG.online_offer_redundant(
+            self.IMG, self.COVER, True, False, st, self.THUMB_KEY))
+
+    def test_no_state_fails_open(self):
+        self.assertFalse(AG.online_offer_redundant(
+            self.IMG, self.COVER, True, False, None, self.THUMB_KEY))
+
+    def test_no_bytes_fails_open(self):
+        self.assertFalse(AG.online_offer_redundant(
+            None, self.COVER, True, False, self.state(self.UPLOAD, []), self.THUMB_KEY))

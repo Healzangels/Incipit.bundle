@@ -1124,6 +1124,30 @@ def images_similar_via_api(first, second, tag):
     return verdict
 
 
+def online_offer_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
+                           state, thumb_key):
+    """
+        True when offering the ONLINE cover would list an already-displayed
+        picture again: either cover.jpg's picture (byte or perceptual --
+        online_copy_is_redundant), or, CROSS-SOURCE, bytes another agent's
+        poster already shows. The second leg exists because a rip often
+        embeds the very CDN file the record's cover URL serves, so Local
+        Media Assets displays bytes IDENTICAL to our online cover while the
+        selection is a third picture -- measured on 27 of 246 albums after
+        the 2026-07-27 corpse sweep, where the pair regenerated on every
+        forced refresh and file surgery could not remove what the agent
+        recreates each pass. Same rails as every dedupe: the selection is
+        never undercut (duplicate_shown_elsewhere's own-key rail covers the
+        online key), and no verdict fails open.
+    """
+    if online_copy_is_redundant(thumb_data, cover_bytes, local_set, mirror_skipped):
+        return True
+    if thumb_data is None:
+        return False
+    return duplicate_shown_elsewhere(
+        state, thumb_data, thumb_key, 'incipit cover-online')
+
+
 def duplicate_shown_elsewhere(state, image_bytes, own_dict_key, tag):
     """
         True when a NON-incipit container poster (an upload, Local Media
@@ -2914,6 +2938,12 @@ class AudiobookAlbum(Agent.Album):
         # it was skipped to avoid. Initialized here because the offer code
         # only runs on some paths and the keep-list runs on all of them.
         mirror_skipped = False
+        # The poster-container state, fetched at most once per pass: the
+        # mirror leg reads it when cover.jpg exists, and the online leg's
+        # cross-source check (v1.3.152) needs it even when cover.jpg is
+        # absent -- the embedded-art-equals-online-cover pair has nothing to
+        # do with the local file.
+        dup_state = None
         # Its sibling for the ONLINE copy: set when the online cover's bytes
         # are already on display (via the local mirror, or via the source
         # that caused mirror_skipped), so the offer is withheld and the
@@ -3102,13 +3132,17 @@ class AudiobookAlbum(Agent.Album):
                 # replacing cover.jpg with a different image makes the online
                 # cover an option again -- the alternative stays available
                 # exactly when it is actually an alternative.
-                online_redundant = online_copy_is_redundant(
-                    thumb_data, cover_bytes, local_set, mirror_skipped
+                if dup_state is None:
+                    dup_state = read_poster_state(
+                        helper.metadata.guid, 'incipit cover-online')
+                online_redundant = online_offer_redundant(
+                    thumb_data, cover_bytes, local_set, mirror_skipped,
+                    dup_state, helper.thumb
                 )
                 if online_redundant:
                     log.info(
-                        'incipit cover: online cover already shows the '
-                        'cover.jpg picture -- not offering a duplicate'
+                        'incipit cover: this picture is already displayed '
+                        '-- not offering the online copy'
                     )
                 elif thumb_data is not None:
                     # When the local cover was deferred (portrait print jacket)
