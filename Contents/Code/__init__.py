@@ -1004,6 +1004,13 @@ def selected_poster_bytes(rk, selected_key, tag):
         or upload://posters/...); the fetchable URL is /file?url=<it>, fully
         quoted -- the slashes and the colon must be escaped or Plex reads a
         truncated key and 404s.
+
+        DELIBERATELY not routed through the sweep memo below: a selection read
+        feeds upload/skip DECISIONS, and our own metadata:// key serves
+        MUTABLE bytes -- the same key answers with new content the moment the
+        pass rewrites the offer (a replaced cover.jpg). A stale read here can
+        skip a required upload, the destructive direction; the sweep's
+        comparisons are advisory and fail open, so only they may be memoized.
     """
     if not rk or not selected_key:
         return (None, False)
@@ -1016,22 +1023,56 @@ def selected_poster_bytes(rk, selected_key, tag):
         return (None, False)
 
 
+# Container-poster bytes fetched by the duplicate SWEEP, shared by every leg
+# that walks the same container: the mirror leg and the online leg each run
+# duplicate_shown_detail over the SAME keys, so one track's pass downloaded
+# every non-incipit poster twice. Keyed (rk, key); value (payload, stamp)
+# where payload is the bytes, or POSTER_FETCH_FAILED when the fetch errored.
+# Failures are memoized ON PURPOSE: within one pass the very next leg would
+# just repeat the doomed round-trip (8s timeout each), and the TTL clears the
+# verdict soon enough that the next pass retries. Staleness is bounded by the
+# fail-open rails: the worst a stale sweep byte can do is show one extra tile
+# for a pass (prunes additionally require byte identity against CURRENT
+# image_bytes, so a stale entry cannot delete anything it shouldn't).
+POSTER_BYTES_MEMO = {}
+# Same horizon as ALBUM_COVER_TTL: long enough to span one album's sweep
+# legs and sibling tracks, short enough that the next refresh re-reads.
+POSTER_BYTES_TTL = 60
+# ~10 posters x a few hundred KB is the realistic ceiling; the cap only
+# guards a runaway container, same clear-when-full idiom as PERCEPTUAL_MEMO.
+POSTER_BYTES_MEMO_MAX = 64
+POSTER_FETCH_FAILED = object()
+
+
 def poster_file_bytes(rk, key, tag):
     """
         Bytes of ANY container poster (by its ratingKey form) via the local
         /file endpoint, or None. The generalization of selected_poster_bytes'
         fetch, for callers comparing against posters that are NOT the
-        selection (the cross-source duplicate check).
+        selection (the cross-source duplicate check) -- memoized per
+        (rk, key) for the pass, because both sweep legs walk the same keys.
     """
     if not rk or not key:
         return None
+    memo_key = (rk, key)
+    # .get then use, never `in` then `[]` -- same concurrent-clear race the
+    # perceptual memo hit (v1.3.153).
+    hit = POSTER_BYTES_MEMO.get(memo_key)
+    if hit is not None and (time() - hit[1]) < POSTER_BYTES_TTL:
+        payload = hit[0]
+        return None if payload is POSTER_FETCH_FAILED else payload
     try:
         url = (PMS + '/library/metadata/' + rk + '/file?url='
                + urllib.quote(key, ''))
-        return HTTP.Request(url, timeout=8, cacheTime=0).content
+        data = HTTP.Request(url, timeout=8, cacheTime=0).content
     except Exception as e:
         log.error('%s: could not read container poster %s (%s)', tag, key, e)
-        return None
+        data = None
+    if len(POSTER_BYTES_MEMO) >= POSTER_BYTES_MEMO_MAX:
+        POSTER_BYTES_MEMO.clear()
+    POSTER_BYTES_MEMO[memo_key] = (
+        POSTER_FETCH_FAILED if data is None else data, time())
+    return data
 
 
 def own_container_key(dict_key):

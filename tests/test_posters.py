@@ -2783,3 +2783,97 @@ class TestTheBetterCopySurvives(unittest.TestCase):
         st = ('101', self.UPLOAD, [self.UPLOAD, self.LMA], None)
         shown, byte_exact = AG.duplicate_shown_detail(st, self.OURS, 'k', 't')
         self.assertFalse(shown)
+
+
+class SweepFetchesEachPosterOnce(unittest.TestCase):
+    """
+        The per-pass sweep memo (v1.3.161): the mirror leg and the online leg
+        each walk the SAME container keys through duplicate_shown_detail, so
+        one track's pass downloaded every non-incipit poster twice -- and a
+        failing key ate its 8s timeout once per leg. poster_file_bytes now
+        memoizes per (rk, key) for POSTER_BYTES_TTL, failures included.
+
+        selected_poster_bytes is DELIBERATELY exempt: a selection read feeds
+        upload/skip decisions and our own metadata:// key serves mutable
+        bytes, so a stale read there can skip a required upload. The sweep's
+        comparisons only ever fail open.
+    """
+
+    UPLOAD = 'upload://posters/aaaa0000bbbb1111cccc2222dddd3333eeee4444'
+    LMA = 'metadata://posters/com.plexapp.agents.localmedia_ffff0000'
+    OWN = ('metadata://posters/com.plexapp.agents.incipit_'
+           '124a757ccdffc12d2dbe1a4bdf291e5c6bebf1cc')
+
+    def setUp(self):
+        self.reads = []
+        self.real = AG.HTTP.Request
+        self.fail_urls = set()
+
+        def router(url, **kwargs):
+            self.reads.append(url)
+            if url in self.fail_urls:
+                raise IOError('poster read failed')
+
+            class Fetched(object):
+                content = b'\xff\xd8POSTERBYTES'
+
+            return Fetched()
+
+        AG.HTTP.Request = router
+        AG.POSTER_BYTES_MEMO.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real
+        AG.POSTER_BYTES_MEMO.clear()
+
+    def test_second_leg_reuses_the_first_legs_download(self):
+        state = ('301', self.UPLOAD, [self.OWN, self.UPLOAD, self.LMA], None)
+        img = b'\xff\xd8ADIFFERENTIMAGE'
+        # Mirror leg, then online leg, exactly the per-track sequence.
+        AG.duplicate_shown_detail(state, img, 'incipit-local-cover', 't')
+        first_leg = len(self.reads)
+        self.assertGreater(first_leg, 0)
+        AG.duplicate_shown_detail(state, img, 'incipit-online-cover', 't')
+        self.assertEqual(
+            len(self.reads), first_leg,
+            'the online leg re-downloaded posters the mirror leg already had')
+
+    def test_a_failed_fetch_is_not_retried_within_the_pass(self):
+        url = (AG.PMS + '/library/metadata/302/file?url='
+               + AG.urllib.quote(self.UPLOAD, ''))
+        self.fail_urls.add(url)
+        self.assertIsNone(AG.poster_file_bytes('302', self.UPLOAD, 't'))
+        self.assertIsNone(AG.poster_file_bytes('302', self.UPLOAD, 't'))
+        self.assertEqual(len(self.reads), 1,
+                         'a doomed fetch must not repeat its 8s timeout')
+
+    def test_the_memo_expires(self):
+        AG.poster_file_bytes('303', self.UPLOAD, 't')
+        for key in list(AG.POSTER_BYTES_MEMO):
+            payload, stamp = AG.POSTER_BYTES_MEMO[key]
+            AG.POSTER_BYTES_MEMO[key] = (payload, stamp - AG.POSTER_BYTES_TTL - 1)
+        AG.poster_file_bytes('303', self.UPLOAD, 't')
+        self.assertEqual(len(self.reads), 2, 'an expired entry must refetch')
+
+    def test_distinct_keys_fetch_separately(self):
+        AG.poster_file_bytes('304', self.UPLOAD, 't')
+        AG.poster_file_bytes('304', self.LMA, 't')
+        self.assertEqual(len(self.reads), 2)
+
+    def test_the_selection_read_is_never_served_stale(self):
+        # Two reads, two requests: the exemption is the contract, because our
+        # own container key answers with NEW bytes the moment a pass rewrites
+        # the offer, and a stale skip-decision here loses an upload.
+        AG.selected_poster_bytes('305', self.OWN, 't')
+        AG.selected_poster_bytes('305', self.OWN, 't')
+        self.assertEqual(len(self.reads), 2)
+
+    def test_a_memoized_sweep_failure_cannot_blind_the_selection_read(self):
+        url = (AG.PMS + '/library/metadata/306/file?url='
+               + AG.urllib.quote(self.OWN, ''))
+        self.fail_urls.add(url)
+        self.assertIsNone(AG.poster_file_bytes('306', self.OWN, 't'))
+        self.fail_urls.clear()
+        data, known = AG.selected_poster_bytes('306', self.OWN, 't')
+        self.assertTrue(known, 'the selection read must retry, not inherit '
+                               'the sweep memo\'s failure')
