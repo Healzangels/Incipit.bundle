@@ -1217,6 +1217,17 @@ def online_copy_is_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
         return False
     if same_image(cover_bytes, thumb_data):
         return True
+    # The perceptual branch is the operator's dial (Option A, 2026-07-27):
+    # ON keeps the picker clean while LMA's tiles carry any branded
+    # variants; OFF (the documented step before disabling LMA) re-offers
+    # every perceptually-suppressed online cover on the next refresh --
+    # suppression is stateless, so variants are only unlisted, never lost.
+    # Byte-identical suppression above stays unconditional (zero-loss).
+    try:
+        if not Prefs['online_perceptual_dedupe']:
+            return False
+    except Exception:
+        return False
     return images_similar_via_api(cover_bytes, thumb_data, tag) is True
 
 

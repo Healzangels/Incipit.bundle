@@ -102,6 +102,12 @@
         "default": "true"
     },
     {
+        "id": "online_perceptual_dedupe",
+        "label": "Skip the online cover when it repeats already-displayed art (uncheck before disabling Local Media Assets so variant covers return)",
+        "type": "bool",
+        "default": "true"
+    },
+    {
         "id": "logging_level",
         "label": "Logging level:",
         "type": "enum",

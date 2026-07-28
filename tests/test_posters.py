@@ -2111,3 +2111,44 @@ class TestOnlinePerceptualRedundant(unittest.TestCase):
         AG.images_similar_via_api = boom
         self.assertFalse(AG.online_copy_is_redundant(
             self.VARIANT, self.IMG, False, False))
+
+
+class TestOnlinePerceptualPref(unittest.TestCase):
+    """
+        v1.3.151 (operator's Option A): online_perceptual_dedupe gates ONLY
+        the perceptual branch of the online-cover redundancy check. Default
+        on -- the operator runs LMA today, so variants ride LMA's tiles and
+        the picker stays clean. Unchecking it (the documented step before
+        disabling LMA) makes every perceptually-suppressed online cover
+        re-offer on the next refresh: suppression is stateless, so nothing
+        is ever lost, only unlisted. Byte-identical suppression is zero-loss
+        by definition and stays unconditional.
+    """
+
+    IMG = b'\xff\xd8IMAGEBYTES'
+    VARIANT = b'\xff\xd8SAMEPICTUREBANNERED'
+
+    def setUp(self):
+        self.real_consult = AG.images_similar_via_api
+
+    def tearDown(self):
+        AG.images_similar_via_api = self.real_consult
+        AG.Prefs.pop('online_perceptual_dedupe', None)
+
+    def test_pref_defaults_on(self):
+        AG.images_similar_via_api = lambda a, b, tag: True
+        self.assertTrue(AG.online_copy_is_redundant(
+            self.VARIANT, self.IMG, True, False))
+
+    def test_pref_off_skips_the_consult_entirely(self):
+        def boom(a, b, tag):
+            raise AssertionError('consult reached with the pref off')
+        AG.images_similar_via_api = boom
+        AG.Prefs['online_perceptual_dedupe'] = False
+        self.assertFalse(AG.online_copy_is_redundant(
+            self.VARIANT, self.IMG, True, False))
+
+    def test_pref_off_keeps_byte_identity_suppression(self):
+        AG.Prefs['online_perceptual_dedupe'] = False
+        self.assertTrue(AG.online_copy_is_redundant(
+            self.IMG, self.IMG, True, False))
