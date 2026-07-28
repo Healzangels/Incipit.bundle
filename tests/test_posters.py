@@ -1678,6 +1678,24 @@ class CoverBlockFlowGuards(unittest.TestCase):
         self.assertIn('album_cover_decision(', src)
         self.assertIn('remember_album_cover_decision(', src)
 
+    def test_the_album_memo_is_not_gated_on_prefer_local(self):
+        # v1.3.152's cross-source leg computes the online flags with the pref
+        # OFF too, so gating the memo on prefer_local (as v1.3.153 did) meant
+        # a forced pass of a multi-file book re-fetched the online cover and
+        # re-swept the container once per track -- and a sibling restored
+        # with DEFAULT flags could resurrect the online entry track 1 pruned
+        # (online_redundant=False keeps the thumb in the keep-list).
+        src = self.source()
+        self.assertNotIn('if prefer_local and remembered is None:', src,
+                         'the memo write must run for both pref states')
+        self.assertIn('if remembered is None:\n'
+                      '            remember_album_cover_decision(', src)
+        # The read side likewise: consulted before, not inside, the
+        # prefer_local branch.
+        self.assertIn('remembered = album_cover_decision('
+                      'helper.metadata.guid, helper.force)\n'
+                      '        if remembered is not None:', src)
+
     def SUPERSEDED_test_online_offer_and_keep_list_share_the_redundancy_verdict(self):
         # The predicate judges where the bytes are in hand (the offer), and
         # the keep-list plus the sibling-track restore reuse the STORED

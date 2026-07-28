@@ -3238,26 +3238,31 @@ class AudiobookAlbum(Agent.Album):
         # it, so leaving the assignment there was a NameError whenever the pref
         # was off.
         local_key = 'incipit-local-cover'
-        # Hoisted for the same reason: the online block below consults it, and
-        # it is only ever assigned under prefer_local.
-        remembered = None
-        if prefer_local:
-            remembered = album_cover_decision(helper.metadata.guid, helper.force)
-            if remembered is not None:
-                # A sibling track already did the reads and the offers this
-                # pass, and the container survives between tracks -- only the
-                # FLAGS need restoring. Without this, a dup-skip (which never
-                # adds our key) defeated the membership guard below and every
-                # track of a curated album re-paid the whole read/fetch bill.
-                local_set = remembered.get('local_set', False)
-                mirror_skipped = remembered.get('mirror_skipped', False)
-                mirror_byte_exact = remembered.get('mirror_byte_exact', False)
-                deferred_portrait_local = remembered.get(
-                    'deferred_portrait_local', False)
-                poisoned_local = remembered.get('poisoned_local', False)
-                online_redundant = remembered.get('online_redundant', False)
-                online_byte_exact = remembered.get('online_byte_exact', False)
-                online_prune_ok = remembered.get('online_prune_ok', False)
+        # Consulted for BOTH pref states (v1.3.162): with prefer_local OFF
+        # the cross-source leg (v1.3.152) still computes the online flags and
+        # downloads the online cover per track on force -- the write-site
+        # comment's "with it off, none of these flags can be set" stopped
+        # being true the day that leg landed. Worse than the wasted fetches:
+        # a sibling running with DEFAULT flags after track 1 pruned a
+        # redundant online entry would compute keep-list membership with
+        # online_redundant=False and resurrect the very tile track 1 removed.
+        remembered = album_cover_decision(helper.metadata.guid, helper.force)
+        if remembered is not None:
+            # A sibling track already did the reads and the offers this
+            # pass, and the container survives between tracks -- only the
+            # FLAGS need restoring. Without this, a dup-skip (which never
+            # adds our key) defeated the membership guard below and every
+            # track of a curated album re-paid the whole read/fetch bill.
+            local_set = remembered.get('local_set', False)
+            mirror_skipped = remembered.get('mirror_skipped', False)
+            mirror_byte_exact = remembered.get('mirror_byte_exact', False)
+            deferred_portrait_local = remembered.get(
+                'deferred_portrait_local', False)
+            poisoned_local = remembered.get('poisoned_local', False)
+            online_redundant = remembered.get('online_redundant', False)
+            online_byte_exact = remembered.get('online_byte_exact', False)
+            online_prune_ok = remembered.get('online_prune_ok', False)
+        elif prefer_local:
             # NO container-membership fast-path here. The memo above is the
             # only honest "this pass already did the work" signal: the
             # container arrives DESERIALIZED, and with two libraries side by
@@ -3269,102 +3274,101 @@ class AudiobookAlbum(Agent.Album):
             # the honest signal: one cover.jpg read per book per pass past
             # the memo TTL -- which also means a replaced cover.jpg now takes
             # effect on ANY refresh, not only a forced one.
-            else:
-                cover_bytes = local_cover_bytes(helper)
-                # POISON FIRST, independent of shape and of whether the record
-                # has an online cover.
-                #
-                # This check used to sit INSIDE the portrait branch on the
-                # premise that "an author photo is portrait by definition". It
-                # is not: Audible author art is frequently square, and a
-                # Hardcover/OpenLibrary book-level match has no online cover at
-                # all (helper.thumb falsy) -- the case the block below is
-                # deliberately written to survive. In either, poisoned_local
-                # stayed False and the author photo was handed sort_order=0 plus
-                # validate_keys, i.e. Plex was TOLD to make it the default
-                # poster. Gating a byte-identity fact behind an aspect-ratio
-                # heuristic made the repair work for tall author photos and not
-                # square ones, which reads as random.
-                if cover_bytes:
-                    artist_bytes, known = artist_poster_bytes(
-                        helper.metadata.guid, 'incipit cover'
-                    )
-                    if selection_is_artist_art(artist_bytes, cover_bytes):
-                        # ...unless the artist's art IS this book's own cover.
-                        # For a one-book author Audible/Hardcover routinely serve
-                        # the book cover AS the author image, so byte-identity
-                        # says nothing about poison -- and acting on it would let
-                        # the mirror below replace a hand-curated cover.jpg with
-                        # the online copy. Comparing against the online cover
-                        # settles it with data already in hand.
-                        online = fetch_url_bytes(helper.thumb) if helper.thumb else None
-                        if online and selection_is_artist_art(artist_bytes, online):
-                            log.info(
-                                'incipit cover: cover.jpg matches the artist art, but '
-                                'so does the ONLINE cover -- this is the book\'s own '
-                                'art, not poison; leaving it alone'
-                            )
-                        else:
-                            poisoned_local = True
-                            log.warn(
-                                'incipit cover: local cover.jpg is the ARTIST photo -- '
-                                'not offering it as the default, and allowing the '
-                                'selected poster to mirror back over it'
-                            )
-                    elif not known:
-                        # Could not tell. Display-only decision, so proceed as
-                        # before rather than demoting a possibly-fine cover --
-                        # but say so, because the WRITE paths fail closed on the
-                        # same signal and the asymmetry should be visible.
-                        log.error(
-                            'incipit cover: could not read the artist poster; '
-                            'cannot check cover.jpg for poison this pass'
+            cover_bytes = local_cover_bytes(helper)
+            # POISON FIRST, independent of shape and of whether the record
+            # has an online cover.
+            #
+            # This check used to sit INSIDE the portrait branch on the
+            # premise that "an author photo is portrait by definition". It
+            # is not: Audible author art is frequently square, and a
+            # Hardcover/OpenLibrary book-level match has no online cover at
+            # all (helper.thumb falsy) -- the case the block below is
+            # deliberately written to survive. In either, poisoned_local
+            # stayed False and the author photo was handed sort_order=0 plus
+            # validate_keys, i.e. Plex was TOLD to make it the default
+            # poster. Gating a byte-identity fact behind an aspect-ratio
+            # heuristic made the repair work for tall author photos and not
+            # square ones, which reads as random.
+            if cover_bytes:
+                artist_bytes, known = artist_poster_bytes(
+                    helper.metadata.guid, 'incipit cover'
+                )
+                if selection_is_artist_art(artist_bytes, cover_bytes):
+                    # ...unless the artist's art IS this book's own cover.
+                    # For a one-book author Audible/Hardcover routinely serve
+                    # the book cover AS the author image, so byte-identity
+                    # says nothing about poison -- and acting on it would let
+                    # the mirror below replace a hand-curated cover.jpg with
+                    # the online copy. Comparing against the online cover
+                    # settles it with data already in hand.
+                    online = fetch_url_bytes(helper.thumb) if helper.thumb else None
+                    if online and selection_is_artist_art(artist_bytes, online):
+                        log.info(
+                            'incipit cover: cover.jpg matches the artist art, but '
+                            'so does the ONLINE cover -- this is the book\'s own '
+                            'art, not poison; leaving it alone'
                         )
-                # A clearly PORTRAIT cover.jpg is a print jacket, not audiobook
-                # art -- the signature of an upstream pipeline that matched a
-                # print edition (the same mismatch that writes a wrong-edition
-                # ASIN into the sidecar). Plex music art is square, and the API
-                # offers a real square cover, so defer to it rather than making
-                # the portrait scan the default. Square/near-square local covers
-                # (including every hand-curated one) are untouched. Never for a
-                # file already judged poison: that one must not be preserved.
-                if (
-                    cover_bytes and helper.thumb and not poisoned_local
-                    and local_cover_is_portrait(cover_bytes)
-                ):
-                    log.warn(
-                        'incipit cover: local cover.jpg is PORTRAIT (print jacket?) '
-                        '-- deferring to the square online cover as the default'
-                    )
-                    deferred_portrait_local = True
-                # Cross-source dedupe (v1.3.133): when an upload or Local Media
-                # Assets already displays these exact bytes -- and neither the
-                # fresh-scan anchor nor the selection needs OUR copy (see the
-                # rails in duplicate_shown_elsewhere) -- offering the mirror
-                # just lists the same picture twice. mirror_skipped also keeps
-                # the stale mirror entry OUT of the membership list below, so
-                # the old duplicate tile is pruned rather than lingering.
-                if cover_bytes:
-                    dup_state = read_poster_state(
-                        helper.metadata.guid, 'incipit cover-offer')
-                    mirror_skipped, mirror_byte_exact = mirror_withheld(
-                        dup_state, cover_bytes, local_key, 'incipit cover-offer')
-                if cover_bytes and not mirror_skipped:
-                    try:
-                        # A DEFERRED portrait cover is still OFFERED, just not the
-                        # default: dropping it entirely left the operator unable to
-                        # pick their own art back, which is the very bug the
-                        # always-offer comment below records as already fixed.
-                        helper.metadata.posters[local_key] = Proxy.Media(
-                            cover_bytes,
-                            sort_order=1 if (deferred_portrait_local or poisoned_local) else 0
+                    else:
+                        poisoned_local = True
+                        log.warn(
+                            'incipit cover: local cover.jpg is the ARTIST photo -- '
+                            'not offering it as the default, and allowing the '
+                            'selected poster to mirror back over it'
                         )
-                        if not (deferred_portrait_local or poisoned_local):
-                            helper.metadata.posters.validate_keys([local_key])
-                            log.warn('incipit cover: LOCAL cover set as the default poster')
-                            local_set = True
-                    except Exception as e:
-                        log.error('incipit cover: Proxy.Media(local) failed (%s)', e)
+                elif not known:
+                    # Could not tell. Display-only decision, so proceed as
+                    # before rather than demoting a possibly-fine cover --
+                    # but say so, because the WRITE paths fail closed on the
+                    # same signal and the asymmetry should be visible.
+                    log.error(
+                        'incipit cover: could not read the artist poster; '
+                        'cannot check cover.jpg for poison this pass'
+                    )
+            # A clearly PORTRAIT cover.jpg is a print jacket, not audiobook
+            # art -- the signature of an upstream pipeline that matched a
+            # print edition (the same mismatch that writes a wrong-edition
+            # ASIN into the sidecar). Plex music art is square, and the API
+            # offers a real square cover, so defer to it rather than making
+            # the portrait scan the default. Square/near-square local covers
+            # (including every hand-curated one) are untouched. Never for a
+            # file already judged poison: that one must not be preserved.
+            if (
+                cover_bytes and helper.thumb and not poisoned_local
+                and local_cover_is_portrait(cover_bytes)
+            ):
+                log.warn(
+                    'incipit cover: local cover.jpg is PORTRAIT (print jacket?) '
+                    '-- deferring to the square online cover as the default'
+                )
+                deferred_portrait_local = True
+            # Cross-source dedupe (v1.3.133): when an upload or Local Media
+            # Assets already displays these exact bytes -- and neither the
+            # fresh-scan anchor nor the selection needs OUR copy (see the
+            # rails in duplicate_shown_elsewhere) -- offering the mirror
+            # just lists the same picture twice. mirror_skipped also keeps
+            # the stale mirror entry OUT of the membership list below, so
+            # the old duplicate tile is pruned rather than lingering.
+            if cover_bytes:
+                dup_state = read_poster_state(
+                    helper.metadata.guid, 'incipit cover-offer')
+                mirror_skipped, mirror_byte_exact = mirror_withheld(
+                    dup_state, cover_bytes, local_key, 'incipit cover-offer')
+            if cover_bytes and not mirror_skipped:
+                try:
+                    # A DEFERRED portrait cover is still OFFERED, just not the
+                    # default: dropping it entirely left the operator unable to
+                    # pick their own art back, which is the very bug the
+                    # always-offer comment below records as already fixed.
+                    helper.metadata.posters[local_key] = Proxy.Media(
+                        cover_bytes,
+                        sort_order=1 if (deferred_portrait_local or poisoned_local) else 0
+                    )
+                    if not (deferred_portrait_local or poisoned_local):
+                        helper.metadata.posters.validate_keys([local_key])
+                        log.warn('incipit cover: LOCAL cover set as the default poster')
+                        local_set = True
+                except Exception as e:
+                    log.error('incipit cover: Proxy.Media(local) failed (%s)', e)
 
         # The online cover (native square Apple, else the provider portrait) is
         # ALWAYS offered as a pickable option -- even when a local cover.jpg is
@@ -3497,11 +3501,15 @@ class AudiobookAlbum(Agent.Album):
 
         # Carry this track's decisions to its siblings -- AFTER the online
         # block, so online_redundant is part of the record. Only when this
-        # track actually computed them (a memo hit changes nothing), and only
-        # under prefer_local (with it off, none of these flags can be set).
+        # track actually computed them (a memo hit changes nothing). For BOTH
+        # pref states: an earlier gate said "with prefer_local off, none of
+        # these flags can be set", which the v1.3.152 cross-source leg made
+        # false -- the online flags are computed either way, and without the
+        # record every sibling re-fetched the online cover and re-swept the
+        # container on a forced pass of a multi-file book.
         # Recorded even when cover.jpg was absent: "there is nothing to do"
         # is also a decision the other 26 tracks should not re-derive.
-        if prefer_local and remembered is None:
+        if remembered is None:
             remember_album_cover_decision(
                 helper.metadata.guid, helper.force,
                 {'local_set': local_set,
