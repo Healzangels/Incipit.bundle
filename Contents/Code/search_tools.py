@@ -3,13 +3,23 @@ import json
 import re
 # Import internal tools
 from logging import Logging
-from region_tools import RegionTool
+from region_tools import RegionTool, available_regions
 import urllib
 
 # Setup logger
 log = Logging()
 
-asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
+# The FILENAME probe requires the B0 prefix: a shape-only match let a
+# 10-character run inside an ISBN-13 ("9780593399") quick-match at score 100,
+# skipping the whole pipeline and pinning the album to a record that 404s. The
+# sidecar path was hardened for exactly this; this one never was (2026-07-28).
+asin_regex = re.compile(r'B0[A-Z\d]{8}')
+# The regions the API will accept, taken from the one table that defines them
+# rather than a second hand-maintained list.
+KNOWN_REGIONS = frozenset(available_regions.keys())
+# A TYPED search is the most explicit identity a user can give, so it keeps
+# the historical shape-only form.
+typed_asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
 region_regex = re.compile(r'(?<=\[)[A-Za-z]{2}(?=\])')
 # THE name-comparison key for the whole bundle. Lives here because both
 # __init__ and update_tools already import from this module, and neither can
@@ -278,8 +288,13 @@ class SearchTool:
             filename_search_asin = None
             try:
                 # Provide a plain filename for ASIN search
-                filename_unquoted = urllib.unquote(
-                    self.media.filename).decode('utf8')
+                filename_unquoted = urllib.unquote(self.media.filename)
+                try:
+                    filename_unquoted = filename_unquoted.decode('utf8')
+                except Exception:
+                    # py2 str decodes; a py3 str has no .decode and is already
+                    # text. An ASIN and a region marker are ASCII either way.
+                    pass
                 filename_search_asin = self.search_asin(filename_unquoted)
             except Exception as e:
                 log.error('Error checking filename for ASIN: %s', e)
@@ -292,7 +307,7 @@ class SearchTool:
         # Check search query for ASIN
         # Default to album and use artist if no album
         manual_asin = self.media.album if self.media.album else self.media.artist
-        manual_search_asin = self.search_asin(manual_asin)
+        manual_search_asin = self.search_asin(manual_asin, typed=True)
 
         if manual_search_asin:
             log.info('ASIN found in manual search')
@@ -302,13 +317,29 @@ class SearchTool:
     # Check for region override
     def check_for_region(self, search_title):
         """
-            Overrides the search with a region.
+            Overrides the search with a region, but only with a region we can
+            actually ask for.
+
+            The marker regex matches ANY bracketed two letters, so `[CD]`,
+            `[HQ]`, `[EN]` and the natural uppercase `[UK]` all became the
+            region. The API validates against a lowercase enum and hard-400s
+            anything else -- and an answered 4xx from our own host is treated
+            as permanent -- so the search died with only "No results found",
+            while the value was joined into metadata.id and made every later
+            lookup 400 forever. On the stock Audible path the same value is an
+            unguarded dict index (KeyError). Five reviewers found this
+            independently on 2026-07-28; verified live.
         """
         match_region = self.search_region(search_title)
-        if match_region:
+        candidate = match_region.group(0).lower() if match_region else None
+        if candidate and candidate in KNOWN_REGIONS:
             log.info('Region found in title')
-            self.region_override = match_region.group(0)
+            self.region_override = candidate
         else:
+            if candidate:
+                log.info(
+                    'incipit region: ignoring bracketed token [%s] -- not a '
+                    'region we can request', candidate)
             self.region_override = self.prefs['region']
         log.info('Region Override: %s', self.region_override)
 
@@ -590,12 +621,17 @@ class SearchTool:
             log.debug('ASIN found in title')
             return self.override_with_asin(match_asin, self.region_override)
 
-    def search_asin(self, input):
+    def search_asin(self, input, typed=False):
         """
-            Searches for ASIN in a string.
+            Searches for an ASIN in a string.
+
+            `typed=True` keeps the historical shape-only pattern for text the
+            user typed into Search Options -- the most explicit identity they
+            can give. Filenames get the B0-anchored form, because a shape-only
+            match there pinned albums to ISBN substrings (2026-07-28).
         """
         if input:
-            return re.search(asin_regex, input)
+            return re.search(typed_asin_regex if typed else asin_regex, input)
 
     def search_region(self, input):
         """

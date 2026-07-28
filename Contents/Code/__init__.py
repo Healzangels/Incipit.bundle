@@ -1242,6 +1242,14 @@ def online_prune_allowed(state, thumb_key):
     return selected_key != own_container_key(thumb_key)
 
 
+def local_prune_allowed(state, local_key):
+    """
+        False when the LOCAL mirror entry is itself the selection. Same rail
+        as online_prune_allowed, for the branch that had none.
+    """
+    return online_prune_allowed(state, local_key)
+
+
 def mirror_withheld(state, image_bytes, own_dict_key, tag):
     """
         (withheld, byte_exact) for the local mirror -- `duplicate_shown_elsewhere`
@@ -1250,6 +1258,35 @@ def mirror_withheld(state, image_bytes, own_dict_key, tag):
         on byte identity.
     """
     return duplicate_shown_detail(state, image_bytes, own_dict_key, tag)
+
+
+def cover_keep_list(thumb_key, local_key, thumb_present, local_present,
+                    online_redundant, online_byte_exact, online_prune_ok,
+                    mirror_skipped, mirror_byte_exact):
+    """
+        The membership list for `validate_keys` -- which entries of OUR
+        namespace survive this pass.
+
+        A function, not an inline block, because the 2026-07-28 mutation
+        sweep proved every guard here was unenforced: the only tests were
+        `assertIn('foo(', source)`, which cannot distinguish a live guard
+        from a discarded return value. Extracting the decision makes it
+        testable behaviourally.
+
+        Two rules, both learned the expensive way:
+          * PRUNE only on BYTE identity. Identical bytes prove the picture is
+            displayed elsewhere; a perceptual verdict only suggests it, and a
+            variant deleted here never returns because the same bytes
+            re-derive the same verdict every pass.
+          * NEVER prune the selection (`online_prune_ok`), which is the
+            picked-poster-evaporates failure.
+    """
+    keep = [thumb_key] if thumb_present else []
+    if online_redundant and online_byte_exact and online_prune_ok:
+        keep = []
+    if local_present and not (mirror_skipped and mirror_byte_exact):
+        keep.append(local_key)
+    return keep
 
 
 def online_offer_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
@@ -1267,12 +1304,23 @@ def online_offer_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
         recreates each pass. Same rails as every dedupe: the selection is
         never undercut (duplicate_shown_elsewhere's own-key rail covers the
         online key), and no verdict fails open.
+
+        Returns (redundant, byte_exact). The grade travels with the verdict
+        because the caller may only PRUNE on byte identity -- the online
+        entry is exactly where a branded or re-encoded VARIANT lives, and
+        v1.3.153 gave the local mirror that protection while leaving the
+        online copy deletable on a similarity guess (2026-07-28 review).
     """
-    if online_copy_is_redundant(thumb_data, cover_bytes, local_set, mirror_skipped):
-        return True
+    if cover_bytes is not None and thumb_data is not None and (
+        local_set or mirror_skipped
+    ):
+        same, byte_exact = same_picture(cover_bytes, thumb_data,
+                                        'incipit cover')
+        if same:
+            return True, byte_exact
     if thumb_data is None:
-        return False
-    return duplicate_shown_elsewhere(
+        return False, False
+    return duplicate_shown_detail(
         state, thumb_data, thumb_key, 'incipit cover-online')
 
 
@@ -1400,7 +1448,17 @@ def album_cover_decision(guid, force):
 
 
 def remember_album_cover_decision(guid, force, flags):
-    album_cover_memo[(guid, bool(force))] = (flags, time())
+    """
+        Store this pass's cover decisions for the album's other tracks.
+
+        `flags` is a NAMED MAPPING, never a tuple: it was a positional
+        5-tuple, two flags were added to the block without being added to it,
+        and tracks 2..N silently restored the wrong values -- turning both
+        2026-07-28 prune rails off for 26 of a 27-part book's tracks. A dict
+        cannot drift positionally, and `album_cover_decision`'s readers use
+        `.get(key, False)` so an older entry degrades to the SAFE value.
+    """
+    album_cover_memo[(guid, bool(force))] = (dict(flags), time())
 
 
 # Per-guid cache for the artist poster, because update() runs once per TRACK
@@ -3072,6 +3130,11 @@ class AudiobookAlbum(Agent.Album):
         # sibling track has no bytes to re-judge with, and failing open
         # there would re-offer the very duplicate the first track removed.
         online_redundant = False
+        # ...and the evidence behind it. Only BYTE identity licenses a prune,
+        # and only a non-selected entry may be pruned at all; both were
+        # re-derived (wrongly) on sibling tracks before 2026-07-28.
+        online_byte_exact = False
+        online_prune_ok = True
         # Set when a PORTRAIT local cover.jpg was skipped in favour of the square
         # online cover, so the force-select below does not simply re-read the file
         # and re-impose it, and the online cover keeps the default slot.
@@ -3110,8 +3173,15 @@ class AudiobookAlbum(Agent.Album):
                 # FLAGS need restoring. Without this, a dup-skip (which never
                 # adds our key) defeated the membership guard below and every
                 # track of a curated album re-paid the whole read/fetch bill.
-                (local_set, mirror_skipped, deferred_portrait_local,
-                 poisoned_local, online_redundant) = remembered
+                local_set = remembered.get('local_set', False)
+                mirror_skipped = remembered.get('mirror_skipped', False)
+                mirror_byte_exact = remembered.get('mirror_byte_exact', False)
+                deferred_portrait_local = remembered.get(
+                    'deferred_portrait_local', False)
+                poisoned_local = remembered.get('poisoned_local', False)
+                online_redundant = remembered.get('online_redundant', False)
+                online_byte_exact = remembered.get('online_byte_exact', False)
+                online_prune_ok = remembered.get('online_prune_ok', False)
             # NO container-membership fast-path here. The memo above is the
             # only honest "this pass already did the work" signal: the
             # container arrives DESERIALIZED, and with two libraries side by
@@ -3256,10 +3326,14 @@ class AudiobookAlbum(Agent.Album):
                 if dup_state is None:
                     dup_state = read_poster_state(
                         helper.metadata.guid, 'incipit cover-online')
-                online_redundant = online_offer_redundant(
+                online_redundant, online_byte_exact = online_offer_redundant(
                     thumb_data, cover_bytes, local_set, mirror_skipped,
                     dup_state, helper.thumb
                 )
+                # Decided HERE, where the container state is in hand: a
+                # sibling track has no state, and re-deriving it there made
+                # the rail permissive on 26 of a 27-part book's tracks.
+                online_prune_ok = online_prune_allowed(dup_state, helper.thumb)
                 if online_redundant:
                     log.info(
                         'incipit cover: this picture is already displayed '
@@ -3293,34 +3367,26 @@ class AudiobookAlbum(Agent.Album):
                 # its sort_order=1 demotion dead code. The online cover still
                 # becomes the default by sort_order=0; validate_keys is what
                 # decides membership, not priority.
-                keep = [helper.thumb]
-                # The online copy is itself the duplicate when its bytes are
-                # the displayed cover.jpg bytes -- keeping its stale entry
-                # would re-create through the online key the very duplicate
-                # the mirror skip removed. online_redundant was judged where
-                # the bytes were in hand (this track or a sibling's memo);
-                # an unjudged entry fails open.
-                # ...but NEVER when that online entry is the selection
-                # (2026-07-28 review, CONFIRMED): pruning the key the operator
-                # picked is the picked-poster-evaporates failure, and the
-                # perceptual case does not self-heal -- the same inputs
-                # re-derive the verdict on every later pass.
-                if online_redundant and online_prune_allowed(
-                    dup_state, helper.thumb
-                ):
-                    keep = []
-                # When the mirror offer was withheld as a cross-source
-                # duplicate, leaving its old entry in the membership list
-                # would defeat the skip -- the stale tile is exactly the
-                # duplicate being removed. Excluding it here prunes it.
-                # Only on BYTE identity: a perceptual verdict may withhold
-                # the offer, but deleting the operator's curated cover.jpg
-                # entry on a similarity guess is the one thing this whole
-                # subsystem exists not to do.
-                if local_key in helper.metadata.posters and not (
-                    mirror_skipped and mirror_byte_exact
-                ):
-                    keep.append(local_key)
+                # One decision, one function -- see cover_keep_list for the
+                # two rules (prune only on byte identity, never prune the
+                # selection) and why it is not inline any more.
+                keep = cover_keep_list(
+                    thumb_key=helper.thumb, local_key=local_key,
+                    thumb_present=True,
+                    local_present=local_key in helper.metadata.posters,
+                    online_redundant=online_redundant,
+                    online_byte_exact=online_byte_exact,
+                    online_prune_ok=online_prune_ok,
+                    mirror_skipped=mirror_skipped,
+                    mirror_byte_exact=mirror_byte_exact)
+                if helper.thumb not in keep:
+                    log.warn(
+                        'incipit cover: pruning our online cover entry '
+                        '(byte-identical to a poster already displayed)')
+                if local_key in helper.metadata.posters and local_key not in keep:
+                    log.warn(
+                        'incipit cover: pruning our local-mirror entry '
+                        '(byte-identical to a poster already displayed)')
                 try:
                     helper.metadata.posters.validate_keys(keep)
                 except Exception as e:
@@ -3328,6 +3394,13 @@ class AudiobookAlbum(Agent.Album):
         elif (
             mirror_skipped and mirror_byte_exact
             and local_key in helper.metadata.posters
+            # ...and the mirror is not itself the selection. The old
+            # justification -- "mirror_skipped guarantees the selection is a
+            # non-incipit key" -- is false: duplicate_shown_detail SKIPS
+            # incipit keys while scanning rather than proving none is
+            # selected, so a book re-matched to a thumb-less record could
+            # evict the very entry the operator picked (2026-07-28 review).
+            and local_prune_allowed(dup_state, local_key)
         ):
             # A thumb-less record (Hardcover/OpenLibrary book-level match)
             # never enters the membership pass above -- but its stale mirror
@@ -3355,8 +3428,14 @@ class AudiobookAlbum(Agent.Album):
         if prefer_local and remembered is None:
             remember_album_cover_decision(
                 helper.metadata.guid, helper.force,
-                (local_set, mirror_skipped, deferred_portrait_local,
-                 poisoned_local, online_redundant))
+                {'local_set': local_set,
+                 'mirror_skipped': mirror_skipped,
+                 'mirror_byte_exact': mirror_byte_exact,
+                 'deferred_portrait_local': deferred_portrait_local,
+                 'poisoned_local': poisoned_local,
+                 'online_redundant': online_redundant,
+                 'online_byte_exact': online_byte_exact,
+                 'online_prune_ok': online_prune_ok})
 
         # Local cover, force-select via the trusted Plex API so a dropped/replaced
         # cover.jpg takes effect on Refresh Metadata even on an ALREADY-scanned

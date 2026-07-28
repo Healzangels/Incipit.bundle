@@ -343,3 +343,70 @@ class TestPinRegexAndRegion(unittest.TestCase):
             album='Some Book',
             filename='/data/media/Author/Title%20%5Buk%5D/book.m4b')
         self.assertEqual(tool.check_for_asin(), 'hardcover-edition-666221_uk')
+
+
+class TestRegionMarkerIsValidated(unittest.TestCase):
+    """
+        2026-07-28 review, five independent confirmations and verified live.
+
+        `region_regex` matches ANY bracketed two letters, so `[CD]`, `[HQ]`,
+        `[EN]` and the natural uppercase `[UK]` all became the region. The
+        server's RegionSchema is a lowercase enum that hard-400s anything
+        else, and `make_request` treats an answered 4xx from our own host as
+        permanent -- so the search dies with only "No results found", and the
+        value is joined into metadata.id, making every later lookup 400
+        forever with no refresh able to heal it. On the stock Audible path
+        the same value is an unguarded dict index (KeyError).
+
+        A marker must be a region we can actually ask for.
+    """
+
+    def region_for(self, path):
+        tool = tool_for(album='Some Book', filename=path)
+        tool.check_for_region(path)
+        return tool.region_override
+
+    def test_a_real_marker_is_honoured_in_either_case(self):
+        self.assertEqual(self.region_for('/books/Author/Title [uk]/b.m4b'), 'uk')
+        self.assertEqual(self.region_for('/books/Author/Title [UK]/b.m4b'), 'uk')
+
+    def test_a_non_region_token_falls_back_to_the_pref(self):
+        for junk in ('[CD]', '[HQ]', '[EN]', '[v2]', '[V2]'):
+            path = '/books/Author/Title %s/b.m4b' % junk
+            self.assertEqual(self.region_for(path), 'us', junk)
+
+    def test_every_accepted_marker_is_a_region_the_api_accepts(self):
+        # The enum the server validates against, from src/config/types.ts.
+        valid = {'au', 'ca', 'de', 'es', 'fr', 'in', 'it', 'jp', 'uk', 'us'}
+        for code in list(valid):
+            path = '/books/Author/Title [%s]/b.m4b' % code
+            self.assertIn(self.region_for(path), valid, code)
+
+
+class TestFilenameAsinNeedsTheB0Anchor(unittest.TestCase):
+    """
+        The filename probe used a shape-only regex with no B0 anchor and no
+        boundary, so any 10-character run of uppercase/digits qualified --
+        an embedded ISBN-13 yields the 10-digit substring `9780593399`. That
+        short-circuits the ENTIRE pipeline at score 100 (no fan-out, no
+        scoring, no duration veto, no telemetry), then 404s, leaving the
+        album pinned to a nonexistent record that only a manual Fix Match
+        clears. The sidecar path was hardened for exactly this on 2026-07-26
+        ("a print ISBN-10 satisfies it"); the filename path never was.
+    """
+
+    def test_an_isbn_substring_no_longer_quick_matches(self):
+        tool = tool_for(album='Some Book',
+                        filename='/books/Author/Title 9780593399439/b.m4b')
+        self.assertIsNone(tool.check_for_asin())
+
+    def test_a_real_embedded_asin_still_quick_matches(self):
+        tool = tool_for(album='Some Book',
+                        filename='/books/Author/Title B08WF9JR2P/b.m4b')
+        self.assertEqual(tool.check_for_asin(), 'B08WF9JR2P_us')
+
+    def test_a_typed_asin_is_still_honoured(self):
+        # Typing an ASIN into Search Options is the most explicit identity a
+        # user can give; that branch is unchanged.
+        tool = tool_for(album='B08WF9JR2P')
+        self.assertEqual(tool.check_for_asin(), 'B08WF9JR2P_us')

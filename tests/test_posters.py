@@ -1573,7 +1573,7 @@ class AlbumCoverDecisionMemo(unittest.TestCase):
         siblings; the container itself survives between tracks.
     """
 
-    FLAGS = (True, False, False, False, False)
+    FLAGS = {'local_set': True, 'mirror_skipped': False}
 
     def setUp(self):
         AG.album_cover_memo.clear()
@@ -1627,7 +1627,7 @@ class CoverBlockFlowGuards(unittest.TestCase):
         self.assertIn('album_cover_decision(', src)
         self.assertIn('remember_album_cover_decision(', src)
 
-    def test_online_offer_and_keep_list_share_the_redundancy_verdict(self):
+    def SUPERSEDED_test_online_offer_and_keep_list_share_the_redundancy_verdict(self):
         # The predicate judges where the bytes are in hand (the offer), and
         # the keep-list plus the sibling-track restore reuse the STORED
         # verdict -- re-judging with no bytes would fail open and re-open
@@ -2195,7 +2195,7 @@ class TestOnlineOfferRedundant(unittest.TestCase):
 
     def test_cover_jpg_leg_still_fires_first(self):
         self.assertTrue(AG.online_offer_redundant(
-            self.IMG, self.IMG, True, False, None, self.THUMB_KEY))
+            self.IMG, self.IMG, True, False, None, self.THUMB_KEY)[0])
 
     def test_lma_identical_bytes_withhold_the_online_copy(self):
         # King of Duels: LMA's embedded art == the online cover bytes, the
@@ -2203,28 +2203,29 @@ class TestOnlineOfferRedundant(unittest.TestCase):
         self.store[self.LMA] = self.IMG
         st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
         self.assertTrue(AG.online_offer_redundant(
-            self.IMG, self.COVER, True, False, st, self.THUMB_KEY))
+            self.IMG, self.COVER, True, False, st, self.THUMB_KEY)[0])
 
     def test_selected_online_copy_is_never_undercut(self):
         self.store[self.LMA] = self.IMG
         own = AG.own_container_key(self.THUMB_KEY)
         st = self.state(own, [own, self.LMA])
         self.assertFalse(AG.online_offer_redundant(
-            self.IMG, self.COVER, True, False, st, self.THUMB_KEY))
+            self.IMG, self.COVER, True, False, st, self.THUMB_KEY)[0])
 
     def test_unique_online_cover_still_offered(self):
         self.store[self.LMA] = self.COVER
         st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
         self.assertFalse(AG.online_offer_redundant(
-            self.IMG, self.COVER, True, False, st, self.THUMB_KEY))
+            self.IMG, self.COVER, True, False, st, self.THUMB_KEY)[0])
 
     def test_no_state_fails_open(self):
         self.assertFalse(AG.online_offer_redundant(
-            self.IMG, self.COVER, True, False, None, self.THUMB_KEY))
+            self.IMG, self.COVER, True, False, None, self.THUMB_KEY)[0])
 
     def test_no_bytes_fails_open(self):
         self.assertFalse(AG.online_offer_redundant(
-            None, self.COVER, True, False, self.state(self.UPLOAD, []), self.THUMB_KEY))
+            None, self.COVER, True, False,
+            self.state(self.UPLOAD, []), self.THUMB_KEY)[0])
 
 
 class TestPerceptualRailsAfterReview(unittest.TestCase):
@@ -2294,14 +2295,14 @@ class TestPerceptualRailsAfterReview(unittest.TestCase):
         AG.Prefs['online_perceptual_dedupe'] = False
         st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
         self.assertFalse(AG.online_offer_redundant(
-            self.IMG, None, False, False, st, self.THUMB))
+            self.IMG, None, False, False, st, self.THUMB)[0])
 
     def test_pref_on_still_withholds_the_cross_source_twin(self):
         self.store[self.LMA] = self.VARIANT
         AG.images_similar_via_api = lambda a, b, tag: True
         st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
         self.assertTrue(AG.online_offer_redundant(
-            self.IMG, None, False, False, st, self.THUMB))
+            self.IMG, None, False, False, st, self.THUMB)[0])
 
     def test_byte_identity_ignores_the_pref(self):
         # Zero-loss by definition: the very same bytes are already listed.
@@ -2309,7 +2310,7 @@ class TestPerceptualRailsAfterReview(unittest.TestCase):
         AG.Prefs['online_perceptual_dedupe'] = False
         st = self.state(self.UPLOAD, [self.UPLOAD, self.LMA])
         self.assertTrue(AG.online_offer_redundant(
-            self.IMG, None, False, False, st, self.THUMB))
+            self.IMG, None, False, False, st, self.THUMB)[0])
 
     # 3. a perceptual verdict never prunes the mirror
     def test_perceptual_mirror_skip_does_not_prune(self):
@@ -2443,3 +2444,213 @@ class TestConsultIsCheapAndBounded(unittest.TestCase):
         self.assertEqual(
             AG.same_picture('mystery-a', 'mystery-b', 't'), (True, False))
         self.assertEqual(len(self.calls), 1)
+
+
+class TestCoverKeepList(unittest.TestCase):
+    """
+        The membership list handed to validate_keys, as a FUNCTION.
+
+        The 2026-07-28 mutation sweep proved every guard in this block was
+        unenforced: neutering `online_prune_allowed` at the call site, or
+        deleting the byte-identity gate, or discarding the dedupe verdicts
+        entirely, all left the suite 271/271 green -- because the only tests
+        were `assertIn('foo(', source)`, which cannot tell a live guard from
+        a discarded return value (and two of them matched a string that
+        appears twice). Source slices are not tests. Extracting the decision
+        makes it one.
+    """
+
+    THUMB = 'https://cdn.example/cover.jpg'
+    LOCAL = 'incipit-local-cover'
+
+    def keep(self, **over):
+        args = dict(
+            thumb_key=self.THUMB, local_key=self.LOCAL,
+            thumb_present=True, local_present=True,
+            online_redundant=False, online_byte_exact=False,
+            online_prune_ok=True, mirror_skipped=False,
+            mirror_byte_exact=False,
+        )
+        args.update(over)
+        return AG.cover_keep_list(**args)
+
+    def test_both_entries_kept_by_default(self):
+        self.assertEqual(self.keep(), [self.THUMB, self.LOCAL])
+
+    def test_byte_identical_online_copy_is_pruned(self):
+        self.assertEqual(
+            self.keep(online_redundant=True, online_byte_exact=True),
+            [self.LOCAL])
+
+    def test_a_perceptual_online_verdict_never_prunes(self):
+        # It may be withheld as an OFFER, but the entry survives: a variant
+        # deleted here never comes back, because the same bytes re-derive the
+        # same verdict on every later pass.
+        self.assertEqual(
+            self.keep(online_redundant=True, online_byte_exact=False),
+            [self.THUMB, self.LOCAL])
+
+    def test_a_selected_online_cover_is_never_pruned(self):
+        self.assertEqual(
+            self.keep(online_redundant=True, online_byte_exact=True,
+                      online_prune_ok=False),
+            [self.THUMB, self.LOCAL])
+
+    def test_byte_identical_mirror_is_pruned(self):
+        self.assertEqual(
+            self.keep(mirror_skipped=True, mirror_byte_exact=True),
+            [self.THUMB])
+
+    def test_a_perceptual_mirror_verdict_never_prunes_the_curated_file(self):
+        self.assertEqual(
+            self.keep(mirror_skipped=True, mirror_byte_exact=False),
+            [self.THUMB, self.LOCAL])
+
+    def test_absent_entries_are_not_invented(self):
+        self.assertEqual(self.keep(thumb_present=False), [self.LOCAL])
+        self.assertEqual(self.keep(local_present=False), [self.THUMB])
+
+
+class TestAlbumCoverMemoRoundTrip(unittest.TestCase):
+    """
+        The memo replays a pass's decisions on tracks 2..N. It stored a
+        positional 5-tuple of DECISIONS but not the EVIDENCE the prune rails
+        read, so a 27-part book ran 26 un-railed passes: `dup_state` was None
+        (making `online_prune_allowed` permissive) and `mirror_byte_exact`
+        was False (flipping the mirror verdict). Three reviewers found this
+        independently. A named mapping cannot drift positionally, and a
+        missing key must read as the SAFE value.
+    """
+
+    def setUp(self):
+        AG.album_cover_memo.clear()
+
+    def tearDown(self):
+        AG.album_cover_memo.clear()
+
+    def test_every_prune_input_round_trips(self):
+        flags = {
+            'local_set': True, 'mirror_skipped': True,
+            'mirror_byte_exact': True, 'deferred_portrait_local': False,
+            'poisoned_local': False, 'online_redundant': True,
+            'online_byte_exact': True, 'online_prune_ok': False,
+        }
+        AG.remember_album_cover_decision('g', True, flags)
+        self.assertEqual(AG.album_cover_decision('g', True), flags)
+
+    def test_a_sibling_track_reaches_the_same_keep_list_as_track_one(self):
+        flags = {
+            'local_set': False, 'mirror_skipped': True,
+            'mirror_byte_exact': True, 'deferred_portrait_local': False,
+            'poisoned_local': False, 'online_redundant': True,
+            'online_byte_exact': True, 'online_prune_ok': False,
+        }
+        AG.remember_album_cover_decision('g2', True, flags)
+        restored = AG.album_cover_decision('g2', True)
+        first = AG.cover_keep_list(
+            thumb_key='t', local_key='l', thumb_present=True,
+            local_present=True, **{k: flags[k] for k in (
+                'online_redundant', 'online_byte_exact', 'online_prune_ok',
+                'mirror_skipped', 'mirror_byte_exact')})
+        sibling = AG.cover_keep_list(
+            thumb_key='t', local_key='l', thumb_present=True,
+            local_present=True, **{k: restored[k] for k in (
+                'online_redundant', 'online_byte_exact', 'online_prune_ok',
+                'mirror_skipped', 'mirror_byte_exact')})
+        self.assertEqual(first, sibling)
+
+    def test_an_absent_flag_reads_as_the_safe_value(self):
+        AG.remember_album_cover_decision('g3', True, {'local_set': True})
+        restored = AG.album_cover_decision('g3', True)
+        self.assertFalse(restored.get('online_prune_ok', False))
+        self.assertFalse(restored.get('mirror_byte_exact', False))
+
+
+class TestSandboxIdentifierGuard(unittest.TestCase):
+    """
+        The catastrophe class: Plex's RestrictedPython rejects ANY identifier
+        beginning with an underscore at COMPILE time, which kills the entire
+        plugin silently -- Fix Match spins forever, no UI error, and
+        `py_compile` passes. It has shipped twice (v1.3.10, and a module
+        global before that).
+
+        The 2026-07-28 mutation sweep found NOTHING guarded this: nine
+        mutations introducing `_acc`, `_stripped`, `_INTERNAL_MARK`,
+        `def _series_key_impl`, `sum()`, `any()`, `getattr`, `hasattr` and
+        `bytearray` all left the suite green -- including two on lines whose
+        own comments say the builtin is unavailable.
+    """
+
+    import re as re_mod
+
+    BANNED_BUILTINS = ('getattr', 'hasattr', 'dir', 'sum', 'any', 'all',
+                       'bytearray', 'eval', 'exec', 'compile', 'open')
+
+    def code_files(self):
+        code_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'Contents', 'Code')
+        for name in sorted(os.listdir(code_dir)):
+            if name.endswith('.py'):
+                with open(os.path.join(code_dir, name)) as handle:
+                    yield name, self.strip_prose(handle.read())
+
+    @staticmethod
+    def strip_prose(src):
+        """
+            Blank out docstrings, comments and string literals, keeping line
+            numbers, so prose ABOUT a banned construct is not mistaken for
+            one -- this file documents `open()` being blocked, twice.
+        """
+        out = []
+        fence = None
+        for line in src.splitlines():
+            if fence:
+                out.append('')
+                if fence in line:
+                    fence = None
+                continue
+            stripped = line.strip()
+            for quote in ('\"\"\"', "'''"):
+                if stripped.startswith(quote) and stripped.count(quote) == 1:
+                    fence = quote
+                    break
+            if fence:
+                out.append('')
+                continue
+            line = line.split('#', 1)[0]
+            line = TestSandboxIdentifierGuard.re_mod.sub(r'\"[^\"]*\"', '""', line)
+            line = TestSandboxIdentifierGuard.re_mod.sub(r"'[^']*'", "''", line)
+            out.append(line)
+        return '\n'.join(out)
+
+    def test_no_underscore_prefixed_identifiers(self):
+        # Assignments, defs, classes and attribute reads alike. Dunders are
+        # fine (the framework itself uses them) -- it is the SINGLE leading
+        # underscore the sandbox rejects.
+        patterns = (
+            self.re_mod.compile(r'^\s*(_[a-zA-Z]\w*)\s*='),
+            self.re_mod.compile(r'^\s*def\s+(_[a-zA-Z]\w*)'),
+            self.re_mod.compile(r'^\s*class\s+(_[a-zA-Z]\w*)'),
+            self.re_mod.compile(r'\bself\.(_[a-zA-Z]\w*)'),
+        )
+        offenders = []
+        for name, src in self.code_files():
+            for lineno, line in enumerate(src.splitlines(), 1):
+                for pat in patterns:
+                    found = pat.search(line)
+                    if found and not found.group(1).startswith('__'):
+                        offenders.append('%s:%d %s' % (name, lineno, found.group(1)))
+        self.assertEqual(offenders, [], 'sandbox-fatal identifiers: %s' % offenders)
+
+    def test_no_blocked_builtins(self):
+        offenders = []
+        for name, src in self.code_files():
+            for lineno, line in enumerate(src.splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith('#'):
+                    continue
+                for builtin in self.BANNED_BUILTINS:
+                    if self.re_mod.search(r'(?<![\w.])%s\s*\(' % builtin, line):
+                        offenders.append('%s:%d %s' % (name, lineno, builtin))
+        self.assertEqual(offenders, [], 'sandbox-blocked builtins: %s' % offenders)
