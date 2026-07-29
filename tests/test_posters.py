@@ -2999,3 +2999,78 @@ class TestPerceptualSignatureReplay(unittest.TestCase):
         self.http_answering_seq([stale])
         self.assertIsNone(AG.images_similar_via_api(self.A, self.B, 't'))
         self.assertEqual(len(self.calls), 1)
+
+
+class ResolutionGuardSideIsTheWithheldTile(unittest.TestCase):
+    """
+        same_picture's keep-the-better-copy rule (v1.3.159) is ASYMMETRIC:
+        it protects the FIRST argument, which must be the tile that
+        disappears on a True verdict. Two of the three call sites passed
+        the surviving copy first, so at the online legs the guard ran
+        backwards -- found by the 2026-07-28 review (five finders).
+
+        Concretely, with a curated hi-res cover.jpg on display and the
+        provider's low-res re-encode as the online cover:
+          * the RIGHT behaviour is to withhold the low-res ONLINE tile,
+          * the inverted guard instead refused the verdict and re-listed
+            the duplicate every pass -- and in the mirror case it withheld
+            the BETTER copy, the exact loss v1.3.159 exists to prevent.
+    """
+
+    HI = b'\xff\xd8' + b'HI' * 400
+    LO = b'\xff\xd8' + b'LO' * 40
+
+    def setUp(self):
+        self.real_sim = AG.images_similar_via_api
+        self.real_dims = AG.image_dimensions
+        self.real_aspect = AG.aspect_could_match
+        AG.images_similar_via_api = lambda a, b, tag: True
+        AG.aspect_could_match = lambda a, b: True
+        # Same design, wildly different resolution.
+        dims = {self.HI: (2400, 2400), self.LO: (500, 500)}
+        AG.image_dimensions = lambda data: dims.get(data)
+        AG.Prefs['online_perceptual_dedupe'] = True
+
+    def tearDown(self):
+        AG.images_similar_via_api = self.real_sim
+        AG.image_dimensions = self.real_dims
+        AG.aspect_could_match = self.real_aspect
+
+    def test_a_low_res_online_cover_is_withheld_beside_a_hi_res_local(self):
+        # local_set=True: cover.jpg's hi-res picture is already displayed.
+        self.assertTrue(
+            AG.online_copy_is_redundant(self.LO, self.HI, True, False),
+            'the low-res ONLINE tile must be suppressed, not re-listed')
+
+    def test_a_hi_res_online_cover_is_kept_beside_a_low_res_local(self):
+        # The mirror case: withholding here would lose the better copy.
+        self.assertFalse(
+            AG.online_copy_is_redundant(self.HI, self.LO, True, False),
+            'the better ONLINE copy must survive')
+
+    def test_the_sweep_leg_keeps_protecting_our_own_tile(self):
+        # duplicate_shown_detail passes OUR tile first; that site was always
+        # correct and must stay correct.
+        self.assertFalse(AG.same_picture(self.HI, self.LO, 't')[0],
+                         'our higher-res tile must not be withheld')
+        self.assertTrue(AG.same_picture(self.LO, self.HI, 't')[0],
+                        'our lower-res tile may be withheld')
+
+
+class PaddedCopyRecognitionIsSymmetric(unittest.TestCase):
+    """
+        The RESELECT_PAD copy may sit on EITHER side: same_image matched it
+        in one direction only, which the argument-order fix above exposed.
+        Picture identity does not depend on argument order.
+    """
+
+    IMG = b'\xff\xd8IMAGEBYTES'
+
+    def test_padded_second(self):
+        self.assertTrue(AG.same_image(self.IMG, self.IMG + AG.RESELECT_PAD))
+
+    def test_padded_first(self):
+        self.assertTrue(AG.same_image(self.IMG + AG.RESELECT_PAD, self.IMG))
+
+    def test_different_pictures_still_differ(self):
+        self.assertFalse(AG.same_image(self.IMG, b'\xff\xd8SOMETHINGELSE'))

@@ -952,8 +952,12 @@ def read_poster_state(guid, tag):
 
 def same_image(first, second):
     """
-        True when `second` is the SAME picture as `first` -- byte-identical, or
-        our own RESELECT_PAD copy of it.
+        True when the two blobs are the SAME picture -- byte-identical, or one
+        is our own RESELECT_PAD copy of the other. SYMMETRIC: either side may
+        be the padded one, because picture identity does not depend on
+        argument order and callers legitimately pass the copies either way
+        round (the 2026-07-28 review swapped an argument pair and exposed
+        one-directional matching that had been latent since the pad existed).
 
         The pad matters, and still does even though upload_and_select_poster no
         longer MINTS one: it used to re-POST image+RESELECT_PAD to force a
@@ -972,10 +976,12 @@ def same_image(first, second):
     if len(first) == len(second) and first == second:
         return True
     try:
-        _, _, padded = padded_variants(first)
+        one, two = padded_variants(first)[2], padded_variants(second)[2]
     except Exception:
         return False
-    return len(padded) == len(second) and padded == second
+    if len(one) == len(second) and one == second:
+        return True
+    return len(two) == len(first) and two == first
 
 
 def selection_is_artist_art(artist_bytes, selected):
@@ -1258,27 +1264,34 @@ def perceptual_dedupe_enabled():
         return False
 
 
-def same_picture(first, second, tag):
+def same_picture(withheld, survivor, tag):
     """
         (same, byte_exact) for two image blobs: byte identity first, then the
         pref-gated perceptual consult. ONE primitive so the gate, and any
         future widening, cannot drift between call sites the way the byte
         check already had to be fixed twice.
 
+        ARGUMENT ORDER IS PART OF THE CONTRACT: `withheld` is the tile that
+        disappears on a True verdict, `survivor` is the copy left on display.
+        The resolution rule below is asymmetric, so the names say which is
+        which -- they were `first`/`second` and two of the three call sites
+        passed them the other way round, running the keep-the-better-copy
+        guard backwards (found by the 2026-07-28 review, five finders).
+
         `byte_exact` is the caller's licence to PRUNE: identical bytes prove
         the picture is on display elsewhere, so dropping our entry loses
         nothing. A merely SIMILAR verdict does not prove that -- it may be a
         variant -- so it may withhold an offer but must never delete.
     """
-    if not first or not second:
+    if not withheld or not survivor:
         return False, False
-    if same_image(first, second):
+    if same_image(withheld, survivor):
         return True, True
     if not perceptual_dedupe_enabled():
         return False, False
-    if not aspect_could_match(first, second):
+    if not aspect_could_match(withheld, survivor):
         return False, False
-    if images_similar_via_api(first, second, tag) is not True:
+    if images_similar_via_api(withheld, survivor, tag) is not True:
         return False, False
     # The same picture -- but the agent can only ever withhold ITS OWN tile,
     # so whichever copy is left standing is the other source's. Keep the
@@ -1287,7 +1300,7 @@ def same_picture(first, second, tag):
     # unconditionally would have left the operator with only the small one --
     # a loss that widening the perceptual threshold makes MORE likely, not
     # less. A duplicate tile is cosmetic; losing the good copy is not.
-    if not other_copy_is_good_enough(first, second):
+    if not other_copy_is_good_enough(withheld, survivor):
         log.info('%s: keeping our higher-resolution copy of this picture', tag)
         return False, False
     return True, False
@@ -1438,7 +1451,9 @@ def online_offer_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
     if cover_bytes is not None and thumb_data is not None and (
         local_set or mirror_skipped
     ):
-        same, byte_exact = same_picture(cover_bytes, thumb_data,
+        # The ONLINE cover is the tile withheld here, so it goes FIRST --
+        # see same_picture's argument contract.
+        same, byte_exact = same_picture(thumb_data, cover_bytes,
                                         'incipit cover')
         if same:
             return True, byte_exact
@@ -1542,7 +1557,8 @@ def online_copy_is_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
         return False
     if not (local_set or mirror_skipped):
         return False
-    return same_picture(cover_bytes, thumb_data, tag)[0]
+    # The ONLINE cover is what gets withheld, so it is the FIRST argument.
+    return same_picture(thumb_data, cover_bytes, tag)[0]
 
 
 # The local-cover block's decisions, carried from the first track of a pass to
