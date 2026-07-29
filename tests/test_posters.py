@@ -3193,3 +3193,95 @@ class LocalSelectIsNotPowerless(unittest.TestCase):
         self._with_state(None, [])
         AG.select_local_cover(self.FakeHelper(), self.COVER)
         self.assertEqual(len(self.posts), 1)
+
+
+class NoDuplicateTileOnAColdScan(unittest.TestCase):
+    """
+    On a FRESH item the container already shows cover.jpg -- do not upload it too.
+
+    select_local_cover exists to move a selection Plex has already PERSISTED,
+    which a container cannot do. On a cold scan there is nothing to move: the
+    agent has just filed cover.jpg at sort_order=0 and Plex will default to it.
+    Uploading the same bytes anyway produces two byte-identical tiles in the
+    picker, indistinguishable to the operator and permanent.
+
+    The existing "the selected poster already IS this image" guard cannot catch
+    this, twice over: it is gated on `selected_key` (empty on a cold scan), and
+    the sha tests it follows only recognise upload:// keys -- a CONTAINER key is
+    sha1 of the key STRING we filed under ('incipit-local-cover'), never the
+    image's bytes, so `have_plain` is False however many times we offered it.
+
+    Measured live 2026-07-29 on a genuinely cold Jim Butcher library (section 49
+    on 10.0.1.99, bundles and agent caches cleared first): 33 of 33 albums
+    selected cover.jpg correctly AND 33 of 33 carried exactly one duplicate
+    pair, every one of them `(upload) + com.plexapp.agents.incipit`. The code
+    already records the same shape at 147 of 150 albums (98%) from 2026-07-25.
+    """
+
+    COVER = b'\xff\xd8\xff\xe0 the cover.jpg on disk'
+    AGENT_SELECTION = 'metadata://posters/com.plexapp.agents.incipit/online'
+
+    class FakeHelper(object):
+        class metadata(object):
+            guid = 'guid-cold-scan'
+
+    def setUp(self):
+        self.posts = []
+        self.real_request = AG.HTTP.Request
+        self.real_state = AG.read_poster_state
+        self.real_artist = AG.artist_poster_bytes
+        self.real_selected = AG.selected_poster_bytes
+
+        def recorder(url, **kwargs):
+            self.posts.append((url, kwargs))
+
+            class FakeResponse(object):
+                content = 'ok'
+
+            return FakeResponse()
+
+        AG.HTTP.Request = recorder
+        AG.artist_poster_bytes = lambda guid, tag, parent_thumb=None: (ARTIST, True)
+        AG.selected_poster_bytes = lambda rk, key, tag: (
+            b'\xff\xd8\xff\xe0 a different poster entirely', True)
+        AG.recent_work_memo.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real_request
+        AG.read_poster_state = self.real_state
+        AG.artist_poster_bytes = self.real_artist
+        AG.selected_poster_bytes = self.real_selected
+        AG.recent_work_memo.clear()
+
+    def _with_state(self, selected, keys):
+        AG.read_poster_state = lambda guid, tag: ('101', selected, keys, None)
+
+    def test_cold_scan_lets_the_container_default_stand(self):
+        # THE fix: nothing selected yet and we just filed cover.jpg at
+        # sort_order=0, so the upload would only mint a twin.
+        self._with_state(None, [])
+        AG.select_local_cover(self.FakeHelper(), self.COVER, container_offers=True)
+        self.assertEqual(self.posts, [],
+                         'the container default needs no upload beside it')
+
+    def test_a_persisted_selection_is_still_overridden(self):
+        # The recovery case v1.3.165 exists for: Plex has PERSISTED the agent's
+        # online cover, which a container cannot move. The upload must still fire
+        # even though the container also offers cover.jpg.
+        sha, _padded, _ = AG.padded_variants(self.COVER)
+        self._with_state(self.AGENT_SELECTION, [sha])
+        AG.select_local_cover(self.FakeHelper(), self.COVER, container_offers=True)
+        self.assertEqual(len(self.posts), 1,
+                         'a persisted selection still needs the upload lever')
+
+    def test_without_a_container_offer_the_upload_still_runs(self):
+        # Nothing else would ever show cover.jpg, so the upload is the only path.
+        self._with_state(None, [])
+        AG.select_local_cover(self.FakeHelper(), self.COVER, container_offers=False)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_the_default_is_unchanged(self):
+        # Callers that say nothing keep the old behaviour.
+        self._with_state(None, [])
+        AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertEqual(len(self.posts), 1)

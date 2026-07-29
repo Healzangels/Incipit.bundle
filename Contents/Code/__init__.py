@@ -2338,7 +2338,7 @@ def unpin_hardcover_author_art(helper):
     )
 
 
-def select_local_cover(helper, cover_bytes=None):
+def select_local_cover(helper, cover_bytes=None, container_offers=False):
     """
         Force the book folder's cover.jpg to become the SELECTED Plex poster on
         a Refresh of an ALREADY-scanned book (the container path only wins on a
@@ -2347,6 +2347,10 @@ def select_local_cover(helper, cover_bytes=None):
         -- but a USER'S custom upload is left alone, so hand-picks survive and
         backup_selected_poster (which now runs AFTER this) can capture them to
         cover.jpg instead of this path clobbering them.
+
+        `container_offers` says this pass already filed cover.jpg into the
+        posters container at sort_order=0. Paired with NO persisted selection
+        that means the job is already done -- see the cold-scan branch below.
     """
     # The album update has usually just read this exact file to seed the
     # posters container; accept those bytes rather than pulling ~1MB back over
@@ -2370,6 +2374,30 @@ def select_local_cover(helper, cover_bytes=None):
     rk, selected_key, keys, parent_thumb = state
     if not selection_is_agent_owned(selected_key, [sha, sha_padded]):
         log.info('%s: selection is a user upload -- leaving it', tag)
+        mark_done(tag, guid, sha)
+        return
+    # COLD SCAN: nothing is persisted and this pass already filed cover.jpg at
+    # sort_order=0, so Plex will default to the container entry on its own.
+    # This whole function exists to move a selection Plex has ALREADY persisted
+    # -- something a container cannot do -- and there is no such selection here.
+    # Uploading anyway mints a byte-identical twin that lives in the picker
+    # forever, indistinguishable from the tile beside it.
+    #
+    # The "the selected poster already IS this image" guard downstream cannot
+    # catch this, twice over: it is gated on `selected_key` (empty here), and
+    # the sha tests before it only recognise upload:// keys -- a CONTAINER key
+    # is sha1 of the key STRING we filed under ('incipit-local-cover'), never
+    # the image's bytes, so have_plain stays False no matter how many times we
+    # offered it.
+    #
+    # Measured 2026-07-29 on a genuinely cold library (bundles + agent caches
+    # cleared first): 33 of 33 albums selected cover.jpg correctly AND 33 of 33
+    # carried exactly one duplicate pair, every one `(upload) + incipit`. The
+    # same shape was recorded at 147 of 150 albums (98%) on 2026-07-25.
+    if container_offers and not selected_key:
+        log.info('%s: nothing selected yet and cover.jpg is already offered at '
+                 'sort_order 0 -- letting the container default stand rather '
+                 'than uploading a twin (rk %s)', tag, rk)
         mark_done(tag, guid, sha)
         return
     # POISON GUARD (select side). cover.jpg on disk can itself BE the artist
@@ -3619,7 +3647,11 @@ class AudiobookAlbum(Agent.Album):
             Prefs['prefer_local_cover'] and helper.force and not poisoned_local
         ):
             if not deferred_portrait_local:
-                select_local_cover(helper, cover_bytes)
+                # local_set says this pass filed cover.jpg into the container at
+                # sort_order=0, so on a cold scan the callee can stand aside and
+                # let Plex default to it instead of minting a duplicate tile.
+                select_local_cover(helper, cover_bytes,
+                                   container_offers=local_set)
             else:
                 # The MIRROR of that call. When the jacket was deferred, the
                 # container said "use the square" and Plex ignored it, because a
