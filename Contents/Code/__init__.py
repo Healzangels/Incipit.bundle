@@ -2421,7 +2421,23 @@ def select_local_cover(helper, cover_bytes=None):
                      'to select it, so the book is not re-poisoned; the current '
                      'selection stands and will mirror to disk', tag)
             return
-    upload_and_select_poster(guid, cover_bytes, tag, token=sha, state=state)
+    # pref_asserted, because OWNERSHIP IS ALREADY PROVEN above. The default
+    # stand-down encodes a book-level premise -- "our bytes offered but
+    # de-selected can only be a person's choice" -- that this caller has
+    # disproved by the time it gets here: a user's custom upload returned at
+    # selection_is_agent_owned, so what remains is the agent's own selection,
+    # and prefer_local_cover says cover.jpg wins between agent images.
+    #
+    # The premise is false on a COLD SCAN for a second reason: Plex's Local
+    # Media Assets files cover.jpg into the item's own Uploads, so "our bytes
+    # exist de-selected" arises with no human involvement at all. Measured
+    # 2026-07-29 on a fresh 1,509-album library -- the online cover held the
+    # selection on 49 of 60 sampled albums and NOTHING recovered it: plain
+    # refresh 0/4, forced refresh 0/4, because this call stood down every time.
+    # Ownership was checked and the action then silently vetoed: the same
+    # "correct and powerless" shape the portrait deferral hit at v1.3.121.
+    upload_and_select_poster(guid, cover_bytes, tag, token=sha, state=state,
+                             pref_asserted=True)
 
 
 class AudiobookArtist(Agent.Artist):

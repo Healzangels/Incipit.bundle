@@ -3074,3 +3074,122 @@ class PaddedCopyRecognitionIsSymmetric(unittest.TestCase):
 
     def test_different_pictures_still_differ(self):
         self.assertFalse(AG.same_image(self.IMG, b'\xff\xd8SOMETHINGELSE'))
+
+
+class LocalSelectIsNotPowerless(unittest.TestCase):
+    """
+    select_local_cover establishes ownership, then must actually ACT on it.
+
+    The function's whole job is to force cover.jpg to become the selection on a
+    forced Refresh of an already-scanned book, and it guards that correctly: a
+    USER's custom upload returns early at selection_is_agent_owned, so hand
+    picks survive. But having earned the right to act it called
+    upload_and_select_poster in its DEFAULT mode, whose stand-down fires
+    whenever our bytes are already offered de-selected -- which is precisely
+    the state it is called to repair. Ownership was checked and then the action
+    was silently vetoed: correct and powerless.
+
+    Measured live 2026-07-29 on a fresh 1,509-album library (10.0.1.99): Plex's
+    Local Media Assets files cover.jpg into the item's Uploads itself, so
+    "our bytes exist de-selected" arises with NO human involvement at all, and
+    the online cover held the selection on 49 of 60 sampled albums. Neither a
+    plain nor a FORCED refresh moved any of them (0/4 and 0/4).
+
+    The de-selection premise the stand-down encodes ("only a person produces
+    that state") is a BOOK-level default that is true only until this caller
+    has already disproved it by checking ownership.
+    """
+
+    COVER = b'\xff\xd8\xff\xe0 the cover.jpg on disk'
+    AGENT_SELECTION = 'metadata://posters/com.plexapp.agents.incipit/online'
+    USER_SELECTION = 'upload://posters/a-poster-the-operator-uploaded'
+
+    class FakeHelper(object):
+        class metadata(object):
+            guid = 'guid-local-select'
+
+    def setUp(self):
+        self.posts = []
+        self.real_request = AG.HTTP.Request
+        self.real_state = AG.read_poster_state
+        self.real_artist = AG.artist_poster_bytes
+
+        def recorder(url, **kwargs):
+            self.posts.append((url, kwargs))
+
+            class FakeResponse(object):
+                content = 'ok'
+
+            return FakeResponse()
+
+        AG.HTTP.Request = recorder
+        # Not poisoned: the artist photo is a different picture entirely, and
+        # `known` is True so the fail-closed guard does not abort for the wrong
+        # reason and make this test pass vacuously.
+        AG.artist_poster_bytes = lambda guid, tag, parent_thumb=None: (ARTIST, True)
+        # The currently-selected poster is a DIFFERENT picture, stated
+        # explicitly. Left to the faked HTTP layer this read is unpredictable,
+        # and its "already showing this image" short-circuit then masks whether
+        # the ownership guard fired at all -- which is exactly how the first
+        # version of these tests survived deleting that guard.
+        self.real_selected = AG.selected_poster_bytes
+        AG.selected_poster_bytes = lambda rk, key, tag: (
+            b'\xff\xd8\xff\xe0 a different poster entirely', True)
+        AG.recent_work_memo.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real_request
+        AG.read_poster_state = self.real_state
+        AG.artist_poster_bytes = self.real_artist
+        AG.selected_poster_bytes = self.real_selected
+        AG.recent_work_memo.clear()
+
+    def _with_state(self, selected, keys):
+        AG.read_poster_state = lambda guid, tag: ('101', selected, keys, None)
+
+    def test_an_agent_selection_is_overridden_even_when_ours_is_offered(self):
+        # THE regression: cover.jpg sits in the container de-selected (Local
+        # Media Assets put it there) while the agent's OWN online cover holds
+        # the selection. Ownership says this is ours to change, so the re-select
+        # must actually be posted.
+        sha, _padded, _ = AG.padded_variants(self.COVER)
+        self._with_state(self.AGENT_SELECTION, [sha])
+        AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertEqual(len(self.posts), 1,
+                         'an agent-owned selection must be overridden, not stood down on')
+        self.assertEqual(self.posts[0][1]['data'], self.COVER + PAD,
+                         'the re-select needs NEW content, so it is the padded copy')
+
+    def test_a_user_upload_is_still_never_touched(self):
+        # The Will Wight protection, unchanged: the operator picked their own
+        # poster, so this path must not fire at all.
+        sha, _padded, _ = AG.padded_variants(self.COVER)
+        self._with_state(self.USER_SELECTION, [sha])
+        AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertEqual(self.posts, [],
+                         "a user's custom upload must survive prefer_local_cover")
+
+    def test_a_user_upload_blocks_even_a_cover_plex_has_never_seen(self):
+        # Isolates the OWNERSHIP guard itself. With nothing of ours in the
+        # container, every later guard would happily post (that is the birth
+        # case), so the only thing that can stop this is the user-upload check.
+        # The weaker sibling above passes even with the guard deleted -- a
+        # downstream guard masks it -- so this is the one that pins it.
+        self._with_state(self.USER_SELECTION, [])
+        AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertEqual(self.posts, [],
+                         'ownership must be checked BEFORE anything is posted')
+
+    def test_a_converged_book_does_no_work(self):
+        # cover.jpg is ALREADY the selection: nothing to push, and a refresh on
+        # a converged library must stay free.
+        sha, _padded, _ = AG.padded_variants(self.COVER)
+        self._with_state('upload://posters/' + sha, [sha])
+        AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertEqual(self.posts, [])
+
+    def test_no_selection_at_all_still_uploads(self):
+        # A book Plex has never given a poster: ours by definition.
+        self._with_state(None, [])
+        AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertEqual(len(self.posts), 1)
