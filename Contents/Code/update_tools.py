@@ -92,6 +92,51 @@ def strip_trailing_series(title):
 # Libraries sort past a leading article anyway, so strip it from the SORT KEY
 # only -- the series shown on the book stays exactly as the provider gave it.
 SERIES_SORT_ARTICLE_RE = re.compile(r'^\s*(?:the|a|an)\s+', re.IGNORECASE)
+
+# Typographic apostrophes, folded to ASCII in the SORT title only.
+#
+# This is the "Six of Crows " trailing space wearing different clothes.
+# Measured 2026-07-29 on Margaret Atwood: the API returns the series as
+# u'The Handmaid’s Tale' (RIGHT SINGLE QUOTATION MARK) while both book
+# titles spell the possessive in ASCII, so one saved field held the same word
+# punctuated two ways. Harmless there only because BOTH books carried the curly
+# form -- the moment one book of a series arrives with the straight one (another
+# provider, a re-scrape, a librarian edit) the sort prefixes differ and the shelf
+# splits, unfixable from the UI because re-matching re-derives the same string.
+#
+# ASCII is the target: it sorts predictably and matches how titles spell it.
+# Deliberately apostrophes ONLY -- double quotes are a different character class
+# and carry no shelf-grouping risk. Applied to the composed sort title, so no
+# other consumer of self.series/self.title sees a rewritten value.
+SORT_APOSTROPHES = (
+    u'’',  # right single quotation mark -- the common offender
+    u'‘',  # left single quotation mark
+    u'ʼ',  # modifier letter apostrophe
+    u'′',  # prime
+    u'´',  # acute accent, sometimes typed for an apostrophe
+)
+
+
+def fold_sort_apostrophes(value):
+    """`value` with typographic apostrophes folded to ASCII "'".
+
+    Byte-str input is decoded first: under py2 a raw `.replace(u'...')` on a
+    UTF-8 byte string coerces via ASCII and raises on the very characters this
+    exists to fix. Never calls .decode on a py3 str -- that is the harness trap
+    recorded in the bundle's own notes -- because `unicode` is aliased to `str`
+    there, so such a value takes the isinstance branch.
+    """
+    if not value:
+        return value
+    text = value
+    if not isinstance(text, unicode):
+        try:
+            text = text.decode('utf-8')
+        except Exception:
+            return value
+    for mark in SORT_APOSTROPHES:
+        text = text.replace(mark, u"'")
+    return text
 SERIES_KEY_STRIP_RE = re.compile(r'[^a-z0-9]+')
 
 
@@ -811,6 +856,11 @@ class AlbumUpdateTool(UpdateTool):
         if not self.title:
             self.title = self.metadata.title
         new_sort = ' - '.join(filter(None, [series_with_volume, self.title]))
+        # Fold typographic apostrophes LAST, on the composed string: the prefix
+        # then depends on the words rather than on which quote character the
+        # source happened to use, and no other consumer of self.series or
+        # self.title sees a rewritten value.
+        new_sort = fold_sort_apostrophes(new_sort)
         # Never blank an existing sort title with an empty rebuild.
         if new_sort and (not self.metadata.title_sort or self.force):
             self.metadata.title_sort = new_sort

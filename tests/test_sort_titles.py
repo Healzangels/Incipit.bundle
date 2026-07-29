@@ -137,3 +137,70 @@ class ClosedUpDashesStillStrip(unittest.TestCase):
             UT.strip_trailing_series(
                 'The Blade Itself-The First Law, Book 1'),
             'The Blade Itself-The First Law')
+
+
+class TypographicApostropheSplitsAShelf(unittest.TestCase):
+    """
+    A curly apostrophe in a series name is the "Six of Crows " bug in disguise.
+
+    Measured live 2026-07-29 on Margaret Atwood: the API returns the series as
+    u'The Handmaid’s Tale' (RIGHT SINGLE QUOTATION MARK) while both book
+    titles spell the possessive with an ASCII apostrophe, so the saved sort
+    title read "Handmaid’s Tale, Book 1 - The Handmaid's Tale" -- the same
+    string, punctuated two ways, inside one field.
+
+    Cosmetic in that one case only because BOTH Atwood books happened to carry
+    the curly form. The moment one book of a series arrives with the straight
+    form -- a different provider, a re-scrape, a librarian edit -- the two sort
+    prefixes differ and the shelf splits, unfixably from the UI, exactly as the
+    trailing space did. Normalising at the composer (the last thing between a
+    dirty source and a saved sort title) makes the prefix depend on the words
+    rather than on which quote character the source happened to use.
+
+    ASCII is the target: it sorts predictably and matches how the titles spell
+    it.
+    """
+
+    CURLY = u'The Handmaid’s Tale'
+    STRAIGHT = u"The Handmaid's Tale"
+
+    def test_curly_series_composes_with_a_straight_apostrophe(self):
+        self.assertEqual(
+            sort_title_for(self.CURLY, 'Book 1', title=u"The Handmaid's Tale"),
+            u"Handmaid's Tale, Book 1 - The Handmaid's Tale"
+        )
+
+    def test_curly_and_straight_sources_compose_IDENTICALLY(self):
+        # THE point: whichever form the provider sends, one shelf.
+        curly = sort_title_for(self.CURLY, 'Book 2', title=u'The Testaments')
+        straight = sort_title_for(self.STRAIGHT, 'Book 2', title=u'The Testaments')
+        self.assertEqual(curly, straight)
+        self.assertEqual(straight, u"Handmaid's Tale, Book 2 - The Testaments")
+
+    def test_the_title_half_is_normalised_too(self):
+        # Otherwise one field still holds the same word punctuated two ways.
+        self.assertEqual(
+            sort_title_for(u'Sundering', 'Book 3', title=u'The Adversary’s Tale'),
+            u"Sundering, Book 3 - The Adversary's Tale"
+        )
+
+    def test_other_typographic_apostrophes_fold_as_well(self):
+        for mark in (u'‘', u'ʼ', u'′'):
+            self.assertEqual(
+                sort_title_for(u'Handmaid' + mark + u's Tale', 'Book 1',
+                               title=u'The Testaments'),
+                u"Handmaid's Tale, Book 1 - The Testaments"
+            )
+
+    def test_plain_ascii_is_untouched(self):
+        self.assertEqual(
+            sort_title_for('Six of Crows', 'Book 2'),
+            'Six of Crows, Book 2 - Crooked Kingdom'
+        )
+
+    def test_a_real_quotation_mark_is_not_an_apostrophe(self):
+        # Double quotes are a different character class; leave them alone.
+        self.assertEqual(
+            sort_title_for(u'Sundering', 'Book 3', title=u'The “Adversary”'),
+            u'Sundering, Book 3 - The “Adversary”'
+        )
