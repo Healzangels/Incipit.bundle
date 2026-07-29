@@ -3195,27 +3195,27 @@ class LocalSelectIsNotPowerless(unittest.TestCase):
         self.assertEqual(len(self.posts), 1)
 
 
-class NoDuplicateTileOnAColdScan(unittest.TestCase):
+class TheUploadIsWhatSelects(unittest.TestCase):
     """
-    On a FRESH item the container already shows cover.jpg -- do not upload it too.
+    Never suppress select_local_cover's upload. It is what SELECTS cover.jpg.
 
-    select_local_cover exists to move a selection Plex has already PERSISTED,
-    which a container cannot do. On a cold scan there is nothing to move: the
-    agent has just filed cover.jpg at sort_order=0 and Plex will default to it.
-    Uploading the same bytes anyway produces two byte-identical tiles in the
-    picker, indistinguishable to the operator and permanent.
+    v1.3.166 tried the opposite and was reverted the same hour. The reasoning
+    looked sound: on a cold scan the agent files cover.jpg into the container at
+    sort_order=0, so Plex should default to it, making the upload a redundant
+    twin. Measured on a genuinely cold library (10.0.1.99 section 49, bundles
+    and agent caches cleared) 33 of 33 albums did select cover.jpg AND 33 of 33
+    carried one duplicate pair -- `(upload) + com.plexapp.agents.incipit` -- so
+    the duplicate is real and the code records the same shape at 147 of 150
+    albums (98%) on 2026-07-25.
 
-    The existing "the selected poster already IS this image" guard cannot catch
-    this, twice over: it is gated on `selected_key` (empty on a cold scan), and
-    the sha tests it follows only recognise upload:// keys -- a CONTAINER key is
-    sha1 of the key STRING we filed under ('incipit-local-cover'), never the
-    image's bytes, so `have_plain` is False however many times we offered it.
+    But the very next cold library, with the upload suppressed, showed NO local
+    posters at all. The lesson: the container offer only makes an image
+    AVAILABLE in the picker; this upload is what makes it the SELECTION. The
+    evidence had been there and was misread -- on section 49 the *selected*
+    entry was always the `(upload)`, never the container poster.
 
-    Measured live 2026-07-29 on a genuinely cold Jim Butcher library (section 49
-    on 10.0.1.99, bundles and agent caches cleared first): 33 of 33 albums
-    selected cover.jpg correctly AND 33 of 33 carried exactly one duplicate
-    pair, every one of them `(upload) + com.plexapp.agents.incipit`. The code
-    already records the same shape at 147 of 150 albums (98%) from 2026-07-25.
+    The duplicate must therefore be removed from the CONTAINER side (withhold or
+    prune that entry when we are going to upload), never by removing the upload.
     """
 
     COVER = b'\xff\xd8\xff\xe0 the cover.jpg on disk'
@@ -3256,32 +3256,34 @@ class NoDuplicateTileOnAColdScan(unittest.TestCase):
     def _with_state(self, selected, keys):
         AG.read_poster_state = lambda guid, tag: ('101', selected, keys, None)
 
-    def test_cold_scan_lets_the_container_default_stand(self):
-        # THE fix: nothing selected yet and we just filed cover.jpg at
-        # sort_order=0, so the upload would only mint a twin.
+    def test_a_cold_scan_STILL_uploads(self):
+        # THE pin. v1.3.166 skipped this upload when the container already
+        # offered the same bytes and nothing was selected yet, on the reasoning
+        # that sort_order=0 would become Plex's default. Disproved live: a fresh
+        # library showed NO local posters at all. This upload is what SELECTS
+        # cover.jpg; the container offer only puts it in the picker.
         self._with_state(None, [])
-        AG.select_local_cover(self.FakeHelper(), self.COVER, container_offers=True)
-        self.assertEqual(self.posts, [],
-                         'the container default needs no upload beside it')
+        AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertEqual(len(self.posts), 1,
+                         'the upload is the only thing that selects cover.jpg')
 
     def test_a_persisted_selection_is_still_overridden(self):
         # The recovery case v1.3.165 exists for: Plex has PERSISTED the agent's
-        # online cover, which a container cannot move. The upload must still fire
-        # even though the container also offers cover.jpg.
+        # online cover, which a container cannot move.
         sha, _padded, _ = AG.padded_variants(self.COVER)
         self._with_state(self.AGENT_SELECTION, [sha])
-        AG.select_local_cover(self.FakeHelper(), self.COVER, container_offers=True)
+        AG.select_local_cover(self.FakeHelper(), self.COVER)
         self.assertEqual(len(self.posts), 1,
                          'a persisted selection still needs the upload lever')
 
-    def test_without_a_container_offer_the_upload_still_runs(self):
-        # Nothing else would ever show cover.jpg, so the upload is the only path.
-        self._with_state(None, [])
-        AG.select_local_cover(self.FakeHelper(), self.COVER, container_offers=False)
-        self.assertEqual(len(self.posts), 1)
-
-    def test_the_default_is_unchanged(self):
-        # Callers that say nothing keep the old behaviour.
-        self._with_state(None, [])
-        AG.select_local_cover(self.FakeHelper(), self.COVER)
-        self.assertEqual(len(self.posts), 1)
+    def test_no_container_offer_argument_exists(self):
+        # Guard against re-introducing the v1.3.166 shape. Any future dedupe
+        # must remove the CONTAINER entry, never this upload.
+        import inspect
+        try:
+            args = inspect.getfullargspec(AG.select_local_cover).args
+        except AttributeError:  # py2 harness
+            args = inspect.getargspec(AG.select_local_cover).args
+        self.assertNotIn('container_offers', args,
+                         'suppressing the upload was disproved live -- dedupe '
+                         'the container side instead')
