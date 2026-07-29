@@ -1399,7 +1399,7 @@ def mirror_withheld(state, image_bytes, own_dict_key, tag):
 
 def cover_keep_list(thumb_key, local_key, thumb_present, local_present,
                     online_redundant, online_byte_exact, online_prune_ok,
-                    mirror_skipped, mirror_byte_exact):
+                    mirror_skipped, mirror_byte_exact, local_uploaded=False):
     """
         The membership list for `validate_keys` -- which entries of OUR
         namespace survive this pass.
@@ -1417,13 +1417,43 @@ def cover_keep_list(thumb_key, local_key, thumb_present, local_present,
             re-derive the same verdict every pass.
           * NEVER prune the selection (`online_prune_ok`), which is the
             picked-poster-evaporates failure.
+
+        `local_uploaded` is the third case, added 2026-07-29: OUR OWN upload now
+        holds the selection and carries cover.jpg's exact bytes, so our CONTAINER
+        copy of the same file is a twin tile. Measured on a cold library with the
+        Incipit agent bound (section 54): 33 of 33 albums came out at 3 tiles / 1
+        duplicate, the pair always `(upload) + com.plexapp.agents.incipit`. Both
+        rules above still hold -- the prune is on exact byte identity (our own
+        bytes) and the selection is the UPLOAD, not this entry. The agent cannot
+        delete an upload (PUT/DELETE are downgraded), so this container entry is
+        the only removable copy, and the right one.
     """
     keep = [thumb_key] if thumb_present else []
     if online_redundant and online_byte_exact and online_prune_ok:
         keep = []
-    if local_present and not (mirror_skipped and mirror_byte_exact):
+    if local_present and not (mirror_skipped and mirror_byte_exact) \
+            and not local_uploaded:
         keep.append(local_key)
     return keep
+
+
+def should_prune_local_twin(upload_holds_selection, local_present):
+    """
+        Whether to drop OUR container copy of cover.jpg as a duplicate tile.
+
+        Extracted rather than left inline at the call site for the reason
+        cover_keep_list was: the 2026-07-28 mutation sweep proved inline guards
+        here go unenforced. Making this decision unconditional left the whole
+        suite green, so the condition that matters most -- do NOT prune when the
+        operator's own pick is showing -- had nothing pinning it.
+
+        BOTH must hold:
+          * the upload really holds the selection (select_local_cover said so).
+            A stand-down means a user's poster is displayed, and our container
+            entry is then their only route back to their local art.
+          * we actually have an entry to prune this pass.
+    """
+    return bool(upload_holds_selection) and bool(local_present)
 
 
 def online_offer_redundant(thumb_data, cover_bytes, local_set, mirror_skipped,
@@ -2363,24 +2393,28 @@ def select_local_cover(helper, cover_bytes=None):
     if cover_bytes is None:
         cover_bytes = local_cover_bytes(helper)
     if not cover_bytes:
-        return
+        return False
     tag = 'incipit local-select'
     guid = helper.metadata.guid
     try:
         sha, sha_padded, _ = padded_variants(cover_bytes)
     except Exception as e:
         log.error('%s: sha1 failed (%s)', tag, e)
-        return
+        return False
     if not should_run(tag, guid, sha, 90):
-        return
+        # A sibling track already converged this album THIS pass -- the twin
+        # prune ran with it, so report True rather than resurrecting the entry.
+        return True
     state = read_poster_state(guid, tag)
     if state is None:
-        return
+        return False
     rk, selected_key, keys, parent_thumb = state
     if not selection_is_agent_owned(selected_key, [sha, sha_padded]):
         log.info('%s: selection is a user upload -- leaving it', tag)
         mark_done(tag, guid, sha)
-        return
+        # FALSE keeps our container copy OFFERED: it is the operator's only
+        # route back to their local art while their own pick is showing.
+        return False
     # POISON GUARD (select side). cover.jpg on disk can itself BE the artist
     # photo -- that is what "poisoned" means -- and this function's whole job is
     # to force cover.jpg to become the selection, padding the bytes to defeat
@@ -2421,7 +2455,9 @@ def select_local_cover(helper, cover_bytes=None):
         if not known:
             log.error('%s: could not read the artist poster -- NOT selecting '
                       'cover.jpg, so a blip cannot re-poison the album', tag)
-            return
+            # Fails closed for the prune too: nothing was uploaded, so our
+            # container copy must stay OFFERED.
+            return False
         if selection_is_artist_art(artist_bytes, cover_bytes):
             # Memoised on the cover's own sha, so a repaired cover.jpg re-runs
             # immediately rather than waiting out the TTL.
@@ -2429,7 +2465,7 @@ def select_local_cover(helper, cover_bytes=None):
             log.warn('%s: cover.jpg IS the artist photo (byte-identical) -- refusing '
                      'to select it, so the book is not re-poisoned; the current '
                      'selection stands and will mirror to disk', tag)
-            return
+            return False
     # pref_asserted, because OWNERSHIP IS ALREADY PROVEN above. The default
     # stand-down encodes a book-level premise -- "our bytes offered but
     # de-selected can only be a person's choice" -- that this caller has
@@ -2445,8 +2481,10 @@ def select_local_cover(helper, cover_bytes=None):
     # refresh 0/4, forced refresh 0/4, because this call stood down every time.
     # Ownership was checked and the action then silently vetoed: the same
     # "correct and powerless" shape the portrait deferral hit at v1.3.121.
-    upload_and_select_poster(guid, cover_bytes, tag, token=sha, state=state,
-                             pref_asserted=True)
+    # RETURNED, not discarded: the caller prunes our twin container entry only
+    # when this reports that the upload really does hold the selection.
+    return upload_and_select_poster(guid, cover_bytes, tag, token=sha,
+                                    state=state, pref_asserted=True)
 
 
 class AudiobookArtist(Agent.Artist):
@@ -3628,7 +3666,38 @@ class AudiobookAlbum(Agent.Album):
             Prefs['prefer_local_cover'] and helper.force and not poisoned_local
         ):
             if not deferred_portrait_local:
-                select_local_cover(helper, cover_bytes)
+                # PRUNE OUR TWIN. When the upload really does hold the selection,
+                # our container copy of the SAME cover.jpg is a second,
+                # indistinguishable tile -- measured at 33 of 33 albums on a cold
+                # library (section 54, 2026-07-29), always the pair
+                # `(upload) + com.plexapp.agents.incipit`. The agent cannot delete
+                # an upload, so the container entry is the only removable copy,
+                # and it is the right one: the upload is what is selected.
+                #
+                # Gated on the return value, NOT assumed: a stand-down (the
+                # operator's own pick is showing) reports False and the entry
+                # stays, because it is then their only route back to local art.
+                if should_prune_local_twin(
+                    select_local_cover(helper, cover_bytes),
+                    local_key in helper.metadata.posters
+                ):
+                    keep = cover_keep_list(
+                        thumb_key=helper.thumb, local_key=local_key,
+                        thumb_present=bool(helper.thumb)
+                        and helper.thumb in helper.metadata.posters,
+                        local_present=True,
+                        online_redundant=online_redundant,
+                        online_byte_exact=online_byte_exact,
+                        online_prune_ok=online_prune_ok,
+                        mirror_skipped=mirror_skipped,
+                        mirror_byte_exact=mirror_byte_exact,
+                        local_uploaded=True)
+                    try:
+                        helper.metadata.posters.validate_keys(keep)
+                        log.warn('incipit cover: pruned our local-cover container '
+                                 'entry -- the uploaded copy holds the selection')
+                    except Exception as e:
+                        log.error('incipit cover: twin prune failed (%s)', e)
             else:
                 # The MIRROR of that call. When the jacket was deferred, the
                 # container said "use the square" and Plex ignored it, because a

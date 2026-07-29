@@ -3287,3 +3287,159 @@ class TheUploadIsWhatSelects(unittest.TestCase):
         self.assertNotIn('container_offers', args,
                          'suppressing the upload was disproved live -- dedupe '
                          'the container side instead')
+
+
+class ContainerCopyIsPrunedOnceUploaded(unittest.TestCase):
+    """
+    Our own upload makes our own CONTAINER entry a duplicate tile -- prune it.
+
+    prefer_local_cover offers cover.jpg twice: once as the container poster
+    `incipit-local-cover` (which makes it PICKABLE) and once as the upload that
+    select_local_cover POSTs (which makes it SELECTED). Both are ours and both
+    carry identical bytes, so the operator sees two indistinguishable tiles.
+
+    Measured on a genuinely cold library with the correct agent bound
+    (10.0.1.99 section 54, Metadata/Albums + Artists + agent caches cleared):
+    33 of 33 albums came out at exactly 3 tiles / 1 duplicate, the pair always
+    `(upload) + com.plexapp.agents.incipit`, e.g. The Aeronaut's Windlass with
+    the online cover at 407912 bytes and cover.jpg at 2706684 offered BOTH as
+    our container poster and as the selected upload, same sha 92075438f538.
+
+    The agent cannot delete an upload (its PUT/DELETE are downgraded), so the
+    container entry is the only removable copy -- and it is the right one to
+    remove, because the upload is what holds the selection.
+
+    Both of cover_keep_list's rules are satisfied: the prune is on BYTE
+    identity (our own bytes, exactly), and it never prunes the selection (the
+    selection is the upload, not this entry).
+    """
+
+    THUMB = 'http://example/online-cover.jpg'
+    LOCAL = 'incipit-local-cover'
+
+    def keep(self, **over):
+        args = dict(thumb_key=self.THUMB, local_key=self.LOCAL,
+                    thumb_present=True, local_present=True,
+                    online_redundant=False, online_byte_exact=False,
+                    online_prune_ok=True, mirror_skipped=False,
+                    mirror_byte_exact=False)
+        args.update(over)
+        return AG.cover_keep_list(**args)
+
+    def test_our_container_copy_goes_once_we_have_uploaded_it(self):
+        keep = self.keep(local_uploaded=True)
+        self.assertNotIn(self.LOCAL, keep,
+                         'the uploaded copy holds the selection; this entry is a twin')
+        self.assertIn(self.THUMB, keep, 'the online cover stays pickable')
+
+    def test_without_an_upload_the_container_copy_stays(self):
+        # On a non-forced pass nothing is uploaded, so this entry is the ONLY
+        # way cover.jpg is offered at all.
+        self.assertIn(self.LOCAL, self.keep(local_uploaded=False))
+
+    def test_the_default_still_keeps_the_local_entry(self):
+        # Callers that do not pass the flag keep the old behaviour.
+        self.assertIn(self.LOCAL, self.keep())
+
+    def test_the_online_cover_can_still_be_pruned_independently(self):
+        keep = self.keep(local_uploaded=True, online_redundant=True,
+                         online_byte_exact=True, online_prune_ok=True)
+        self.assertEqual(keep, [], 'both of ours redundant -> keep nothing of ours')
+
+
+class SelectLocalCoverReportsWhetherItSelected(unittest.TestCase):
+    """
+    The prune above needs to know the upload actually holds the selection.
+
+    select_local_cover returned None on every path, so the caller could not
+    tell "cover.jpg is now the selection" from "stood down, a user's pick is
+    showing". Pruning the container entry in the second case would delete the
+    operator's only route back to their local art.
+    """
+
+    COVER = b'\xff\xd8\xff\xe0 the cover.jpg on disk'
+    AGENT_SELECTION = 'metadata://posters/com.plexapp.agents.incipit/online'
+    USER_SELECTION = 'upload://posters/a-poster-the-operator-uploaded'
+
+    class FakeHelper(object):
+        class metadata(object):
+            guid = 'guid-reports'
+
+    def setUp(self):
+        self.real_request = AG.HTTP.Request
+        self.real_state = AG.read_poster_state
+        self.real_artist = AG.artist_poster_bytes
+        self.real_selected = AG.selected_poster_bytes
+
+        def recorder(url, **kwargs):
+            class FakeResponse(object):
+                content = 'ok'
+            return FakeResponse()
+
+        AG.HTTP.Request = recorder
+        AG.artist_poster_bytes = lambda guid, tag, parent_thumb=None: (ARTIST, True)
+        AG.selected_poster_bytes = lambda rk, key, tag: (
+            b'\xff\xd8\xff\xe0 a different poster entirely', True)
+        AG.recent_work_memo.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real_request
+        AG.read_poster_state = self.real_state
+        AG.artist_poster_bytes = self.real_artist
+        AG.selected_poster_bytes = self.real_selected
+        AG.recent_work_memo.clear()
+
+    def _with_state(self, selected, keys):
+        AG.read_poster_state = lambda guid, tag: ('101', selected, keys, None)
+
+    def test_a_successful_upload_reports_True(self):
+        self._with_state(None, [])
+        self.assertTrue(AG.select_local_cover(self.FakeHelper(), self.COVER))
+
+    def test_an_already_converged_book_reports_True(self):
+        # cover.jpg IS the selection: still true that the upload holds it, so
+        # the twin container entry is still safe to prune.
+        sha, _p, _ = AG.padded_variants(self.COVER)
+        self._with_state('upload://posters/' + sha, [sha])
+        self.assertTrue(AG.select_local_cover(self.FakeHelper(), self.COVER))
+
+    def test_standing_down_on_a_user_pick_reports_falsey(self):
+        # THE guard for the prune: the operator's poster is showing, so
+        # cover.jpg must stay OFFERED in the container.
+        sha, _p, _ = AG.padded_variants(self.COVER)
+        self._with_state(self.USER_SELECTION, [sha])
+        self.assertFalse(AG.select_local_cover(self.FakeHelper(), self.COVER))
+
+    def test_no_cover_bytes_reports_falsey(self):
+        self._with_state(None, [])
+        self.assertFalse(AG.select_local_cover(self.FakeHelper(), None))
+
+
+class TwinPruneDecision(unittest.TestCase):
+    """
+    should_prune_local_twin -- the gate that keeps a hand-pick recoverable.
+
+    This lived inline at the call site and the 2026-07-29 mutation run proved it
+    unenforced: replacing the whole condition with `True` left all 373 tests
+    green. An unconditional prune would drop our container copy of cover.jpg
+    even when the operator's OWN upload is the selection -- deleting their only
+    route back to their local art, which is the same class of harm as the Will
+    Wight incident.
+    """
+
+    def test_pruned_when_the_upload_holds_the_selection(self):
+        self.assertTrue(AG.should_prune_local_twin(True, True))
+
+    def test_never_pruned_on_a_stand_down(self):
+        # THE guard: select_local_cover reported False, i.e. a user's pick is
+        # showing. Our entry must survive as their way back.
+        self.assertFalse(AG.should_prune_local_twin(False, True))
+
+    def test_nothing_to_prune_is_not_a_prune(self):
+        self.assertFalse(AG.should_prune_local_twin(True, False))
+        self.assertFalse(AG.should_prune_local_twin(False, False))
+
+    def test_none_is_treated_as_no(self):
+        # select_local_cover returned bare None on every path before today; a
+        # stale build or a new early return must fail CLOSED, not prune.
+        self.assertFalse(AG.should_prune_local_twin(None, True))
