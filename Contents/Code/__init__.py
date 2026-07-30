@@ -93,6 +93,28 @@ def author_update_cache_time(force=False):
     return CACHE_1HOUR
 
 
+def book_update_cache_time(force=False):
+    # The WEEK-long default stays for a scan: book records really are stable,
+    # and a cold scan re-requests the same ASIN once per track, so the cache is
+    # carrying real load there.
+    #
+    # What was missing is the operator bypass. The book item fetch passed no
+    # cache_time at all, so a Refresh Metadata replayed whatever body was cached
+    # up to a WEEK ago and no operator action could surface a corrected record.
+    # Measured live 2026-07-30: after the API was fixed to parse a series for
+    # B00HFW9SUE ("Legend of Drizzt #12") and confirmed serving it, Refresh
+    # Metadata on every R. A. Salvatore book left the album on its old
+    # folder-derived "Forgotten Realms Chronological, Book 12" -- the agent was
+    # replaying a pre-fix cached body.
+    #
+    # Same rule the other two paths already follow: a manual Fix Match passes
+    # cache 0, and an author Refresh bypasses its hour. A human asking NOW must
+    # not be answered from before the fix they are refreshing to pick up.
+    if force or Prefs['dev_disable_http_cache']:
+        return 0
+    return CACHE_1WEEK
+
+
 def ValidatePrefs():
     log.debug('ValidatePrefs function call')
     # Re-apply on save so flipping the dev toggle takes effect without a restart.
@@ -3231,7 +3253,12 @@ class AudiobookAlbum(Agent.Album):
         """
         update_url = helper.build_url()
         try:
-            request = str(make_request(update_url))
+            # Week-long cache for a scan, but an operator's Refresh (force)
+            # bypasses it -- without that, a corrected API record stayed
+            # invisible for up to a week and no operator action could surface it
+            # (see book_update_cache_time).
+            request = str(make_request(
+                update_url, cache_time=book_update_cache_time(helper.force)))
         except Exception as e:
             log.error(
                 'incipit book fetch failed for %s; keeping existing '

@@ -148,3 +148,113 @@ class TestMakeRequest4xx(unittest.TestCase):
         AG.HTTP.Request = self.raiser(408)
         self.assertIsNone(AG.make_request('http://api.test/x'))
         self.assertEqual(len(self.calls), 4)
+
+
+class TestBookUpdateCacheTime(unittest.TestCase):
+    """
+        The BOOK item fetch had no cache-time argument at all, so it took the
+        week-long default with no way for an operator to bypass it.
+
+        Measured live 2026-07-30, and this is what made it visible: the API was
+        fixed to parse a series for The Spine of the World (B00HFW9SUE ->
+        "Legend of Drizzt #12") and confirmed serving it, the operator then ran
+        Refresh Metadata on every R. A. Salvatore book, and the album kept its
+        old folder-derived sort title "Forgotten Realms Chronological, Book 12".
+        The agent replayed a week-old cached /books/{asin} body carrying no
+        series -- the same trap author_update_cache_time was written for, on the
+        one path that never got the fix.
+
+        The week default STAYS for a scan (those records really are stable and a
+        cold scan re-requests the same ASIN per track). What changes is that an
+        operator's explicit Refresh (force) bypasses it, exactly like a manual
+        Fix Match passes cache 0 and an author Refresh bypasses its hour.
+    """
+
+    def tearDown(self):
+        AG.Prefs.pop('dev_disable_http_cache', None)
+
+    def test_a_scan_still_uses_the_week_long_cache(self):
+        AG.Prefs['dev_disable_http_cache'] = False
+        self.assertEqual(AG.book_update_cache_time(), AG.CACHE_1WEEK)
+        self.assertEqual(AG.book_update_cache_time(False), AG.CACHE_1WEEK)
+
+    def test_an_operator_force_bypasses_it(self):
+        # The whole point: a human asking NOW must not be answered from a body
+        # cached before the fix they are refreshing to pick up.
+        AG.Prefs['dev_disable_http_cache'] = False
+        self.assertEqual(AG.book_update_cache_time(True), 0)
+
+    def test_the_dev_toggle_disables_it(self):
+        AG.Prefs['dev_disable_http_cache'] = True
+        self.assertEqual(AG.book_update_cache_time(), 0)
+        self.assertEqual(AG.book_update_cache_time(True), 0)
+
+    def test_it_is_not_the_author_hour(self):
+        # Books are not authors: author records self-heal server-side and were
+        # dropped to an hour for that reason. Book records are stable, so the
+        # scan-time cost of a week is worth keeping -- only the force bypass is
+        # being added here.
+        AG.Prefs['dev_disable_http_cache'] = False
+        self.assertNotEqual(AG.book_update_cache_time(), AG.CACHE_1HOUR)
+
+
+class TestBookUpdateCallSitePassesForce(unittest.TestCase):
+    """
+        The helper being right is not enough: the CALL SITE has to hand it the
+        operator's force flag.
+
+        Mutation caught this gap -- dropping `helper.force` from the
+        call_item_api argument left the whole suite green, because every other
+        test in this file drives book_update_cache_time() directly. That is
+        exactly the shape this project keeps getting bitten by, so the wiring
+        gets its own test.
+    """
+
+    class FakeHelper(object):
+        content_type = 'books'
+
+        def __init__(self, force):
+            self.force = force
+            self.date = None
+
+        def build_url(self):
+            return 'http://api.example/books/B00HFW9SUE?region=us'
+
+        def parse_api_response(self, response):
+            self.parsed = response
+
+    def setUp(self):
+        self.calls = []
+        self.real_request = AG.make_request
+        self.real_decode = AG.json_decode
+
+        def fake_request(url, cache_time=None):
+            self.calls.append(cache_time)
+            return '{"asin": "B00HFW9SUE"}'
+
+        AG.make_request = fake_request
+        AG.json_decode = lambda body: {'asin': 'B00HFW9SUE'}
+        AG.Prefs['dev_disable_http_cache'] = False
+
+    def tearDown(self):
+        AG.make_request = self.real_request
+        AG.json_decode = self.real_decode
+        AG.Prefs.pop('dev_disable_http_cache', None)
+
+    def fetch(self, force):
+        agent = AG.AudiobookAlbum()
+        # The date parse at the end of call_item_api reaches a live framework
+        # call, which the harness blocks on purpose. Stub only that -- the
+        # cache_time argument is what this test is about.
+        agent.getDateFromString = lambda value: None
+        helper = self.FakeHelper(force)
+        self.assertTrue(agent.call_item_api(helper))
+        return self.calls[-1]
+
+    def test_an_operator_refresh_reaches_the_network(self):
+        # force=True must arrive as cache 0, not the week-long default -- this is
+        # the bug that made a corrected API record invisible to Refresh Metadata.
+        self.assertEqual(self.fetch(True), 0)
+
+    def test_a_scan_still_gets_the_week_long_cache(self):
+        self.assertEqual(self.fetch(False), AG.CACHE_1WEEK)
