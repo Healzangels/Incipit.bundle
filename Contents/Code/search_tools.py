@@ -311,15 +311,34 @@ class SearchTool:
                 self.check_for_region(filename_unquoted)
                 return filename_search_asin.group(0) + '_' + self.region_override
 
-        # Check search query for ASIN
-        # Default to album and use artist if no album
-        manual_asin = self.media.album if self.media.album else self.media.artist
-        manual_search_asin = self.search_asin(manual_asin, typed=True)
+        # Check a TYPED query for an ASIN.
+        #
+        # GATED on is_typed_search(). The shape-only regex this uses
+        # (r'(?=.\d)[A-Z\d]{10}') is deliberately loose because a human typing
+        # into Search Options is naming an identity on purpose. This branch fed
+        # it `self.media.album` -- the album TAG -- on every AUTOMATIC scan,
+        # ungated, so a bare ISBN-13 in a tag quick-matched a 10-char slice at
+        # score 100: search() returns immediately, so no fan-out, no scoring,
+        # no duration veto, and Plex auto-applies it. The resulting
+        # /books/9780593399 404s forever and only a TYPED Fix Match clears it.
+        # v1.3.154 hardened the FILENAME probe for exactly this; this sibling
+        # was left open.
+        #
+        # Nothing is lost on the automatic path: a real ASIN in the album tag is
+        # still caught by pre_process_title -> search_asin(), which uses the
+        # B0-anchored regex.
+        #
+        # Read media.name FIRST: a typed query puts the typed text there
+        # (the auto-fired candidate list on dialog open carries name=None and
+        # the item's own metadata instead), so album/artist are the fallback.
+        if self.is_typed_search():
+            manual_asin = self.media.name or self.media.album or self.media.artist
+            manual_search_asin = self.search_asin(manual_asin, typed=True)
 
-        if manual_search_asin:
-            log.info('ASIN found in manual search')
-            self.check_for_region(manual_asin)
-            return manual_search_asin.group(0) + '_' + self.region_override
+            if manual_search_asin:
+                log.info('ASIN found in manual search')
+                self.check_for_region(manual_asin)
+                return manual_search_asin.group(0) + '_' + self.region_override
 
     # Check for region override
     def check_for_region(self, search_title):

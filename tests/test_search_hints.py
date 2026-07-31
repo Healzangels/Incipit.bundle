@@ -426,8 +426,50 @@ class TestFilenameAsinNeedsTheB0Anchor(unittest.TestCase):
     def test_a_typed_asin_is_still_honoured(self):
         # Typing an ASIN into Search Options is the most explicit identity a
         # user can give; that branch is unchanged.
-        tool = tool_for(album='B08WF9JR2P')
+        #
+        # RE-DRIVEN through the real typed path (media.name + manual=True).
+        # This used to pass album= with manual=False, which is the automatic
+        # TAG path -- so it asserted the opposite of its own name and was the
+        # only thing "covering" the branch below.
+        # The tag and the typed text DIFFER, which is the real shape: the album
+        # is still titled normally while the operator types an ASIN into Search
+        # Options. Reading media.album here would find nothing.
+        tool = tool_for(album='The Wrong Book Entirely')
+        tool.manual = True
+        tool.media.name = 'B08WF9JR2P'
         self.assertEqual(tool.check_for_asin(), 'B08WF9JR2P_us')
+
+    def test_an_ISBN_in_the_album_TAG_does_not_quick_match_on_a_scan(self):
+        """
+        The shape-only regex (r'(?=.\d)[A-Z\d]{10}') exists for TYPED queries,
+        where a human is deliberately naming an identity. This branch fed it
+        `self.media.album` -- the album TAG -- on every AUTOMATIC scan, ungated.
+
+        A bare ISBN-13 in a tag therefore quick-matched a 10-char slice at
+        score 100: search() returns immediately, so no fan-out, no scoring, no
+        duration veto, and Plex auto-applies it. `/books/9780593399` then 404s
+        forever and only a TYPED Fix Match clears it, because the dialog's own
+        auto-fired list re-mints the same row.
+
+        v1.3.154 hardened the FILENAME probe for exactly this and gated it on
+        `not is_typed_search()`; this sibling branch was left open.
+        """
+        tool = tool_for(album='The Lost Stories Collection 9780593399439')
+        self.assertIsNone(tool.check_for_asin())
+
+        tool = tool_for(album='Some Book [ISBN 9780593399439]')
+        self.assertIsNone(tool.check_for_asin())
+
+    def test_a_real_B0_asin_in_the_tag_is_still_caught_by_the_OTHER_probe(self):
+        # The gate must not cost the legitimate case. It does not: a real ASIN
+        # in the album tag is picked up by pre_process_title(), which runs the
+        # B0-ANCHORED search_asin over normalizedName. That is a different
+        # entry point (build_url) from check_for_asin, which is why the gate
+        # above can be strict without losing anything.
+        tool = tool_for(album='Some Book B08WF9JR2P')
+        tool.region_override = 'us'
+        self.assertIsNone(tool.check_for_asin(), 'the quick-match path stays shut')
+        self.assertTrue(tool.pre_process_title(), 'the anchored probe still finds it')
 
 
 class TestBuiltQueryCarriesTheHints(unittest.TestCase):
