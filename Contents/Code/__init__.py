@@ -130,11 +130,16 @@ def Start():
         'Media Center PC 6.0'
     )
     HTTP.Headers['Accept-Encoding'] = 'gzip'
+    # WARN, not info: the shipped logging_level default is WARN, and info() is
+    # suppressed there — so this banner, the ONLY positive proof the bundle
+    # loaded, was never written at default prefs. A RestrictedPython violation
+    # kills the plugin at compile time with no UI error, so "no banner" has to
+    # mean "did not load" rather than "you have the wrong log level set".
     log.separator(
         msg=(
             "Incipit Audiobooks Agent v" + VERSION_NO
         ),
-        log_level="info"
+        log_level="warn"
     )
 
 

@@ -67,8 +67,18 @@ class Logging:
         if msg:
             output = divider + msg + divider
 
-        if log_level.lower() == "debug":
+        # Dispatch on the level the caller ASKED for. This used to special-case
+        # "debug" and fall through to info() for everything else, which silently
+        # demoted a warn/error separator to a level the shipped prefs suppress --
+        # the reason the Start() version banner was never written at the default
+        # logging_level of WARN.
+        level = log_level.lower()
+        if level == "debug":
             return self.debug(output)
+        if level == "warn":
+            return self.warn(output)
+        if level == "error":
+            return self.error(output)
         return self.info(output)
 
     def metadata(self, dict_arr, log_level="info"):
