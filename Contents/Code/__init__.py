@@ -614,12 +614,24 @@ def promote_picked_cover(helper):
     if not is_offered:
         return
     # Poison guard: never make the artist photo the local cover, even on a pick.
+    #
+    # FAIL CLOSED, through the shared helper -- the same contract both sibling
+    # writers honour. This used to do its own HTTP.Request with a bare
+    # `except: artist_bytes = None`, and selection_is_artist_art(None, ...)
+    # returns False, so ONE 8-second timeout made the guard PASS and the write
+    # proceed, logging success. That is exactly how the author photo ends up in
+    # cover.jpg -- the shape that destroyed 92 curated covers on 2026-07-26.
+    #
+    # artist_poster_bytes returns (bytes, known) precisely so a caller can tell
+    # "this item has no artist art" from "I could not tell", and its docstring
+    # states the rule: callers that WRITE must refuse when known is False. It
+    # also memoises, so this no longer re-downloads the artist photo per track.
     if parent_thumb:
-        try:
-            aurl = parent_thumb if parent_thumb.startswith('http') else PMS + parent_thumb
-            artist_bytes = HTTP.Request(aurl, timeout=8, cacheTime=0).content
-        except Exception:
-            artist_bytes = None
+        artist_bytes, known = artist_poster_bytes(helper.metadata.guid, tag, parent_thumb)
+        if not known:
+            log.error('%s: could not read the artist poster for the poison check '
+                      '-- skipping this write to be safe', tag)
+            return
         if selection_is_artist_art(artist_bytes, selected):
             log.warn('%s: picked cover is the artist photo -- refusing to write it', tag)
             mark_done(tag, helper.metadata.guid, thumb)

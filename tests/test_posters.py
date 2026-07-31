@@ -1262,6 +1262,49 @@ class CoverMirrorModes(unittest.TestCase):
         self.assertEqual(len(self.writes), 1)
         self.assertEqual(self.writes[0][1], self.ONLINE)
 
+    def test_promote_refuses_when_the_artist_poster_CANNOT_BE_READ(self):
+        """
+        FAIL CLOSED. promote_picked_cover's poison guard reads the artist photo
+        with a bare `except: artist_bytes = None`, and
+        selection_is_artist_art(None, selected) returns False -- so a single
+        8-second timeout on the artist thumb made the guard PASS and the write
+        proceed, logging success. Both sibling writers refuse in this case
+        through artist_poster_bytes(), whose docstring is explicit: "callers
+        that WRITE must refuse when it is False".
+
+        This is the shape that put the author photo into cover.jpg and
+        destroyed 92 curated covers on 2026-07-26.
+        """
+        AG.Prefs['cover_mirror_mode'] = (
+            'Curation (the selected poster replaces cover.jpg)')
+        AG.Prefs['prefer_local_cover'] = True
+        outer = self
+        base = AG.HTTP.Request
+
+        def flaky(url, **kwargs):
+            # The container lookup must still name a parent, so the guard is
+            # REACHED; only the artist poster read fails.
+            if '/library/all' in url:
+                class R(object):
+                    content = ('<MediaContainer size="1">'
+                               '<Directory ratingKey="55" '
+                               'thumb="/library/metadata/55/thumb/1" '
+                               'parentThumb="/library/metadata/9/thumb/2"/>'
+                               '</MediaContainer>')
+                return R()
+            if '/9/thumb/' in url:
+                raise Exception('artist poster read timed out')
+            return base(url, **kwargs)
+
+        AG.HTTP.Request = flaky
+        try:
+            AG.promote_picked_cover(self._helper())
+        finally:
+            AG.HTTP.Request = base
+        self.assertEqual(
+            outer.writes, [],
+            'an unreadable artist poster must BLOCK the write, not permit it')
+
     def test_curation_lets_promote_write(self):
         AG.Prefs['cover_mirror_mode'] = (
             'Curation (the selected poster replaces cover.jpg)')
