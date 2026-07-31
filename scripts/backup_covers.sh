@@ -20,11 +20,12 @@
 #
 # USAGE (run on the media host)
 #   scripts/backup_covers.sh <library-root> <backup-root>
-#   e.g. scripts/backup_covers.sh /data/media/audiobooks-updated /mnt/backup/incipit-covers
+#   e.g. scripts/backup_covers.sh /data/media/audiobooks /mnt/backup/incipit-covers
 #
 #   Add --dry-run as a third argument to see what it would do first. Do that once
-#   before the first real run: confirm the library root is the one Plex actually
-#   serves. ("-updated" vs "-upgraded" is a known ambiguity in this setup.)
+#   before the first real run, and confirm the root against Plex rather than any
+#   note — GET /library/sections and read the section's <Location path="...">.
+#   Worklist CSVs and older docs still carry a since-retired "-updated" suffix.
 #
 # SCHEDULING
 #   Weekly is plenty; covers change when the operator curates, not continuously.
