@@ -3613,3 +3613,44 @@ class TwinPruneDecision(unittest.TestCase):
         # select_local_cover returned bare None on every path before today; a
         # stale build or a new early return must fail CLOSED, not prune.
         self.assertFalse(AG.should_prune_local_twin(None, True))
+
+
+class TestEveryPruneIsVisible(unittest.TestCase):
+    """
+        A prune REMOVES a poster from the picker. Every one of them must leave
+        a line at the SHIPPED default log level.
+
+        DefaultPrefs.json ships logging_level=WARN, and Logging.info() emits
+        only at DEBUG/INFO -- so an info() prune is invisible in the operator's
+        actual configuration. That is not hypothetical: the 2026-07-26 loss of
+        92 curated covers was hard to reconstruct precisely because the
+        destructive lines were below the default level, and one prune (the
+        artist offer phase) logged nothing at any level at all.
+
+        A source guard rather than a behavioural test, because these sit deep
+        inside compile_metadata and the thing worth pinning is simply that no
+        future prune ships silent.
+    """
+
+    def source(self):
+        import os
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, '..', 'Contents', 'Code', '__init__.py')
+        with open(path) as handle:
+            return handle.read().split('\n')
+
+    def test_no_prune_is_silent_or_below_warn(self):
+        lines = self.source()
+        offenders = []
+        for i, line in enumerate(lines):
+            if 'posters.validate_keys' not in line:
+                continue
+            # Look at the surrounding block for the level this prune logs at.
+            window = '\n'.join(lines[max(0, i - 8):i + 9])
+            if 'log.warn' in window or 'log.error' in window:
+                continue
+            offenders.append((i + 1, line.strip()[:70]))
+        self.assertEqual(
+            offenders, [],
+            'these prunes are silent or only log below the shipped WARN '
+            'default, so a removed poster leaves no trace: %r' % (offenders,))

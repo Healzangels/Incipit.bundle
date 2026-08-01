@@ -2087,7 +2087,12 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
                 if other_url and other_url in helper.metadata.posters:
                     keep.append(other_url)
                 helper.metadata.posters.validate_keys(keep)
-                log.info(
+                # WARN, not info: the shipped logging_level default is WARN, so
+                # info() is suppressed -- and this REMOVES a poster from the
+                # picker. Every prune must leave a trace at the default level;
+                # the 2026-07-26 loss of 92 covers was hard to reconstruct
+                # precisely because the destructive lines were invisible.
+                log.warn(
                     '%s: pruned our container copy of the just-selected image',
                     tag
                 )
@@ -3110,6 +3115,13 @@ class AudiobookArtist(Agent.Artist):
                         and len(valid_posters) == 2):
                     if better_square_portrait(thumb_dims, secondary_dims) is thumb_dims:
                         valid_posters = [helper.thumb_secondary, helper.thumb]
+            # The only prune in this file that logged NOTHING at any level.
+            # It withholds artist poster keys, so when it drops the wrong one
+            # there was no line to grep for afterwards.
+            log.warn(
+                'incipit artist-art: restricted the poster container to %s key(s)',
+                len(valid_posters)
+            )
             helper.metadata.posters.validate_keys(valid_posters)
         helper.log_update_metadata()
 
@@ -3728,7 +3740,10 @@ class AudiobookAlbum(Agent.Album):
             # operator's curated cover.jpg being deleted from the picker.
             try:
                 helper.metadata.posters.validate_keys([])
-                log.info(
+                # WARN: this empties the whole incipit namespace, which on a
+                # thumb-less (Hardcover/OpenLibrary) match can take the
+                # operator's curated cover.jpg entry with it.
+                log.warn(
                     'incipit cover: pruned the stale local-mirror entry '
                     '(no online cover to anchor the keep-list)'
                 )
@@ -3951,11 +3966,28 @@ def make_request(url, cache_time=None):
                 err_code = err.code
             except Exception:
                 err_code = None
-            if (
+            # PERMANENT codes abort for ANY host; the rest of the 4xx range
+            # aborts only for our own API.
+            #
+            # 404/410 mean the resource is gone and no amount of retrying
+            # changes that, yet the abort used to require is_api_host(url) -- so
+            # a rotted third-party image URL (the most common failure here: an
+            # Amazon author photo that moved) ran the whole ladder. Four
+            # attempts at timeout=90, plus 1+2+4s of backoff, plus the
+            # framework's per-call pacing. compile_metadata calls
+            # fetch_url_bytes up to four times per artist update on a force, so
+            # one dead image cost tens of seconds PER ALBUM inside Plex's
+            # bounded update window.
+            #
+            # 403 deliberately stays on the ladder for third parties: Audible's
+            # edge serves one-off bot-check 403s, which is the case the ladder
+            # was written for.
+            permanent = err_code in (404, 410)
+            answered_4xx = (
                 err_code is not None and 400 <= err_code < 500
                 and err_code not in (408, 425, 429)
-                and is_api_host(url)
-            ):
+            )
+            if permanent or (answered_4xx and is_api_host(url)):
                 break
             # No point sleeping after the final attempt.
             if attempt < num_retries - 1:

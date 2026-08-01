@@ -113,6 +113,36 @@ class TestMakeRequest4xx(unittest.TestCase):
         self.assertIsNone(AG.make_request('http://api.test/x'))
         self.assertEqual(len(self.calls), 1)
 
+    def test_a_THIRD_PARTY_404_also_stops_after_one_attempt(self):
+        """
+        The abort was gated on is_api_host(url), so a permanent 404 from a
+        THIRD-PARTY host ran the whole ladder: 4 attempts at timeout=90 plus
+        1+2+4s of backoff plus the framework's per-call pacing. A rotted
+        Amazon author-photo URL is the most common third-party failure here,
+        and compile_metadata calls fetch_url_bytes up to four times per artist
+        update on a force -- so one dead image cost tens of seconds PER ALBUM,
+        inside Plex's bounded update window.
+
+        A 403 is transient (Audible's edge serves one-off bot-checks, which is
+        why the ladder exists); a 404 or 410 never is. Narrow the abort to the
+        permanent codes and it applies to any host.
+        """
+        AG.HTTP.Request = self.raiser(404)
+        self.assertIsNone(AG.make_request('http://images.example/dead.jpg'))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_third_party_410_stops_too(self):
+        AG.HTTP.Request = self.raiser(410)
+        self.assertIsNone(AG.make_request('http://images.example/gone.jpg'))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_third_party_403_KEEPS_the_ladder(self):
+        # Transient by nature -- Audible's edge bot-check is exactly this, and
+        # it is the case the ladder was written for. Must not be narrowed away.
+        AG.HTTP.Request = self.raiser(403)
+        self.assertIsNone(AG.make_request('http://images.example/blocked.jpg'))
+        self.assertEqual(len(self.calls), 4)
+
     def test_a_500_keeps_the_full_ladder(self):
         AG.HTTP.Request = self.raiser(500)
         self.assertIsNone(AG.make_request('http://api.test/x'))
