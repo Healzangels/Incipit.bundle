@@ -17,8 +17,56 @@ VERSION_NO = version
 # Score required to short-circuit matching and stop searching.
 GOOD_SCORE = 98
 
+# The score Plex itself requires before it will AUTO-APPLY a match. Distinct
+# from GOOD_SCORE (which only stops us searching further) and from
+# SearchTool.IGNORE_SCORE = 45 (which only decides what we OFFER). Measured on
+# the live server: a result below this is listed in Fix Match and applied to
+# nothing.
+PLEX_AUTO_MATCH_SCORE = 80
+
 # Setup logger
 log = Logging()
+
+
+def artist_recovery_warranted(result, info):
+    """
+        Whether to attempt the folder-confirmed author recovery.
+
+        This used to be `result is not None and not result` -- a ZERO-result
+        search only. Measured live on the .99 rebuild 2026-08-01, that gate is
+        exactly why "Stephenson & Galland" survived as a phantom artist:
+
+          * the ARTIST tag is literally 'Stephenson & Galland' (no ALBUMARTIST),
+          * author_candidates() splits it correctly to ['Stephenson','Galland'],
+          * `/authors?name=Stephenson` RETURNS FOUR AUTHORS with the right one
+            (Neal Stephenson) FIRST -- so the result set was non-empty and the
+            recovery never ran,
+          * but the search scores against the BARE SURNAME, and "Neal
+            Stephenson" is 60 against "Stephenson" because the missing first
+            name IS the whole edit distance. 60 clears IGNORE_SCORE so it is
+            offered, and misses PLEX_AUTO_MATCH_SCORE so nothing is applied.
+
+        A non-empty result set that cannot auto-match is as useless as an empty
+        one, and recovery -- which confirms the author against the FILE PATH,
+        where the folder is literally "Neal Stephenson" -- is the tool for it.
+
+        `result is None` stays excluded: that is a transport blip, and
+        recovering on one would spend a second search on no evidence.
+        @param result the raw search result list (None = request failed)
+        @param info the SCORED rows for that result
+        @returns True when recovery should run
+    """
+    if result is None:
+        return False
+    if not result:
+        return True
+    for row in (info or []):
+        try:
+            if row.get('score', 0) >= PLEX_AUTO_MATCH_SCORE:
+                return False
+        except Exception:
+            continue
+    return True
 
 
 def author_pref_key(value):
@@ -2769,17 +2817,25 @@ class AudiobookArtist(Agent.Artist):
             if result:
                 break
 
-        # Fallback: the tagged artist name matched no author. Most often it is a
-        # NARRATOR mis-tagged as the artist (e.g. "Lauren Fortgang"). Ask the book
-        # API what this album is and recover its author -- but only trust an
-        # author that is ALSO a folder in the file's path, so a wrong name can
-        # never win. Runs ONLY on a genuine zero-result, so it can't change a
-        # match that already works, so it runs unconditionally.
-        # Genuine zero-result ONLY ([], not None): a None is a transport blip
-        # from the loop above, and firing a second (recovery) search on a blip
-        # is wasted work -- and contradicts this block's "genuine zero-result"
-        # contract. `result is not None` excludes the blip; `not result` keeps [].
-        if result is not None and not result:
+        # SCORE FIRST. The recovery gate below needs to know whether anything
+        # in the result set can actually auto-match, and only scoring answers
+        # that -- a non-empty result set that all sits under Plex's bar is as
+        # useless as an empty one. process_results builds a fresh `info` list
+        # per call, so running it again after a recovery is safe.
+        info = self.process_results(search_helper, result) if result else []
+
+        # Fallback: the tagged artist name matched no USABLE author. Most often
+        # it is a NARRATOR mis-tagged as the artist (e.g. "Lauren Fortgang"),
+        # or a credit string that is not a person at all ("Stephenson &
+        # Galland"). Ask the book API what this album is and recover its author
+        # -- but only trust an author that is ALSO a folder in the file's path,
+        # so a wrong name can never win.
+        #
+        # See artist_recovery_warranted for why this is no longer gated on a
+        # ZERO result: the Stephenson case RETURNED four authors, so the old
+        # gate never fired, while the bare surname it searched scored them all
+        # under the bar. A transport blip (None) still never recovers.
+        if artist_recovery_warranted(result, info):
             recovered_author = self.recover_author_from_book(
                 search_helper, candidates
             )
@@ -2787,7 +2843,14 @@ class AudiobookArtist(Agent.Artist):
                 search_helper.media.artist = String.StripDiacritics(
                     recovered_author
                 )
-                result = self.call_search_api(search_helper)
+                recovered = self.call_search_api(search_helper)
+                # Keep the ORIGINAL rows if recovery found nothing: they may be
+                # below the auto-match bar but they are still what the operator
+                # sees in Fix Match, and discarding them would turn a weak
+                # offer into no offer at all.
+                if recovered:
+                    result = recovered
+                    info = self.process_results(search_helper, recovered)
 
         # Write search result status to log
         if not result:
@@ -2801,8 +2864,6 @@ class AudiobookArtist(Agent.Artist):
             len(result),
             search_helper.media.artist
         )
-
-        info = self.process_results(search_helper, result)
 
         # Output the final results.
         log.separator(log_level="debug")

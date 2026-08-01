@@ -25,6 +25,7 @@ import plexenv  # noqa: E402
 
 MODULES = plexenv.load()
 ST = MODULES['search_tools']
+AG = MODULES['agent']
 
 
 class FakeMedia(object):
@@ -761,5 +762,96 @@ class TestDurationCompleteness(unittest.TestCase):
 # test_sort_titles 3 of 18. Discovery was unaffected, so the suite stayed
 # honest while a direct run (how a single fix gets checked) silently skipped
 # the new tests. tests/test_deploy_gate.py pins the position for every file.
+class TestArtistRecoveryGate(unittest.TestCase):
+    """
+        WHEN the folder-confirmed author recovery is allowed to run.
+
+        It used to be gated on a ZERO-result search. Measured live on the .99
+        rebuild (2026-08-01), that gate is why "Stephenson & Galland" survived
+        as a phantom artist:
+
+          * the ARTIST tag is literally 'Stephenson & Galland', no ALBUMARTIST;
+          * author_candidates() splits it correctly to ['Stephenson','Galland'];
+          * `/authors?name=Stephenson` RETURNS FOUR AUTHORS, Neal Stephenson
+            first -- so the result set is non-empty and the gate never fired;
+          * but a BARE SURNAME scores 60 against "Neal Stephenson", because the
+            missing first name is the entire edit distance. 60 clears
+            IGNORE_SCORE (45) so it is offered, and misses Plex's auto-match
+            bar (80) so nothing is applied.
+
+        A non-empty result set that cannot auto-match is exactly as useless as
+        an empty one, and the recovery -- which confirms the author against the
+        FILE PATH, where "Neal Stephenson" is right there as the folder -- is
+        precisely the tool for it.
+
+        Extracted as a named predicate rather than left inline: inline guards in
+        this codebase go unenforced, and this one decides every artist match in
+        the library.
+    """
+
+    def test_a_transport_blip_never_recovers(self):
+        # None means the request FAILED. Recovering on a blip would search a
+        # second time on no evidence and risk matching a wrong author.
+        self.assertFalse(AG.artist_recovery_warranted(None, None))
+
+    def test_a_genuine_zero_result_recovers(self):
+        # The original case: a narrator mis-tagged as the artist.
+        self.assertTrue(AG.artist_recovery_warranted([], []))
+
+    def test_results_that_all_miss_the_bar_recover(self):
+        # The Stephenson shape: four rows, best is 60, bar is 80.
+        info = [{'score': 60}, {'score': 58}, {'score': 55}, {'score': 46}]
+        self.assertTrue(AG.artist_recovery_warranted(['x'] * 4, info))
+
+    def test_a_result_that_CLEARS_the_bar_does_not_recover(self):
+        # The guard that keeps this from touching working matches.
+        info = [{'score': 85}, {'score': 60}]
+        self.assertFalse(AG.artist_recovery_warranted(['x', 'y'], info))
+
+    def test_exactly_at_the_bar_counts_as_a_match(self):
+        self.assertFalse(AG.artist_recovery_warranted(['x'], [{'score': 80}]))
+
+    def test_missing_scores_are_treated_as_no_match(self):
+        # A malformed row must not be read as a passing score.
+        self.assertTrue(AG.artist_recovery_warranted(['x'], [{}]))
+
+
+class TestArtistRecoveryGateIsWiredIn(unittest.TestCase):
+    """
+        The predicate must actually GOVERN the search, not merely exist.
+
+        Its unit tests pass whether or not `search()` calls it, so reverting
+        the call site would be invisible -- the exact "inline guards go
+        unenforced" failure this codebase keeps paying for. Asserted at source
+        level because driving AudiobookArtist.search needs the whole Plex
+        framework, and this is the property that matters: the OLD zero-result
+        gate must be gone and the predicate must be what decides.
+    """
+
+    SRC = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        '..', 'Contents', 'Code', '__init__.py')
+
+    def _source(self):
+        with open(self.SRC) as handle:
+            return handle.read()
+
+    def test_the_predicate_governs_the_recovery(self):
+        self.assertIn('if artist_recovery_warranted(result, info):',
+                      self._source())
+
+    def test_the_old_zero_result_only_gate_is_gone(self):
+        self.assertNotIn('if result is not None and not result:',
+                         self._source())
+
+    def test_scoring_happens_before_the_gate(self):
+        # The gate reads `info`, so process_results must run first or it always
+        # sees an empty list and recovers on every search.
+        src = self._source()
+        scored = src.index('info = self.process_results(search_helper, result) if result else []')
+        gate = src.index('if artist_recovery_warranted(result, info):')
+        self.assertLess(scored, gate, 'results must be scored before the gate')
+
+
 if __name__ == '__main__':
     unittest.main()
