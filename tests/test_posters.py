@@ -3191,7 +3191,7 @@ class LocalSelectIsNotPowerless(unittest.TestCase):
     the state it is called to repair. Ownership was checked and then the action
     was silently vetoed: correct and powerless.
 
-    Measured live 2026-07-29 on a fresh 1,509-album library (10.0.1.99): Plex's
+    Measured live 2026-07-29 on a fresh 1,509-album library: Plex's
     Local Media Assets files cover.jpg into the item's Uploads itself, so
     "our bytes exist de-selected" arises with NO human involvement at all, and
     the online cover held the selection on 49 of 60 sampled albums. Neither a
@@ -3368,7 +3368,7 @@ class TheUploadIsWhatSelects(unittest.TestCase):
     v1.3.166 tried the opposite and was reverted the same hour. The reasoning
     looked sound: on a cold scan the agent files cover.jpg into the container at
     sort_order=0, so Plex should default to it, making the upload a redundant
-    twin. Measured on a genuinely cold library (10.0.1.99 section 49, bundles
+    twin. Measured on a genuinely cold library (a test section, bundles
     and agent caches cleared) 33 of 33 albums did select cover.jpg AND 33 of 33
     carried one duplicate pair -- `(upload) + com.plexapp.agents.incipit` -- so
     the duplicate is real and the code records the same shape at 147 of 150
@@ -3467,7 +3467,7 @@ class ContainerCopyIsPrunedOnceUploaded(unittest.TestCase):
     carry identical bytes, so the operator sees two indistinguishable tiles.
 
     Measured on a genuinely cold library with the correct agent bound
-    (10.0.1.99 section 54, Metadata/Albums + Artists + agent caches cleared):
+    (a test section, Metadata/Albums + Artists + agent caches cleared):
     33 of 33 albums came out at exactly 3 tiles / 1 duplicate, the pair always
     `(upload) + com.plexapp.agents.incipit`, e.g. The Aeronaut's Windlass with
     the online cover at 407912 bytes and cover.jpg at 2706684 offered BOTH as
