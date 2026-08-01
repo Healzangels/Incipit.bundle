@@ -1862,6 +1862,46 @@ class ConvergePrunesItsOwnDuplicate(unittest.TestCase):
             helper, self.TARGET, self.OTHER, 'incipit author-art-fit')
         self.assertEqual(self.validated, [])
 
+    def test_every_direction_invalidates_every_other_directions_memo(self):
+        """
+        THE MAP MUST COVER ALL THREE DIRECTIONS.
+
+        Running one direction invalidates the OPPOSITE direction's memo,
+        because its cached "done" describes a selection this direction is about
+        to change. The bug that motivated the map is recorded in the source:
+        pin at 16:47 marked the select memo, unpin at 16:50 flipped the poster
+        to Audible, re-pin at 16:51 hit the four-minute-old select entry and
+        silently skipped.
+
+        v1.3.132 then added a THIRD direction, `author-art-fit`, and never
+        added it to the map. So `fit` invalidates nothing and nothing
+        invalidates `fit` -- and prefer_square_author_art is ON by default,
+        with compile_metadata alternating between `fit` and `unpin` on the same
+        artist depending only on whether the images were measurable that pass.
+        Within the 600s TTL an unpin that flipped the selection leaves the
+        stale `fit` entry standing, so the next fit pass silently skips and the
+        square portrait never comes back: the same bug, one dict entry short.
+        """
+        tags = ('incipit author-art-select', 'incipit author-art-unpin',
+                'incipit author-art-fit')
+        AG.upload_and_select_poster = lambda *a, **kw: True
+        for running in tags:
+            # Every direction is "recently done" for this artist...
+            AG.recent_work_memo.clear()
+            for t in tags:
+                AG.mark_done(t, 'guid-art', self.TARGET)
+            helper = self._helper([self.TARGET, self.OTHER])
+            helper.metadata.guid = 'guid-art'
+            AG.converge_author_art(helper, self.TARGET, self.OTHER, running)
+            # ...and running one must have cleared the OTHERS.
+            for other in tags:
+                if other == running:
+                    continue
+                self.assertNotIn(
+                    (other, 'guid-art'), AG.recent_work_memo,
+                    'running %s left %s\'s stale memo standing' % (running, other))
+
+
 class ConvergenceRunsBeforeTheOffers(unittest.TestCase):
     """
         Proven live on Ernest Cline (2026-07-27, v1.3.141): converge's own

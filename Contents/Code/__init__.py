@@ -1958,6 +1958,18 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
         return False
 
 
+# Every way this agent can change which author image is selected. Each one
+# invalidates the others' per-pass memo, because a cached "done" describes a
+# selection another direction is about to change. Kept as ONE list so adding a
+# direction cannot half-wire it (v1.3.132 added 'fit' to the code and not to
+# the old two-entry opposite-map, and the gap survived until 2026-07-31).
+ART_DIRECTION_TAGS = (
+    'incipit author-art-select',
+    'incipit author-art-unpin',
+    'incipit author-art-fit',
+)
+
+
 def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=False):
     """
         Make the image at `target_url` the selected poster for this author,
@@ -1980,15 +1992,23 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
     # just did) change. Observed live within the TTL: pin at 16:47 marked the
     # select memo; unpin at 16:50 flipped the poster to Audible; re-pin at
     # 16:51 hit the four-minute-old select entry and silently skipped.
-    opposite = {
-        'incipit author-art-select': 'incipit author-art-unpin',
-        'incipit author-art-unpin': 'incipit author-art-select',
-    }.get(tag)
-    # .pop(), not `del d[k]`: RestrictedPython compiles subscript-deletion
-    # through a guard that may be absent (the same class of silent whole-plugin
-    # death as leading-underscore names); a method call is unambiguously safe.
-    if opposite:
-        recent_work_memo.pop((opposite, guid), None)
+    # ALL the other directions, not just a pairwise opposite. v1.3.132 added a
+    # THIRD direction, `author-art-fit`, and never added it to the old two-entry
+    # map -- so fit invalidated nothing and nothing invalidated fit. That is not
+    # theoretical: prefer_square_author_art is ON by default and
+    # compile_metadata alternates between `fit` and `unpin` on the same artist
+    # depending only on whether the images were measurable that pass, so within
+    # the 600s TTL an unpin that flipped the selection left the stale fit entry
+    # standing and the next fit pass silently skipped -- the square portrait
+    # never came back. A LIST, so a fourth direction cannot reintroduce the gap
+    # by being added to one side of a pair.
+    for other in ART_DIRECTION_TAGS:
+        if other != tag:
+            # .pop(), not `del d[k]`: RestrictedPython compiles subscript-
+            # deletion through a guard that may be absent (the same class of
+            # silent whole-plugin death as leading-underscore names); a method
+            # call is unambiguously safe.
+            recent_work_memo.pop((other, guid), None)
     if not should_run(tag, guid, target_url, 600):
         return
     state = read_poster_state(guid, tag)
