@@ -1587,6 +1587,47 @@ def cover_keep_list(thumb_key, local_key, thumb_present, local_present,
     return keep
 
 
+def alternate_cover_acceptable(data):
+    """
+        Whether these bytes earn a bonus poster tile.
+
+        Judged on the PIXELS, not on where the url pointed. Measured live
+        2026-08-01 across six alternates the api offered: four were genuine
+        squares (two at 2400x2400), one was a 973x1500 PORTRAIT print jacket
+        from a Hardcover edition that carries `audio_seconds` while its image is
+        the print cover, and one OverDrive url returned HTML rather than an
+        image. A runtime proves the EDITION is audio; it says nothing about the
+        PICTURE, and a url shape says even less -- Hardcover serves square art
+        from /edition/ and portrait from /editions/.
+
+        The bundle already fetches these bytes before offering, so this costs
+        nothing and cannot be fooled by a url.
+
+        NOTE the polarity is the OPPOSITE of local_cover_is_portrait, which
+        keeps an unmeasurable local file: the operator's own art gets the
+        benefit of the doubt, a third party's bonus tile does not. Unmeasurable
+        means refused.
+        @param data the fetched image bytes
+        @returns True when the image is confidently square-ish art
+    """
+    if not data:
+        return False
+    dims = image_dimensions(data)
+    if not dims:
+        return False
+    width, height = dims
+    if width <= 0 or height <= 0:
+        return False
+    # Same band the square-cover work uses: real audiobook art is not always
+    # exactly 1:1, but a print jacket is nowhere near.
+    shorter = width
+    longer = height
+    if width > height:
+        shorter = height
+        longer = width
+    return (float(shorter) / float(longer)) >= 0.9
+
+
 def offer_alternate_covers(helper, sort_order=3):
     """
         Offer the api's `imageAlternates` as extra pickable posters, returning
@@ -1626,6 +1667,12 @@ def offer_alternate_covers(helper, sort_order=3):
         try:
             data = fetch_url_bytes(url)
             if not data:
+                continue
+            # Judge the PIXELS. The api can only vouch for the record; a
+            # Hardcover edition with a runtime can still ship the print jacket,
+            # and a dead CDN url returns HTML. See alternate_cover_acceptable.
+            if not alternate_cover_acceptable(data):
+                log.info('incipit cover: alternate refused -- not square art (%s)', url)
                 continue
             helper.metadata.posters[url] = Proxy.Media(data, sort_order=sort_order)
             added.append(url)

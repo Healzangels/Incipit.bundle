@@ -4313,6 +4313,70 @@ class AlternateCoverOfferIsWiredIn(unittest.TestCase):
                         'alternates must be offered before keep is computed')
 
 
+class AlternateCoversAreJudgedByTheirPixels(unittest.TestCase):
+    '''
+        An alternate is accepted on its BYTES, not on where it came from.
+
+        Measured live on the deployed api (2026-08-01) after the dedupe source
+        shipped: of six alternates offered across three books, four were genuine
+        squares (two at 2400x2400 -- exactly the point of the feature), but
+
+          * `assets.hardcover.app/editions/31795264/...` was 973x1500 PORTRAIT,
+            a print jacket. The api-side filter accepts a record with a stated
+            runtime as audio art, and a Hardcover EDITION can carry
+            `audio_seconds` while its cached_image is the print cover. Runtime
+            proves the EDITION is audio; it says nothing about the PICTURE.
+          * an OverDrive CDN url returned `<!DOCTYP...` -- HTML, not an image,
+            so the tile would simply be broken.
+
+        A url-shape guard was considered and rejected: Hardcover serves SQUARE
+        art from `/edition/` and PORTRAIT from `/editions/`, so the host tells
+        you almost nothing and the singular/plural distinction is far too
+        fragile to hang a rule on. The bundle already fetches the bytes before
+        offering, so judging the actual image costs nothing and cannot be fooled
+        by a url.
+
+        Portrait is rejected rather than merely demoted: this is a bonus tile in
+        a SQUARE poster slot, and squareCover exists precisely to keep print
+        jackets out of it.
+    '''
+
+    def test_a_portrait_alternate_is_refused(self):
+        self.assertFalse(AG.alternate_cover_acceptable(_jpeg(973, 1500)))
+
+    def test_a_square_alternate_is_accepted(self):
+        self.assertTrue(AG.alternate_cover_acceptable(_jpeg(2400, 2400)))
+
+    def test_a_near_square_alternate_is_accepted(self):
+        # Real audiobook art is not always exactly 1:1.
+        self.assertTrue(AG.alternate_cover_acceptable(_jpeg(1400, 1432)))
+
+    def test_html_is_refused(self):
+        # The dead OverDrive url returned a page, not a picture.
+        self.assertFalse(AG.alternate_cover_acceptable(b'<!DOCTYPE html><html>'))
+
+    def test_empty_bytes_are_refused(self):
+        self.assertFalse(AG.alternate_cover_acceptable(b''))
+        self.assertFalse(AG.alternate_cover_acceptable(None))
+
+    SRC = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        '..', 'Contents', 'Code', '__init__.py')
+
+    def test_the_offer_path_actually_applies_it(self):
+        # The predicate's own tests pass whether or not offer_alternate_covers
+        # calls it -- the unwired-stage shape this repo keeps paying for.
+        with open(self.SRC) as handle:
+            src = handle.read()
+        self.assertIn('if not alternate_cover_acceptable(data):', src)
+
+    def test_an_unmeasurable_image_is_refused(self):
+        # Opposite of local_cover_is_portrait, which keeps an unmeasurable local
+        # file. Here the bytes are a BONUS from a third party -- if we cannot
+        # confirm it is square art, it does not earn a tile.
+        self.assertFalse(AG.alternate_cover_acceptable(b'\xff\xd8\xff\xe0 truncated'))
+
+
 if __name__ == '__main__':
     unittest.main()
 
