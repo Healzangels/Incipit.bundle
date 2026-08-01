@@ -108,6 +108,60 @@ MULTI_AUTHOR_PATTERN = r'\s*,\s*|\s+&\s+|\s+and\s+|\s*;\s*|\s*/\s*'
 MULTI_AUTHOR_RE = re.compile(MULTI_AUTHOR_PATTERN, re.IGNORECASE)
 
 
+# Alternate cover art carried from SEARCH to UPDATE.
+#
+# The api attaches `coverAlternates` to a SEARCH candidate: dedupe builds them
+# from the editions it merged, so they exist only where the whole candidate set
+# is visible. Plex then discards the search results and asks `/books/{id}` for
+# the chosen one, and that route does not run dedupe -- so without this bridge
+# the alternates are gone by the time posters are offered.
+#
+# Same shape as the other cross-call memos in __init__ (verdict_memo,
+# recent_work_memo): a module-level dict, cleared by process lifetime, keyed by
+# the ONLY thing both calls share -- the id Plex carries forward.
+ALTERNATE_COVER_MEMO = {}
+
+
+def alternate_cover_key(book_id):
+    """
+        The memo key for a book id.
+
+        Search emits the BARE asin; update sees "<asin>_<region>" (see
+        update_tools, which splits on '_' for exactly this reason). Normalising
+        both ends means the memo actually hits on the path it exists for --
+        without it every recall would miss and the bridge would be dead code
+        that still looked wired.
+    """
+    try:
+        return book_id.split('_')[0]
+    except Exception:
+        return None
+
+
+def remember_alternate_covers(book_id, urls):
+    """Record a candidate's alternate covers for the later update call."""
+    key = alternate_cover_key(book_id)
+    if not key or not urls:
+        return
+    kept = []
+    for url in urls:
+        try:
+            if url and url.strip() and url not in kept:
+                kept.append(url)
+        except Exception:
+            continue
+    if kept:
+        ALTERNATE_COVER_MEMO[key] = kept
+
+
+def recall_alternate_covers(book_id):
+    """The alternate covers recorded for this id at search time, or []."""
+    key = alternate_cover_key(book_id)
+    if not key:
+        return []
+    return ALTERNATE_COVER_MEMO.get(key) or []
+
+
 def clear_series_text(string):
     """
         Strips a trailing series qualifier in parentheses from an author
@@ -2270,6 +2324,14 @@ class ScoreTool:
         if self.asin:
             plex_score_dict['id'] = self.asin
             data_to_log.append({'ASIN is': self.asin})
+            # Stash the api's alternate covers while the whole candidate set is
+            # visible. They are built by dedupe from the merged editions, so the
+            # per-id item lookup that follows cannot rebuild them.
+            try:
+                remember_alternate_covers(
+                    self.asin, self.result_dict.get('coverAlternates'))
+            except Exception:
+                pass
         # Read unconditionally by the album search's display loop, so the key
         # must always exist. OpenLibrary editions frequently have no resolved
         # author, unlike Audible where it is always present.

@@ -853,5 +853,92 @@ class TestArtistRecoveryGateIsWiredIn(unittest.TestCase):
         self.assertLess(scored, gate, 'results must be scored before the gate')
 
 
+
+
+class TestAlternateCoverMemo(unittest.TestCase):
+    """
+        Carrying the api's alternate covers from SEARCH to UPDATE.
+
+        The api attaches `coverAlternates` to a SEARCH candidate -- dedupe
+        builds them from the editions it merged, so they exist only where the
+        whole candidate set is visible. Plex then throws the search results away
+        and asks `/books/{id}` for the chosen one, and that route does not run
+        dedupe, so the alternates are gone by the time posters are offered.
+
+        A module-level memo bridges the two calls, the same way verdict_memo and
+        recent_work_memo already bridge sibling tracks. Keyed by the id Plex
+        carries forward, which is the ONLY thing common to both calls.
+
+        Deliberately a FALLBACK: when the item response carries its own
+        `imageAlternates` that wins, because it describes the record actually
+        served rather than a candidate scored earlier.
+    """
+
+    def setUp(self):
+        ST.ALTERNATE_COVER_MEMO.clear()
+
+    def tearDown(self):
+        ST.ALTERNATE_COVER_MEMO.clear()
+
+    def test_scoring_records_the_alternates_under_the_id(self):
+        ST.remember_alternate_covers('B0TEST0001', ['a.jpg', 'b.jpg'])
+        self.assertEqual(ST.recall_alternate_covers('B0TEST0001'), ['a.jpg', 'b.jpg'])
+
+    def test_an_unknown_id_recalls_nothing(self):
+        self.assertEqual(ST.recall_alternate_covers('B0NOTHERE01'), [])
+
+    def test_the_region_suffix_plex_appends_still_matches(self):
+        # Search emits the bare asin; update sees "<asin>_<region>". Without
+        # normalising, the memo would never hit on the very path it exists for.
+        ST.remember_alternate_covers('B0TEST0001', ['a.jpg'])
+        self.assertEqual(ST.recall_alternate_covers('B0TEST0001_us'), ['a.jpg'])
+
+    def test_empty_or_junk_is_not_stored(self):
+        ST.remember_alternate_covers('B0TEST0002', [])
+        ST.remember_alternate_covers('B0TEST0003', None)
+        self.assertEqual(ST.recall_alternate_covers('B0TEST0002'), [])
+        self.assertEqual(ST.recall_alternate_covers('B0TEST0003'), [])
+
+    def test_a_missing_id_is_ignored(self):
+        ST.remember_alternate_covers(None, ['a.jpg'])
+        self.assertEqual(ST.recall_alternate_covers(None), [])
+
+
+
+
+class TestAlternateCoverMemoIsWiredIn(unittest.TestCase):
+    '''
+        The memo must be WRITTEN at search and READ at update.
+
+        Its own unit tests pass whether or not anything calls it -- the same
+        unwired-stage shape that let the api's version survive deleting its call
+        site with 1839 tests green, and that the 2026-07-28 sweep proved for
+        inline guards here. Asserted at source level because exercising the real
+        ScoreTool/UpdateTool pair needs the whole Plex framework.
+    '''
+
+    def _src(self, name):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'Contents', 'Code', name)
+        with open(path) as handle:
+            return handle.read()
+
+    def test_search_records_the_alternates(self):
+        self.assertIn('remember_alternate_covers(', self._src('search_tools.py'))
+
+    def test_update_reads_them_back(self):
+        self.assertIn('recall_alternate_covers(self.metadata.id)',
+                      self._src('update_tools.py'))
+
+    def test_the_item_response_still_wins(self):
+        # The fallback must be guarded by `if not alternates`, or a stale search
+        # memo would override the record actually being served.
+        src = self._src('update_tools.py')
+        self.assertIn('if not alternates:', src)
+        self.assertLess(src.index("response.get('imageAlternates')"),
+                        src.index('recall_alternate_covers('),
+                        'the item response must be consulted first')
+
+
 if __name__ == '__main__':
     unittest.main()

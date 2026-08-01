@@ -1,7 +1,8 @@
 # Import internal tools
 from logging import Logging
 from region_tools import RegionTool
-from search_tools import MULTI_AUTHOR_RE, name_key, quote_param
+from search_tools import (MULTI_AUTHOR_RE, name_key, quote_param,
+                          recall_alternate_covers)
 import re
 import struct
 import StringIO
@@ -498,7 +499,16 @@ class AlbumUpdateTool(UpdateTool):
         # choices only -- never the default, never a replacement. The api gates
         # these on the narrator sets matching, because one ASIN can front
         # different recordings in different marketplaces.
+        # The ITEM response wins when it carries its own list -- it describes the
+        # record actually served. Otherwise fall back to what the SEARCH call
+        # recorded: dedupe builds alternates from the editions it merged, and
+        # this route never sees that candidate set.
         alternates = response.get('imageAlternates') or []
+        if not alternates:
+            try:
+                alternates = recall_alternate_covers(self.metadata.id)
+            except Exception:
+                alternates = []
         if isinstance(alternates, list):
             # No builtin does this job here. `basestring` is a py2-only name
             # that NameErrors under the py3 test harness, and `hasattr` is
