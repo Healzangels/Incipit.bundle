@@ -15,9 +15,13 @@
 # (which makes Plex load the plugin). Exit 0 = the expected version loaded clean.
 #
 # Usage:
-#   scripts/check_deploy_banner.sh [PLUGIN_LOG_PATH]
-# The log path may also come from INCIPIT_PLEX_LOG; the default is the canonical
-# server location.
+#   scripts/check_deploy_banner.sh <PLUGIN_LOG_PATH>
+#   INCIPIT_PLEX_LOG=<path> scripts/check_deploy_banner.sh
+#
+# The log path is REQUIRED -- there is deliberately no default, because this
+# repo is a public fork and must not carry anyone's host layout (see the LOG
+# assignment below). This comment previously promised a default that the code
+# has never provided, which cost a failed run on a live deploy.
 
 set -euo pipefail
 
