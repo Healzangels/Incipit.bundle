@@ -61,10 +61,6 @@ class TestSortTitleHygiene(unittest.TestCase):
         )
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class HyphenatedWordsSurviveSeriesStrip(unittest.TestCase):
     """
         Measured live on Harry Potter and the Half-Blood Prince (2026-07-27):
@@ -204,3 +200,12 @@ class TypographicApostropheSplitsAShelf(unittest.TestCase):
             sort_title_for(u'Sundering', 'Book 3', title=u'The “Adversary”'),
             u'Sundering, Book 3 - The “Adversary”'
         )
+
+# LAST STATEMENT IN THE FILE, always. This guard used to sit mid-file, and
+# `python3 tests/<file>.py` then ran only the classes DEFINED ABOVE IT and
+# printed OK -- measured: test_scoring ran 8 of 16, test_cache_times 4 of 20,
+# test_sort_titles 3 of 18. Discovery was unaffected, so the suite stayed
+# honest while a direct run (how a single fix gets checked) silently skipped
+# the new tests. tests/test_deploy_gate.py pins the position for every file.
+if __name__ == '__main__':
+    unittest.main()

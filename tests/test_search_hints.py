@@ -189,9 +189,6 @@ class TestResultRowContract(unittest.TestCase):
     def test_real_title_kept(self):
         self.assertEqual(self.row_for('A Real Title')['title'], 'A Real Title')
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class FakeArtistMedia(object):
     def __init__(self, filename=None, album=None, artist=None, name=None):
@@ -598,6 +595,89 @@ class TestTypedSearchStaysContextFree(unittest.TestCase):
                        ).check_for_asin())
 
 
+class MediaWhoseNameRaises(object):
+    """A media object whose `.name` read RAISES, and nothing else does."""
+
+    filename = None
+    album = None
+    artist = None
+    title = None
+    tracks = None
+    children = None
+
+    @property
+    def name(self):
+        raise AttributeError('media.name is not readable in this flow')
+
+
+class TestAnUnreadableMediaNameDegradesInsteadOfCrashing(unittest.TestCase):
+    """
+        is_typed_search() and check_for_asin() read the SAME attribute, and
+        only one of them guarded it.
+
+        is_typed_search wraps its `self.media.name` read in try/except and
+        returns bool(self.manual) when the read raises -- deliberately, because
+        "honoring user input is the safer failure mode". On a Fix Match
+        (manual=True) that is TRUE, so the failure routes INTO the branch it
+        gates, which then did `self.media.name or ...` with no try and raised
+        AttributeError straight out of check_for_asin.
+
+        Reproduced: manual=True plus a media object whose .name raises gave
+        "check_for_asin RAISED AttributeError". The blast radius is the whole
+        search -- AudiobookArtist.search() calls check_for_asin as its FIRST
+        statement with no enclosing try, and the books/AlbumSearchTool path
+        reaches it too. New exposure: the previous code never touched .name.
+    """
+
+    def tool(self, album=None, artist=None):
+        tool = ST.AlbumSearchTool.__new__(ST.AlbumSearchTool)
+        tool.prefs = dict(plexenv.FakePrefs.DEFAULTS)
+        tool.content_type = 'books'
+        tool.media = MediaWhoseNameRaises()
+        tool.media.album = album
+        tool.media.artist = artist
+        tool.manual = True
+        tool.normalizedName = ''
+        tool.sidecar_cache = None
+        return tool
+
+    def test_the_unreadable_attribute_really_does_route_into_the_branch(self):
+        # The premise. If this ever stops holding, the test below is vacuous.
+        self.assertTrue(self.tool().is_typed_search())
+        with self.assertRaises(AttributeError):
+            self.tool().media.name
+
+    def test_check_for_asin_returns_instead_of_raising(self):
+        self.assertIsNone(self.tool().check_for_asin())
+
+    def test_the_search_that_calls_it_survives(self):
+        # The reachable shape: ArtistSearchTool.check_for_asin is the first
+        # statement of AudiobookArtist.search(), outside any try.
+        tool = ST.ArtistSearchTool.__new__(ST.ArtistSearchTool)
+        tool.prefs = dict(plexenv.FakePrefs.DEFAULTS)
+        tool.content_type = 'authors'
+        tool.media = MediaWhoseNameRaises()
+        tool.manual = True
+        tool.sidecar_cache = None
+        self.assertIsNone(tool.check_for_asin())
+
+    def test_it_still_finds_a_typed_ASIN_through_the_fallbacks(self):
+        # Degrading must not mean giving up: album/artist are the documented
+        # fallbacks and still have to be read.
+        self.assertEqual(
+            self.tool(album='B0ABCDEFGH').check_for_asin(), 'B0ABCDEFGH_us')
+        self.assertEqual(
+            self.tool(artist='B0ABCDEFGH').check_for_asin(), 'B0ABCDEFGH_us')
+
+    def test_a_readable_name_still_wins_over_album(self):
+        # The documented precedence (name, then album, then artist) is
+        # unchanged for the normal case.
+        tool = tool_for(album='B0ALBUMAS1')
+        tool.manual = True
+        tool.media.name = 'B0TYPEDAS2'
+        self.assertEqual(tool.check_for_asin(), 'B0TYPEDAS2_us')
+
+
 class TestDurationCompleteness(unittest.TestCase):
     """
         The multi-file duration completeness guard (v1.3.95).
@@ -674,3 +754,12 @@ class TestDurationCompleteness(unittest.TestCase):
             self.duration_param([self.Track('3600000'),
                                  self.Track('600000')]),
             '4200000')
+
+# LAST STATEMENT IN THE FILE, always. This guard used to sit mid-file, and
+# `python3 tests/<file>.py` then ran only the classes DEFINED ABOVE IT and
+# printed OK -- measured: test_scoring ran 8 of 16, test_cache_times 4 of 20,
+# test_sort_titles 3 of 18. Discovery was unaffected, so the suite stayed
+# honest while a direct run (how a single fix gets checked) silently skipped
+# the new tests. tests/test_deploy_gate.py pins the position for every file.
+if __name__ == '__main__':
+    unittest.main()

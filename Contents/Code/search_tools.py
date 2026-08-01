@@ -99,9 +99,41 @@ LIBRARY_ROOTS_CACHE = None
 # Co-author separators for reducing a multi-author artist to its authors:
 # comma, ampersand, semicolon, slash, or the word "and". Whitespace around
 # "and"/"&" keeps it from splitting inside a name (e.g. "Rand", "Anderson").
-MULTI_AUTHOR_RE = re.compile(
-    r'\s*,\s*|\s+&\s+|\s+and\s+|\s*;\s*|\s*/\s*', re.IGNORECASE
-)
+#
+# The PATTERN is kept as a string because a second consumer (NFO_CREDIT_SPLIT_RE,
+# down in the nfo section) has to embed it: nfo_people hand-rolled its own
+# `value.split(',')` instead, which both missed "Terry Pratchett & Neil Gaiman"
+# -- one joined name -- and cut role notes in half. One spelling, two regexes.
+MULTI_AUTHOR_PATTERN = r'\s*,\s*|\s+&\s+|\s+and\s+|\s*;\s*|\s*/\s*'
+MULTI_AUTHOR_RE = re.compile(MULTI_AUTHOR_PATTERN, re.IGNORECASE)
+
+
+def clear_series_text(string):
+    """
+        Strips a trailing series qualifier in parentheses from an author
+        name, e.g. "Davis Ashura (Instrument of Omens)" -> "Davis Ashura".
+
+        Some rips tag ALBUMARTIST with the series appended, so Plex creates a
+        separate, unmatched artist per series even though the real author
+        already exists. Removing the qualifier lets that phantom artist match
+        the real author instead of needing a manual artist match first.
+
+        Deliberately conservative: only a single trailing "(...)" is removed,
+        and only when a non-trivial name remains, so ordinary author names
+        (and names with no trailing parenthesis) are never altered.
+
+        MODULE-LEVEL (with SearchTool.clear_series_text delegating to it, so
+        every existing caller is unchanged) because nfo_people needs the same
+        trailing-parenthetical rule and cannot reach a SearchTool method.
+        name_key is the precedent.
+    """
+    if not string:
+        return string
+    stripped = re.sub(r'\s*\([^()]{1,60}\)\s*$', '', string).strip()
+    # Guard: if stripping leaves too little to be a name, keep the original.
+    if len(stripped) < 2:
+        return string
+    return stripped
 
 # Trailing part-index tokens a ripper appends to each file, in the many
 # conventions seen in the wild: "Title (264)", "Title [7]", "Title - 12",
@@ -332,7 +364,25 @@ class SearchTool:
         # (the auto-fired candidate list on dialog open carries name=None and
         # the item's own metadata instead), so album/artist are the fallback.
         if self.is_typed_search():
-            manual_asin = self.media.name or self.media.album or self.media.artist
+            # DEFENSIVELY, through the same getter idiom artist_album_title
+            # uses. is_typed_search() wraps its OWN media.name read in
+            # try/except and returns bool(self.manual) -- i.e. TRUE -- when the
+            # read raises, so it hands control to this branch precisely in the
+            # case where a bare `self.media.name` raises again. Reproduced:
+            # manual=True plus a media object whose .name raises gave
+            # "check_for_asin RAISED AttributeError", out through
+            # AudiobookArtist.search()'s very first statement, which has no
+            # enclosing try. New exposure -- the previous code never read .name.
+            manual_asin = None
+            for getter in (lambda: self.media.name,
+                           lambda: self.media.album,
+                           lambda: self.media.artist):
+                try:
+                    manual_asin = getter()
+                except Exception:
+                    manual_asin = None
+                if manual_asin:
+                    break
             manual_search_asin = self.search_asin(manual_asin, typed=True)
 
             if manual_search_asin:
@@ -376,26 +426,8 @@ class SearchTool:
         return string
 
     def clear_series_text(self, string):
-        """
-            Strips a trailing series qualifier in parentheses from an author
-            name, e.g. "Davis Ashura (Instrument of Omens)" -> "Davis Ashura".
-
-            Some rips tag ALBUMARTIST with the series appended, so Plex creates a
-            separate, unmatched artist per series even though the real author
-            already exists. Removing the qualifier lets that phantom artist match
-            the real author instead of needing a manual artist match first.
-
-            Deliberately conservative: only a single trailing "(...)" is removed,
-            and only when a non-trivial name remains, so ordinary author names
-            (and names with no trailing parenthesis) are never altered.
-        """
-        if not string:
-            return string
-        stripped = re.sub(r'\s*\([^()]{1,60}\)\s*$', '', string).strip()
-        # Guard: if stripping leaves too little to be a name, keep the original.
-        if len(stripped) < 2:
-            return string
-        return stripped
+        """The module-level rule (see clear_series_text), reachable as a method."""
+        return clear_series_text(string)
 
     def log_search_url(self, search_url):
         """
@@ -1011,11 +1043,24 @@ class AlbumSearchTool(SearchTool):
             if not isinstance(path, unicode):
                 path = path.decode('utf8')
             akey = name_key(artist)
-            if not akey:
+            # HONORIFIC-TOLERANT, mirroring the min(plain, without_titles)
+            # shape score_author uses. name_key does not strip honorifics, so a
+            # strict comparison measured `artist='Sir Arthur Conan Doyle'` ->
+            # None against the folder "Arthur Conan Doyle" (the plain name
+            # confirms), and this arbiter is what enables the sidecar
+            # author/narrator swap correction -- so every honorific-bearing
+            # ALBUMARTIST had it silently disabled. The plain comparison is
+            # tried FIRST and unchanged, so no existing confirmation moves.
+            akey_bare = name_key(strip_courtesy_title(artist))
+            if not akey and not akey_bare:
                 return None
             for seg in path.split('/'):
                 seg = seg.strip()
-                if seg and name_key(seg) == akey:
+                if not seg:
+                    continue
+                if akey and name_key(seg) == akey:
+                    return artist
+                if akey_bare and name_key(strip_courtesy_title(seg)) == akey_bare:
                     return artist
         except Exception as e:
             log.error('incipit folder_author_confirmed failed: %s', e)
@@ -1556,17 +1601,18 @@ class ArtistSearchTool(SearchTool):
 
         # Remove brackets and text inside
         name = re.sub(r'\[[^"]*\]', '', name)
-        # Remove certain strings, such as titles
-        str_to_remove = [
-            'Dr.',
-            'EdD',
-            'Prof.',
-            'Professor',
-        ]
-        str_to_remove_regex = re.compile(
-            '|'.join(map(re.escape, str_to_remove))
-        )
-        name = str_to_remove_regex.sub('', name)
+        # Remove a leading courtesy title / trailing credential, through the
+        # file's ONE honorific rule.
+        #
+        # This used to be its own list -- ['Dr.', 'EdD', 'Prof.', 'Professor']
+        # -- substituted out with no word boundary and no minimum remainder, so
+        # it destroyed exactly the names COURTESY_TITLES' comment cites as the
+        # reason to be careful: "Dr. Seuss" left as " Seuss" (the query was
+        # literally name=%20Seuss) and "Professor Elemental" as " Elemental".
+        # strip_courtesy_title splits on whitespace, so the boundary is
+        # structural rather than regex-shaped, and it refuses to reduce a
+        # two-token credit at all.
+        name = strip_courtesy_title(name)
         # Remove periods between leading initials ("A. E." -> "A E"), keeping the
         # FULL remaining surname. group(2) used to be a single \w+, which dropped
         # every surname word after the first — "A. E. van Vogt" -> "A E van",
@@ -1585,6 +1631,10 @@ class ArtistSearchTool(SearchTool):
                 cleaned_initials + ' ' + initials_matched.group(2)
             ).strip()
 
+        # The bracket strip above leaves whatever whitespace surrounded the
+        # bracket, and this value goes straight into `name=` on the outbound
+        # query. A leading space is not cosmetic there -- it is %20 in the URL.
+        name = re.sub(r'\s+', ' ', name).strip()
         log.debug('Artist name after cleanup: ' + name)
         return name
 
@@ -1815,22 +1865,40 @@ class ArtistSearchTool(SearchTool):
             log.error("No artist to validate")
 
 
-# Courtesy titles that precede a credited author name. Deliberately SHORT and
-# restricted to forms that are never themselves a pen name: "Dr." is excluded
-# because Dr. Seuss exists, "Mr." because Mr. Men does. These are compared away
-# on BOTH sides (see ScoreTool.score_author), so the list only ever removes a
-# penalty -- it cannot cause two different authors to match.
+# THE honorific list for this file -- one list, used by every surface that has
+# to see past a courtesy title. There used to be two, and they disagreed:
+# ArtistSearchTool.cleanup_author_name carried its own ['Dr.', 'EdD', 'Prof.',
+# 'Professor'] and substituted it out with NO word boundary and no minimum
+# remainder, so the outbound artist query for "Dr. Seuss" was literally
+# `name=%20Seuss` and "Professor Elemental" became " Elemental" -- while this
+# list's own comment, 260 lines below it, said '"Dr." is excluded because Dr.
+# Seuss exists'.
+#
+# The protection lives in the STRIPPER, not in the list: strip_courtesy_title
+# requires at least two tokens to REMAIN, so a two-token credit ("Dr. Seuss",
+# "Lord Dunsany", "Professor Elemental", "Mr. Men") is untouchable by any entry
+# here. That is what makes it safe to carry the academic titles the old list
+# needed. Still deliberately short -- and score_author compares these away on
+# BOTH sides, so an entry can only ever remove a penalty, never make two
+# different authors match.
 COURTESY_TITLES = (
     'sir', 'dame', 'lord', 'lady', 'rev', 'reverend', 'father', 'sister',
+    'dr', 'prof', 'professor',
 )
+
+# Post-nominal credentials that FOLLOW a credited name ("Jane Doe, EdD"). A
+# separate tuple because the POSITION is the rule, not the word; 'EdD' is the
+# one the old cleanup_author_name list carried, and dropping it silently would
+# be a behaviour change. Same minimum-remainder protection.
+POST_NOMINALS = ('edd',)
 
 
 def strip_courtesy_title(name):
     """
-        `name` without a leading courtesy title.
+        `name` without a leading courtesy title or trailing post-nominal.
 
         Requires at least two tokens to REMAIN, so a one-word credit is never
-        emptied, and matches on the reduced token (trailing '.' and case are
+        emptied, and matches on the reduced token (trailing '.'/',' and case are
         irrelevant). Returns the input unchanged when nothing applies.
     """
     try:
@@ -1841,9 +1909,18 @@ def strip_courtesy_title(name):
     # down to a single token is too thin to compare safely.
     if len(parts) < 3:
         return name
+    changed = False
     if parts[0].lower().rstrip('.') in COURTESY_TITLES:
-        return ' '.join(parts[1:])
-    return name
+        parts = parts[1:]
+        changed = True
+    if len(parts) > 2 and parts[-1].lower().strip('.,') in POST_NOMINALS:
+        parts = parts[:-1]
+        changed = True
+    if not changed:
+        return name
+    # A credential is usually offset by a comma ("Jane Doe, EdD"); removing the
+    # word must not leave the comma dangling on the surname.
+    return ' '.join(parts).rstrip(' ,')
 
 
 # ---------------------------------------------------------------------------
@@ -1866,9 +1943,22 @@ def strip_courtesy_title(name):
 # literally the medium.
 NFO_JUNK_GENRES = ('audiobook', 'audiobooks', 'unknown', 'general')
 
-# "Stephen Fry (introductions)" is a CREDIT on the work, not a co-author.
-# Sending it as one skews the author score against the real match.
-NFO_ROLE_NOTE = re.compile(r'\s*\([^)]*\)\s*$')
+# Splitting a credited-name field: the file's CANONICAL co-author separators
+# (MULTI_AUTHOR_PATTERN), except never a separator that sits inside a
+# parenthetical. The `\([^()]*\)` alternative comes FIRST, so re's
+# leftmost-first alternation swallows a whole role note before its comma can be
+# read as a separator.
+#
+# The old `value.split(',')` split before the role note was considered, and a
+# role note routinely carries a comma. Measured with the shipped function:
+#   "Arthur Conan Doyle, Stephen Fry (introductions, notes)"
+#     -> ['Arthur Conan Doyle', 'Stephen Fry (introductions', 'notes)']
+#   "Terry Pratchett, Neil Gaiman (foreword, 2006)"
+#     -> ['Terry Pratchett', 'Neil Gaiman (foreword', '2006)']
+# Two bogus names per field, one of them with an unbalanced paren, both handed
+# straight to score_author -- the exact skew nfo_people exists to prevent.
+NFO_CREDIT_SPLIT_RE = re.compile(
+    r'(\([^()]*\))|(?:' + MULTI_AUTHOR_PATTERN + r')', re.IGNORECASE)
 
 NFO_SECTION = re.compile(r'^([A-Za-z][A-Za-z ]{2,40})\s*\n=+\s*$', re.M)
 NFO_FIELD = re.compile(r'^\s{0,4}([A-Za-z][A-Za-z0-9 ().\-/]{1,30}):\s{2,}(.+?)\s*$')
@@ -1894,6 +1984,25 @@ def nfo_duration_ms(value):
     return total * 1000 if total else None
 
 
+def split_credits(value):
+    """
+        A credited-name field split into entries on the canonical co-author
+        separators, with parentheticals held together (NFO_CREDIT_SPLIT_RE).
+    """
+    text = value or ''
+    parts = []
+    cut = 0
+    for found in NFO_CREDIT_SPLIT_RE.finditer(text):
+        # group(1) is a parenthetical: it belongs to the entry being built, so
+        # it is NOT a cut point.
+        if found.group(1):
+            continue
+        parts.append(text[cut:found.start()])
+        cut = found.end()
+    parts.append(text[cut:])
+    return [part.strip() for part in parts if part.strip()]
+
+
 def nfo_people(value):
     """
         Split a credited-name field into names, DROPPING any entry that carries
@@ -1905,13 +2014,17 @@ def nfo_people(value):
         exact failure the courtesy-title fix (v1.3.175) addressed from the
         other direction. Stripping only the parentheses would keep the name and
         cause precisely that.
+
+        Both halves of the rule are the file's OWN, not a second spelling: the
+        split is MULTI_AUTHOR_PATTERN (so "Terry Pratchett & Neil Gaiman" is two
+        people, not one joined name) made paren-aware, and "does this entry
+        carry a trailing parenthetical" is clear_series_text's question -- if
+        that rule finds something to strip, this entry is a role credit and the
+        whole entry goes.
     """
     out = []
-    for part in (value or '').split(','):
-        part = part.strip()
-        if not part:
-            continue
-        if NFO_ROLE_NOTE.search(part):
+    for part in split_credits(value):
+        if clear_series_text(part) != part:
             continue
         if part.lower() in ('and',):
             continue
@@ -1937,7 +2050,22 @@ def nfo_candidate_paths(media_path):
         Kept short deliberately -- every miss is a real SMB round-trip, and this
         runs per search.
     """
-    if not media_path or '/' not in media_path:
+    if not media_path:
+        return []
+    # UNQUOTE + DECODE, exactly as sidecar() does to the same value. Plex hands
+    # media.filename over percent-encoded, so without this every book whose path
+    # contains a space (%20) or a non-ASCII character probed a path that cannot
+    # exist -- i.e. the feature would miss most of the library the moment it is
+    # wired up. The isinstance guard is folder_author_confirmed's: py2 unquote
+    # returns bytes needing the decode, a py3 str is already text.
+    try:
+        media_path = urllib.unquote(media_path)
+        if not isinstance(media_path, unicode):
+            media_path = media_path.decode('utf8')
+    except Exception as e:
+        log.error('incipit nfo: could not decode the media path (%s)', e)
+        return []
+    if '/' not in media_path:
         return []
     folder, _, filename = media_path.rpartition('/')
     stem = filename.rsplit('.', 1)[0] if '.' in filename else filename
@@ -1956,6 +2084,42 @@ def nfo_candidate_paths(media_path):
     return out
 
 
+def nfo_text(raw):
+    """
+        The nfo payload as UNICODE, or None.
+
+        parse_nfo promises "the SAME keys as the metadata.json sidecar, so
+        every existing consumer reads it unchanged" -- but sidecar() builds its
+        values out of json.loads, which yields UNICODE, while an nfo arrives
+        from Core.storage.load as a py2 byte str. Hand a consumer bytes and the
+        first non-ASCII credit ("Antoine de Saint-Exupery" with its accent)
+        blows up the moment score_album does title.encode('utf-8'). Decoding
+        ONCE, at the door, makes every value below unicode by construction.
+
+        THE PY3 TEST HARNESS CANNOT SEE THIS. There `str` IS text and plexenv
+        aliases `unicode` to `str`, so the broken and the fixed version are
+        indistinguishable; only a live py2 load tells them apart. What the
+        harness CAN prove is that a unicode payload survives intact and that
+        non-ASCII values come back equal to the source (tests/test_nfo.py says
+        which is which).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, unicode):
+        return raw
+    try:
+        return raw.decode('utf-8')
+    except Exception:
+        pass
+    try:
+        # Ripper nfos are occasionally cp1252/latin-1. A slightly wrong glyph
+        # in a publisher name beats losing the file's duration entirely.
+        return raw.decode('latin-1')
+    except Exception:
+        log.error('incipit nfo: could not decode the nfo payload')
+        return None
+
+
 def parse_nfo(text):
     """
         A ripper .nfo as a dict using the SAME keys as the metadata.json
@@ -1965,7 +2129,10 @@ def parse_nfo(text):
         Deliberately conservative: unknown keys are dropped rather than passed
         through, because this feeds matching and a stray field is a silent
         skew, not a visible error.
+
+        Values are UNICODE, like the sidecar's (see nfo_text).
     """
+    text = nfo_text(text)
     if not text or 'Title:' not in text:
         return None
     # Only the first section describes the BOOK.

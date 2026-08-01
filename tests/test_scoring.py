@@ -128,10 +128,6 @@ class TestScoringConstants(unittest.TestCase):
         self.assertLess(ST.ScoreTool.IGNORE_SCORE, 80)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class TestHonorificDoesNotBlockAnAuthorMatch(unittest.TestCase):
     """
         A LEADING HONORIFIC MUST NOT COST THE MATCH.
@@ -230,3 +226,12 @@ class TestHonorificDoesNotBlockAnAuthorMatch(unittest.TestCase):
     def test_a_non_title_first_word_is_never_stripped(self):
         for name in ('Arthur Conan Doyle', 'Ursula K. Le Guin', 'J. R. R. Tolkien'):
             self.assertEqual(ST.strip_courtesy_title(name), name)
+
+# LAST STATEMENT IN THE FILE, always. This guard used to sit mid-file, and
+# `python3 tests/<file>.py` then ran only the classes DEFINED ABOVE IT and
+# printed OK -- measured: test_scoring ran 8 of 16, test_cache_times 4 of 20,
+# test_sort_titles 3 of 18. Discovery was unaffected, so the suite stayed
+# honest while a direct run (how a single fix gets checked) silently skipped
+# the new tests. tests/test_deploy_gate.py pins the position for every file.
+if __name__ == '__main__':
+    unittest.main()

@@ -62,10 +62,6 @@ class TestAuthorUpdateCacheTime(unittest.TestCase):
         self.assertIn('cache_time=author_update_cache_time(helper.force)', window)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class TestMakeRequest4xx(unittest.TestCase):
     """
         An answered 4xx FROM OUR OWN API is a PERMANENT no -- retrying it four
@@ -288,3 +284,12 @@ class TestBookUpdateCallSitePassesForce(unittest.TestCase):
 
     def test_a_scan_still_gets_the_week_long_cache(self):
         self.assertEqual(self.fetch(False), AG.CACHE_1WEEK)
+
+# LAST STATEMENT IN THE FILE, always. This guard used to sit mid-file, and
+# `python3 tests/<file>.py` then ran only the classes DEFINED ABOVE IT and
+# printed OK -- measured: test_scoring ran 8 of 16, test_cache_times 4 of 20,
+# test_sort_titles 3 of 18. Discovery was unaffected, so the suite stayed
+# honest while a direct run (how a single fix gets checked) silently skipped
+# the new tests. tests/test_deploy_gate.py pins the position for every file.
+if __name__ == '__main__':
+    unittest.main()

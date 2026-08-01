@@ -954,6 +954,25 @@ def fetch_url_bytes(url):
         return None
 
 
+def distinct_rating_keys(text):
+    """
+        The DISTINCT ratingKeys in a /library/all?guid= response, in order.
+
+        ONE spelling, because two questions are asked of the same response and
+        they must not disagree: "did this guid match more than one item" (a
+        rebuild's duplicate sections) and "did it match ANY item at all". The
+        second used to have no spelling, so a ZERO-result response fell through
+        the ambiguity check and was read as a clean resolution -- see
+        artist_poster_bytes, where that turned "I could not find the item" into
+        the positive fact "this artist has no poster".
+    """
+    distinct = []
+    for k in re.findall(r'ratingKey="([0-9]+)"', text):
+        if k not in distinct:
+            distinct.append(k)
+    return distinct
+
+
 def guid_lookup_is_ambiguous(text, tag):
     """
         True when /library/all?guid= matched MORE THAN ONE item.
@@ -971,10 +990,7 @@ def guid_lookup_is_ambiguous(text, tag):
         says which item belongs to the library being updated. One warn line
         naming the duplicates beats silently mirroring the wrong one.
     """
-    distinct = []
-    for k in re.findall(r'ratingKey="([0-9]+)"', text):
-        if k not in distinct:
-            distinct.append(k)
+    distinct = distinct_rating_keys(text)
     if len(distinct) > 1:
         log.warn('%s: guid resolves to %s items (%s) -- refusing to guess which '
                  'copy is this library\'s; remove the duplicate section',
@@ -1710,6 +1726,30 @@ def remember_album_cover_decision(guid, force, flags):
 # staleness the same way recent_work_memo does.
 artist_art_memo = {}
 ARTIST_ART_TTL = 600
+# A NOT-KNOWN answer is memoised too, but only briefly. With no entry at all a
+# reliably-failing artist URL paid a fresh 8s HTTP.Request on EVERY track:
+# update() runs once per track, and promote_picked_cover's fail-closed return
+# deliberately skips mark_done, so should_run's per-track gate never closes and
+# the next pass repeats it. On a 27-part book that is 27 x 8s, every pass. The
+# TTL is the ALBUM_COVER_TTL scale on purpose -- long enough to span one
+# album's per-track sweep so the cost is paid ONCE, short enough that the next
+# refresh genuinely retries. "A transient failure must retry, not be
+# suppressed" holds across passes, which is the level it was written about.
+ARTIST_ART_FAIL_TTL = 60
+
+
+def artist_art_key(guid, parent_thumb):
+    """
+        The memo key -- and `parent_thumb` is PART OF IT, which is load-bearing.
+
+        Keyed on the guid alone, the DISPLAY caller (compile_metadata, which
+        passes no parent_thumb and so does its own /library/all lookup)
+        answered for the WRITE callers, which pass one. Those are exactly the
+        callers whose poison guard must fail closed, and update() runs once per
+        TRACK -- so track N+1's write path read what track N's display path
+        stored. Different question, different key.
+    """
+    return (guid, parent_thumb or None)
 
 
 def artist_poster_bytes(guid, tag, parent_thumb=None):
@@ -1728,30 +1768,55 @@ def artist_poster_bytes(guid, tag, parent_thumb=None):
         lookup entirely -- read_poster_state and backup_selected_poster both
         parse it out of a response they already fetched.
     """
-    hit = artist_art_memo.get(guid)
-    if hit and (time() - hit[2]) < ARTIST_ART_TTL:
-        return (hit[0], hit[1])
+    key = artist_art_key(guid, parent_thumb)
+    hit = artist_art_memo.get(key)
+    if hit:
+        # A KNOWN answer is good for the long TTL; a not-known one only for the
+        # short one, so a failure collapses an album's per-track sweep without
+        # suppressing the next pass's retry.
+        ttl = ARTIST_ART_TTL if hit[1] else ARTIST_ART_FAIL_TTL
+        if (time() - hit[2]) < ttl:
+            return (hit[0], hit[1])
     try:
         purl = parent_thumb
         if not purl:
             url = PMS + '/library/all?guid=' + urllib.quote(guid)
             text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
             if guid_lookup_is_ambiguous(text, tag):
+                artist_art_memo[key] = (None, False, time())
+                return (None, False)
+            if not distinct_rating_keys(text):
+                # ZERO matches. This is NOT "resolved cleanly, no artist art":
+                # the item was not found AT ALL -- a fresh-scan row with no
+                # ratingKey yet, a truncated response, a section mid-rebuild.
+                # It used to fall straight through to the `not purl` branch
+                # below and be memoised as the positive fact "this artist has
+                # no poster, KNOWN" for 600s, which is what the WRITE paths'
+                # fail-closed poison guard consults: known=True with
+                # artist_bytes=None makes selection_is_artist_art(None, ...)
+                # vacuously False, and a curated cover.jpg gets overwritten on
+                # the strength of a lookup that found nothing. Unknown.
+                log.warn('%s: /library/all matched no item for this guid -- the '
+                         'artist poster is UNREADABLE, not absent', tag)
+                artist_art_memo[key] = (None, False, time())
                 return (None, False)
             # capital-T parentThumb, so a lowercase thumb= match can't collide.
             pm = re.search(r'parentThumb="([^"]*)"', text)
             purl = pm.group(1) if pm else None
         if not purl:
-            # Resolved cleanly; this artist simply has no poster. KNOWN.
-            artist_art_memo[guid] = (None, True, time())
+            # The item WAS found and carries no parentThumb; this artist simply
+            # has no poster. KNOWN -- and only reachable now that a zero-result
+            # lookup is intercepted above.
+            artist_art_memo[key] = (None, True, time())
             return (None, True)
         if not purl.startswith('http'):
             purl = PMS + purl
         data = HTTP.Request(purl, timeout=8, cacheTime=0).content
-        artist_art_memo[guid] = (data, True, time())
+        artist_art_memo[key] = (data, True, time())
         return (data, True)
     except Exception as e:
         log.error('%s: could not read the artist poster (%s)', tag, e)
+        artist_art_memo[key] = (None, False, time())
         return (None, False)
 
 
@@ -1968,6 +2033,27 @@ ART_DIRECTION_TAGS = (
     'incipit author-art-unpin',
     'incipit author-art-fit',
 )
+
+
+def author_art_withheld(offered, valid_posters):
+    """
+        The author-poster keys the artist-art prune actually REMOVES: keys
+        currently offered in the container that the keep-list does not carry.
+
+        A named decision rather than an inline comprehension, because the log
+        that reports it has to be GATED on it and an inline gate is untestable.
+        The first attempt at making this prune visible fired on every artist
+        update -- including the common two-key no-op -- and reported
+        len(valid_posters), the KEPT count. Neither "a prune happened" nor
+        "3 survived" identifies the tile that vanished, which is the entire
+        reason the line exists.
+    """
+    keep = valid_posters or []
+    out = []
+    for key in (offered or []):
+        if key and key not in keep and key not in out:
+            out.append(key)
+    return out
 
 
 def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=False):
@@ -3118,10 +3204,36 @@ class AudiobookArtist(Agent.Artist):
             # The only prune in this file that logged NOTHING at any level.
             # It withholds artist poster keys, so when it drops the wrong one
             # there was no line to grep for afterwards.
-            log.warn(
-                'incipit artist-art: restricted the poster container to %s key(s)',
-                len(valid_posters)
-            )
+            #
+            # ...and the first line written to fix that was almost as useless:
+            # it fired on EVERY artist update, including the common two-key
+            # no-op, and reported len(valid_posters) -- the KEPT count -- so it
+            # named neither what was dropped nor what survived. A prune log
+            # exists to make a WRONG DROP greppable, which takes the KEY. Say
+            # it only when the set actually shrinks, and say which one went.
+            #
+            # Membership is asked of the container (the same `in` test the
+            # sibling prunes use) rather than iterating it: it arrives
+            # deserialized and may carry a sibling library's entries, and this
+            # plugin has never iterated it in the sandbox.
+            offered = []
+            for key in (helper.thumb, helper.thumb_secondary):
+                if not key or key in offered:
+                    continue
+                try:
+                    present = key in helper.metadata.posters
+                except Exception:
+                    present = False
+                if present:
+                    offered.append(key)
+            withheld = author_art_withheld(offered, valid_posters)
+            if withheld:
+                log.warn(
+                    'incipit artist-art: pruning %s author poster key(s) from the '
+                    'container -- withheld: %s -- keeping: %s',
+                    len(withheld), ' | '.join(withheld),
+                    ' | '.join(valid_posters) if valid_posters else '(nothing)'
+                )
             helper.metadata.posters.validate_keys(valid_posters)
         helper.log_update_metadata()
 
@@ -3613,7 +3725,14 @@ class AudiobookAlbum(Agent.Album):
                     )
                     if not (deferred_portrait_local or poisoned_local):
                         helper.metadata.posters.validate_keys([local_key])
-                        log.warn('incipit cover: LOCAL cover set as the default poster')
+                        # This is a PRUNE as well as a default: validate_keys
+                        # with one key withholds every other entry in our
+                        # namespace. The old line said only "set as the default
+                        # poster", so the removal it performs left no trace to
+                        # grep when it took the wrong tile with it.
+                        log.warn('incipit cover: LOCAL cover set as the default '
+                                 'poster -- pruning our other container entries '
+                                 'to it (%s)', local_key)
                         local_set = True
                 except Exception as e:
                     log.error('incipit cover: Proxy.Media(local) failed (%s)', e)

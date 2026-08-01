@@ -85,6 +85,71 @@ class TestFolderAuthorConfirmed(unittest.TestCase):
         self.assertEqual(tool.folder_author_confirmed(), 'J.K. Rowling')
 
 
+DOYLE_PATH = '/data/media/audiobooks/Arthur Conan Doyle/Sherlock/s.mp3'
+
+
+class TestAnHonorificDoesNotDisableTheArbiter(unittest.TestCase):
+    """
+        A COURTESY TITLE IN THE ALBUMARTIST MUST NOT KILL THE CONFIRMATION.
+
+        The comparison was strict `name_key(seg) == akey`, and name_key does
+        not strip honorifics. Measured: artist='Sir Arthur Conan Doyle' with
+        the folder "Arthur Conan Doyle" returned None, while the plain name
+        confirmed. folder_author_confirmed IS the arbiter for the sidecar
+        author/narrator swap correction, so an honorific-bearing ALBUMARTIST
+        silently disabled that whole correction -- for every such author.
+
+        v1.3.175 relaxed the same thing in ScoreTool.score_author (min of the
+        plain and the title-stripped comparison) and landed on one of three
+        surfaces. This is the second.
+    """
+
+    def test_the_plain_name_still_confirms(self):
+        # Unchanged, and it is the case the strict comparison already served:
+        # this must stay byte-identical.
+        tool = tool_for(filename=DOYLE_PATH, artist='Arthur Conan Doyle')
+        self.assertEqual(tool.folder_author_confirmed(), 'Arthur Conan Doyle')
+
+    def test_an_honorific_in_the_tag_still_confirms(self):
+        tool = tool_for(filename=DOYLE_PATH, artist='Sir Arthur Conan Doyle')
+        self.assertEqual(
+            tool.folder_author_confirmed(), 'Sir Arthur Conan Doyle',
+            'the swap-correction arbiter is disabled for every author whose '
+            'ALBUMARTIST carries a courtesy title')
+
+    def test_an_honorific_in_the_FOLDER_confirms_too(self):
+        # The provider is equally free to carry it, and so is the operator's
+        # folder tree.
+        tool = tool_for(filename='/data/x/Sir Arthur Conan Doyle/S/s.mp3',
+                        artist='Arthur Conan Doyle')
+        self.assertEqual(tool.folder_author_confirmed(), 'Arthur Conan Doyle')
+
+    def test_the_returned_value_is_the_TAG_not_the_stripped_form(self):
+        # Callers compare this against the sidecar's names; handing back a
+        # value the tag never had would move the arbitration itself.
+        tool = tool_for(filename=DOYLE_PATH, artist='Sir Arthur Conan Doyle')
+        self.assertEqual(tool.folder_author_confirmed(), 'Sir Arthur Conan Doyle')
+
+    def test_a_DIFFERENT_author_is_still_refused(self):
+        # The relaxation must not turn into "any name confirms". A
+        # narrator-tagged ALBUMARTIST still has to fail, honorific or not.
+        for artist in ('Stephen Fry', 'Sir Stephen Fry', 'Sir Agatha Christie'):
+            self.assertIsNone(
+                tool_for(filename=DOYLE_PATH, artist=artist)
+                .folder_author_confirmed(), artist)
+
+    def test_the_swap_correction_now_fires_for_an_honorific_author(self):
+        # The end of the chain, and the reason any of this matters: the
+        # swapped-fields sidecar is only correctable when the arbiter answers.
+        tool = tool_for(
+            sidecar={'authors': ['Stephen Fry'],
+                     'narrators': ['Sir Arthur Conan Doyle']},
+            filename=DOYLE_PATH, artist='Sir Arthur Conan Doyle')
+        authors, narrators = tool.sidecar_people()
+        self.assertEqual(authors, ['Sir Arthur Conan Doyle'])
+        self.assertEqual(narrators, ['Stephen Fry'])
+
+
 class TestSwapCorrection(unittest.TestCase):
     """sidecar_people: flip ONLY on strict disagreement."""
 

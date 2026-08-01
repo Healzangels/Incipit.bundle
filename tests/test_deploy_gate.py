@@ -125,5 +125,67 @@ class TestBannerIsVisibleAtShippedDefault(unittest.TestCase):
             'is undetectable' % (level.upper(), default))
 
 
+class TestMainGuardIsLastInEveryTestFile(unittest.TestCase):
+    """
+        `if __name__ == '__main__': unittest.main()` must be the LAST top-level
+        statement of a test file.
+
+        Placed mid-file it does not break discovery -- so the suite total stays
+        honest -- but a DIRECT run (`python3 tests/test_scoring.py`, which is how
+        a single fix gets checked while writing it) executes only the classes
+        defined ABOVE it and prints a confident OK. Measured 2026-08-01 before
+        this guard: test_scoring ran 8 of 16, test_cache_times 4 of 20,
+        test_sort_titles 3 of 18, test_search_hints 12 of 50, test_posters 122
+        of 231. Every one of those gaps was NEW tests, appended below an old
+        guard -- i.e. the shape hides exactly the tests someone is watching.
+
+        AST rather than a text search, so a guard inside a comment or a string
+        cannot satisfy it and a trailing helper function cannot hide beneath it.
+    """
+
+    def _test_files(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        return sorted(
+            os.path.join(here, name) for name in os.listdir(here)
+            if name.startswith('test_') and name.endswith('.py'))
+
+    def is_main_guard(self, node):
+        import ast
+        if not isinstance(node, ast.If):
+            return False
+        test = node.test
+        return (isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Name)
+                and test.left.id == '__name__'
+                and len(test.comparators) == 1
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == '__main__')
+
+    def test_the_guard_is_the_final_top_level_statement(self):
+        import ast
+        offenders = []
+        checked = 0
+        for path in self._test_files():
+            with open(path) as handle:
+                tree = ast.parse(handle.read(), path)
+            body = tree.body
+            positions = [i for i, node in enumerate(body)
+                         if self.is_main_guard(node)]
+            if not positions:
+                continue
+            checked += 1
+            if positions[-1] != len(body) - 1 or len(positions) > 1:
+                after = body[positions[0] + 1]
+                offenders.append(
+                    (os.path.basename(path), body[positions[0]].lineno,
+                     'first statement skipped by a direct run is on line %s'
+                     % after.lineno))
+        self.assertGreater(checked, 0, 'no __main__ guard found to check at all')
+        self.assertEqual(
+            offenders, [],
+            'a mid-file __main__ guard makes `python3 <file>` silently skip '
+            'every class defined below it and still print OK: %r' % (offenders,))
+
+
 if __name__ == '__main__':
     unittest.main()

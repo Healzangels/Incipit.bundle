@@ -1175,6 +1175,11 @@ class CoverMirrorModes(unittest.TestCase):
     def setUp(self):
         AG.recent_work_memo.clear()
         AG.verdict_memo.clear()
+        # The artist-art memo now caches NOT-KNOWN answers too (so one dead
+        # artist URL is not re-read once per track), which makes it a
+        # cross-test channel: test_promote_refuses_..._CANNOT_BE_READ below
+        # leaves a failure entry for this guid.
+        AG.artist_art_memo.clear()
         self.writes = []
         self.reads = []
         self.existing = self.CURATED
@@ -1216,6 +1221,7 @@ class CoverMirrorModes(unittest.TestCase):
         AG.Prefs.pop('prefer_local_cover', None)
         AG.recent_work_memo.clear()
         AG.verdict_memo.clear()
+        AG.artist_art_memo.clear()
 
     def _helper(self, guid='com.plexapp.agents.incipit://MODETEST_us'):
         class FakeMetadata(object):
@@ -1336,6 +1342,295 @@ class CoverMirrorModes(unittest.TestCase):
             AG.Prefs['cover_mirror_mode'] = weird
             self.assertEqual(AG.cover_mirror_mode(), 'seed',
                              'unknown value %r must fail SAFE' % (weird,))
+
+
+ZERO_RESULTS = '<MediaContainer size="0"></MediaContainer>'
+ONE_NO_PARENT = ('<MediaContainer size="1">'
+                 '<Directory ratingKey="55" thumb="/library/metadata/55/thumb/1"/>'
+                 '</MediaContainer>')
+TWO_RESULTS = ('<MediaContainer size="2">'
+               '<Directory ratingKey="55" thumb="/library/metadata/55/thumb/1"/>'
+               '<Directory ratingKey="77" thumb="/library/metadata/77/thumb/1"/>'
+               '</MediaContainer>')
+
+
+class ArtistPosterAnswersOneQuestionAtATime(unittest.TestCase):
+    """
+        artist_poster_bytes' memo, and what it is allowed to say.
+
+        The function returns (bytes, known) precisely so the WRITE paths can
+        fail closed: `known` False must make them refuse. Two defects let the
+        memo hand them a false `known=True`.
+
+        1. THE KEY WAS THE GUID ALONE. The memo read is the function's first
+           statement, before `parent_thumb` is even looked at -- so the DISPLAY
+           caller (compile_metadata, which passes no parent_thumb) answered for
+           the WRITE callers, which pass one. update() runs once per TRACK and
+           promote_picked_cover skips mark_done on its early returns, so track
+           N+1 genuinely reads what track N stored.
+
+        2. A ZERO-RESULT LOOKUP WAS MEMOISED AS A KNOWN ABSENCE.
+           guid_lookup_is_ambiguous only rejects MULTIPLE matches, so a
+           /library/all response matching NOTHING fell through to the
+           "this artist simply has no poster. KNOWN." branch and was cached for
+           600s. A write path then reads known=True with artist_bytes=None,
+           selection_is_artist_art(None, selected) is vacuously False, and
+           write_cover_sidecar proceeds -- the exact shape that put the author
+           photo into 92 curated cover.jpg files on 2026-07-26.
+    """
+
+    ARTIST_PHOTO = b'\xff\xd8\xff\xe0 the author photo bytes'
+    GUID = 'com.plexapp.agents.incipit://MEMOKEY_us'
+    PARENT = '/library/metadata/9/thumb/12345'
+
+    def setUp(self):
+        AG.artist_art_memo.clear()
+        self.real_request = AG.HTTP.Request
+        self.lookups = []
+        self.images = []
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real_request
+        AG.artist_art_memo.clear()
+
+    def _serving(self, lookup_body, artist_bytes=None, artist_fails=False):
+        outer = self
+
+        def request(url, **kwargs):
+            class Reply(object):
+                content = ''
+
+            reply = Reply()
+            if '/library/all' in url:
+                outer.lookups.append(url)
+                reply.content = lookup_body
+                return reply
+            outer.images.append(url)
+            if artist_fails:
+                raise Exception('artist poster read timed out')
+            reply.content = artist_bytes
+            return reply
+
+        AG.HTTP.Request = request
+
+    # --- what a lookup may be read as ---
+
+    def test_a_zero_result_lookup_is_UNKNOWN_not_a_known_absence(self):
+        # Nothing matched. That is "I could not find the item", never "this
+        # artist has no poster" -- and the difference is whether a write path
+        # is allowed to overwrite the operator's cover.jpg.
+        self._serving(ZERO_RESULTS)
+        self.assertEqual(
+            AG.artist_poster_bytes(self.GUID, 'incipit cover'), (None, False),
+            'a lookup that found nothing was reported as a KNOWN absence, '
+            'which is what unlocks the fail-closed poison guard')
+
+    def test_a_found_item_with_no_parentThumb_IS_a_known_absence(self):
+        # The other side of the same rail: the item resolved and carries no
+        # parentThumb, so the absence is real and the guards may rely on it.
+        # Without this the fix could be "return unknown always", which would
+        # silently stop every legitimate mirror.
+        self._serving(ONE_NO_PARENT)
+        self.assertEqual(
+            AG.artist_poster_bytes(self.GUID, 'incipit cover'), (None, True))
+
+    def test_an_ambiguous_lookup_is_still_unknown(self):
+        self._serving(TWO_RESULTS)
+        self.assertEqual(
+            AG.artist_poster_bytes(self.GUID, 'incipit cover'), (None, False))
+
+    # --- the memo key ---
+
+    def test_a_display_call_cannot_answer_a_write_call(self):
+        # The display path resolves the item and finds no artist poster.
+        self._serving(ONE_NO_PARENT, artist_bytes=self.ARTIST_PHOTO)
+        self.assertEqual(
+            AG.artist_poster_bytes(self.GUID, 'incipit cover'), (None, True))
+        # Same guid, same pass -- but this caller HOLDS a parentThumb, so this
+        # artist demonstrably has a poster and the guard must see its bytes.
+        self.assertEqual(
+            AG.artist_poster_bytes(self.GUID, 'incipit poster-backup', self.PARENT),
+            (self.ARTIST_PHOTO, True),
+            'the no-parent_thumb call answered for the with-parent_thumb one, '
+            'so the poison guard compared a curated cover against None')
+
+    def test_the_with_parent_thumb_answer_is_still_memoised(self):
+        # ...and the memo must still WORK: one image read for the whole album.
+        self._serving(ONE_NO_PARENT, artist_bytes=self.ARTIST_PHOTO)
+        for _ in range(27):
+            AG.artist_poster_bytes(self.GUID, 'incipit poster-backup', self.PARENT)
+        self.assertEqual(len(self.images), 1,
+                         'a 27-part book must download the artist photo once')
+
+    def test_two_different_parents_do_not_share_an_answer(self):
+        self._serving(ONE_NO_PARENT, artist_bytes=self.ARTIST_PHOTO)
+        AG.artist_poster_bytes(self.GUID, 'tag', '/library/metadata/9/thumb/1')
+        AG.artist_poster_bytes(self.GUID, 'tag', '/library/metadata/9/thumb/2')
+        self.assertEqual(len(self.images), 2)
+
+    # --- a failure is paid once per pass, and retried on the next ---
+
+    def test_a_dead_artist_url_is_read_once_per_pass_not_once_per_track(self):
+        """
+        The commit that added the memo claimed "this no longer re-downloads the
+        artist photo per track" -- true only for the SUCCESS path. The failure
+        path wrote no entry at all, so a reliably-failing artist URL paid a
+        fresh 8s HTTP.Request per track: promote_picked_cover returns without
+        mark_done (deliberately -- a transient failure must retry), so
+        should_run's per-track gate never closes either. 27 parts x 8s, every
+        pass.
+        """
+        self._serving(ONE_NO_PARENT, artist_fails=True)
+        for _ in range(27):
+            self.assertEqual(
+                AG.artist_poster_bytes(self.GUID, 'incipit poster-backup', self.PARENT),
+                (None, False),
+                'a failure must keep reporting NOT KNOWN, whatever the memo does')
+        self.assertEqual(
+            len(self.images), 1,
+            'each track paid its own 8-second timeout: %s reads for one album'
+            % len(self.images))
+
+    def _age(self, key, seconds):
+        data, known, stamp = AG.artist_art_memo[key]
+        AG.artist_art_memo[key] = (data, known, stamp - seconds)
+
+    def test_the_NEXT_pass_still_retries_a_failure(self):
+        # "A transient failure must retry, not be suppressed" -- the design
+        # note the fail-closed guards are written around. The memo collapses an
+        # album's per-track sweep and nothing more.
+        self._serving(ONE_NO_PARENT, artist_fails=True)
+        key = AG.artist_art_key(self.GUID, self.PARENT)
+        AG.artist_poster_bytes(self.GUID, 'incipit poster-backup', self.PARENT)
+        self._age(key, AG.ARTIST_ART_FAIL_TTL + 1)
+        AG.artist_poster_bytes(self.GUID, 'incipit poster-backup', self.PARENT)
+        self.assertEqual(len(self.images), 2,
+                         'a failure was suppressed past its own TTL, so a '
+                         'recovered artist URL would stay unread')
+
+    def test_a_KNOWN_answer_is_still_good_for_the_long_ttl(self):
+        # The asymmetry is the whole point: only a failure expires early.
+        self._serving(ONE_NO_PARENT, artist_bytes=self.ARTIST_PHOTO)
+        key = AG.artist_art_key(self.GUID, self.PARENT)
+        AG.artist_poster_bytes(self.GUID, 'incipit poster-backup', self.PARENT)
+        self._age(key, AG.ARTIST_ART_FAIL_TTL + 1)
+        AG.artist_poster_bytes(self.GUID, 'incipit poster-backup', self.PARENT)
+        self.assertEqual(len(self.images), 1)
+
+    def test_the_failure_ttl_is_shorter_than_the_success_ttl(self):
+        self.assertLess(AG.ARTIST_ART_FAIL_TTL, AG.ARTIST_ART_TTL)
+        self.assertGreater(AG.ARTIST_ART_FAIL_TTL, 0)
+
+
+class ADisplayReadCannotUnlockAWrite(unittest.TestCase):
+    """
+        END TO END, through backup_selected_poster: the author photo must not
+        reach a curated cover.jpg because an earlier, cheaper, DISPLAY-only
+        read of the same guid memoised "this artist has no poster, KNOWN".
+
+        The sequencing is real, not contrived. update() runs once per track.
+        compile_metadata's cover block calls artist_poster_bytes(guid,
+        'incipit cover') with NO parent_thumb, so it does its own /library/all
+        lookup -- which on a fresh scan can legitimately match nothing yet.
+        backup_selected_poster runs later in the same update with a parentThumb
+        already in hand. Keyed on the guid alone, the first answer was replayed
+        to the second for 600 seconds.
+    """
+
+    ARTIST_PHOTO = b'\xff\xd8\xff\xe0 the AUTHOR photo, inherited'
+    CURATED = b'\xff\xd8\xff\xe0 the operator hand-picked this'
+    GUID = 'com.plexapp.agents.incipit://POISONMEMO_us'
+    RESOLVED = ('<MediaContainer size="1">'
+                '<Directory ratingKey="55" thumb="/library/metadata/55/thumb/1" '
+                'parentThumb="/library/metadata/9/thumb/2"/>'
+                '</MediaContainer>')
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
+        AG.artist_art_memo.clear()
+        self.writes = []
+        self.row_is_visible = False
+        self.saved = (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar)
+        outer = self
+
+        def router(url, **kwargs):
+            class Reply(object):
+                content = ''
+
+            reply = Reply()
+            if '/library/all' in url:
+                reply.content = outer.RESOLVED if outer.row_is_visible else ZERO_RESULTS
+                return reply
+            # BOTH the selection and the artist thumb serve the author photo:
+            # this book is showing its artist's inherited art, which is exactly
+            # what the poison guard exists to refuse.
+            reply.content = outer.ARTIST_PHOTO
+            return reply
+
+        AG.HTTP.Request = router
+        AG.Core.storage.load = lambda path: outer.CURATED
+        AG.write_cover_sidecar = (
+            lambda path, data: outer.writes.append((path, data)) or True)
+        AG.Prefs['cover_mirror_mode'] = (
+            'Curation (the selected poster replaces cover.jpg)')
+
+    def tearDown(self):
+        (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar) = self.saved
+        AG.Prefs.pop('cover_mirror_mode', None)
+        AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
+        AG.artist_art_memo.clear()
+
+    def _helper(self):
+        guid = self.GUID
+
+        class FakeMetadata(object):
+            pass
+
+        class FakeHelper(object):
+            metadata = FakeMetadata()
+            thumb = 'https://images.example/online-cover.jpg'
+            thumb_secondary = None
+            force = True
+
+            def album_file_path(self):
+                return '/data/media/x/1 - Book/file.m4b'
+
+        FakeHelper.metadata.guid = guid
+        return FakeHelper()
+
+    def test_the_curated_cover_survives(self):
+        # Track 1, display path: the row is not in /library/all yet.
+        self.assertEqual(
+            AG.artist_poster_bytes(self.GUID, 'incipit cover'), (None, False))
+        # Track 2: the row has landed, and the mirror wants to write.
+        self.row_is_visible = True
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(
+            self.writes, [],
+            'the inherited author photo was mirrored over a hand-curated '
+            'cover.jpg, on the strength of a lookup that matched nothing')
+
+    def test_a_real_cover_still_mirrors(self):
+        # The refusal must stay narrow: only the author photo is blocked.
+        self.row_is_visible = True
+        real_cover = b'\xff\xd8\xff\xe0 a genuine book cover'
+        base = AG.HTTP.Request
+
+        def router(url, **kwargs):
+            if '/library/all' in url:
+                return base(url, **kwargs)
+
+            class Reply(object):
+                content = real_cover if '/55/thumb/' in url else self.ARTIST_PHOTO
+
+            return Reply()
+
+        AG.HTTP.Request = router
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(len(self.writes), 1)
+        self.assertEqual(self.writes[0][1], real_cover)
 
 
 class AuthorArtOrderingIsStable(unittest.TestCase):
@@ -1784,9 +2079,6 @@ class CoverBlockFlowGuards(unittest.TestCase):
         self.assertIn('online_prune_allowed(', src)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 class ConvergePrunesItsOwnDuplicate(unittest.TestCase):
     """
         The instant converge_author_art's upload is selected, the agent's
@@ -1882,8 +2174,13 @@ class ConvergePrunesItsOwnDuplicate(unittest.TestCase):
         stale `fit` entry standing, so the next fit pass silently skips and the
         square portrait never comes back: the same bug, one dict entry short.
         """
-        tags = ('incipit author-art-select', 'incipit author-art-unpin',
-                'incipit author-art-fit')
+        # READ THE CONSTANT, never a local copy of it. ART_DIRECTION_TAGS
+        # exists precisely so "adding a direction cannot half-wire it" -- a
+        # hardcoded tuple here would be the same half-wiring on the test side,
+        # blind to a fourth direction added to either the code or the list.
+        tags = AG.ART_DIRECTION_TAGS
+        self.assertGreaterEqual(len(tags), 3,
+                                'an emptied constant would make this vacuous')
         AG.upload_and_select_poster = lambda *a, **kw: True
         for running in tags:
             # Every direction is "recently done" for this artist...
@@ -3615,22 +3912,144 @@ class TwinPruneDecision(unittest.TestCase):
         self.assertFalse(AG.should_prune_local_twin(None, True))
 
 
+class AuthorArtPruneNamesWhatItDropped(unittest.TestCase):
+    """
+        The artist-art prune's log line.
+
+        It was added to make a WRONG DROP greppable and could not tell you what
+        was dropped: it sat at the same indent as validate_keys, gated only on
+        `if helper.thumb:`, so it emitted one WARN per artist update -- the
+        common case being the two-key NO-OP, where nothing is removed at all --
+        and it logged len(valid_posters), the KEPT count, naming neither the
+        dropped nor the kept key.
+
+        A prune that fires constantly and names nothing is worse than silence:
+        it trains the reader to skip the line that matters.
+    """
+
+    A = 'https://hardcover/portrait.jpg'
+    B = 'https://audible/photo.jpg'
+
+    def test_the_common_two_key_no_op_withholds_nothing(self):
+        self.assertEqual(AG.author_art_withheld([self.A, self.B],
+                                                [self.A, self.B]), [])
+
+    def test_a_reorder_is_not_a_prune(self):
+        # The square-fit reorder rewrites valid_posters in the other order and
+        # removes nothing; it must not report a drop.
+        self.assertEqual(AG.author_art_withheld([self.A, self.B],
+                                                [self.B, self.A]), [])
+
+    def test_a_dropped_key_is_named(self):
+        self.assertEqual(AG.author_art_withheld([self.A, self.B], [self.A]),
+                         [self.B])
+
+    def test_an_empty_keep_list_withholds_everything_offered(self):
+        self.assertEqual(AG.author_art_withheld([self.A, self.B], []),
+                         [self.A, self.B])
+
+    def test_a_key_never_offered_is_not_reported_as_dropped(self):
+        self.assertEqual(AG.author_art_withheld([], [self.A]), [])
+
+    def test_junk_input_is_survivable(self):
+        self.assertEqual(AG.author_art_withheld(None, None), [])
+        self.assertEqual(AG.author_art_withheld([None, ''], None), [])
+
+    def source_window(self):
+        import os
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, '..', 'Contents', 'Code', '__init__.py')
+        with open(path) as handle:
+            src = handle.read()
+        start = src.index('incipit artist-art: pruning')
+        return src[start - 600:start + 400]
+
+    def test_the_line_is_gated_on_an_actual_shrink(self):
+        # The behaviour above is satisfied by a log that ignores the result.
+        self.assertIn('if withheld:', self.source_window())
+
+    def test_the_line_carries_the_KEYS_not_a_count_of_survivors(self):
+        window = self.source_window()
+        self.assertIn("join(withheld)", window)
+        self.assertNotIn(
+            'len(valid_posters)', window,
+            'the kept COUNT is what the first version reported, and it names '
+            'neither the dropped nor the kept key')
+
+
+class TestEveryDirectionTagIsInTheConstant(unittest.TestCase):
+    """
+        ART_DIRECTION_TAGS exists so "adding a direction cannot half-wire it"
+        -- v1.3.132 added 'fit' to the code and not to the old two-entry
+        opposite-map, and the gap survived until 2026-07-31.
+
+        The behavioural test iterates the constant, so it exercises whatever is
+        IN it. What it cannot see is a direction that exists in the CODE and
+        never reached the list -- which is the exact shape of the bug. This
+        census closes that side: every 'incipit author-art-*' tag the module
+        uses must be a member.
+    """
+
+    def test_no_direction_tag_is_missing_from_the_list(self):
+        import os
+        import re
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, '..', 'Contents', 'Code', '__init__.py')
+        with open(path) as handle:
+            source = handle.read()
+        used = set(re.findall(r"'(incipit author-art-[a-z-]+)'", source))
+        self.assertTrue(used, 'no direction tags found -- check this pattern')
+        missing = sorted(used - set(AG.ART_DIRECTION_TAGS))
+        self.assertEqual(
+            missing, [],
+            'these directions can change the author-art selection but are not '
+            'in ART_DIRECTION_TAGS, so they invalidate nothing and nothing '
+            'invalidates them: %r' % (missing,))
+
+
 class TestEveryPruneIsVisible(unittest.TestCase):
     """
-        A prune REMOVES a poster from the picker. Every one of them must leave
-        a line at the SHIPPED default log level.
+        A prune REMOVES a poster from the picker. Every one of them must
+        ANNOUNCE that, at the SHIPPED default log level.
 
         DefaultPrefs.json ships logging_level=WARN, and Logging.info() emits
         only at DEBUG/INFO -- so an info() prune is invisible in the operator's
-        actual configuration. That is not hypothetical: the 2026-07-26 loss of
-        92 curated covers was hard to reconstruct precisely because the
+        actual configuration. Not hypothetical: the 2026-07-26 loss of 92
+        curated covers was hard to reconstruct precisely because the
         destructive lines were below the default level, and one prune (the
         artist offer phase) logged nothing at any level at all.
 
-        A source guard rather than a behavioural test, because these sit deep
-        inside compile_metadata and the thing worth pinning is simply that no
-        future prune ships silent.
+        WHY THIS GUARD WAS REWRITTEN (2026-08-01). The first version asked only
+        whether `log.warn` or `log.error` appeared within +-8 lines, as a
+        substring. Measured, it was very nearly vacuous:
+
+          * EVERY prune already sits in `try: ... except Exception as e:
+            log.error('... failed (%s)', e)`, and that handler alone satisfied
+            the window -- deleting the log.warn added next to __init__.py:3744
+            left the guard GREEN, because the shifted handler moved into range.
+          * Of the six validate_keys sites, only three were genuinely
+            constrained; the other three passed purely on their neighbouring
+            except-handler.
+          * `'log.warn' in window` is a substring test, so a COMMENTED-OUT call
+            satisfied it.
+          * Decisively: adding a brand-new, completely silent validate_keys
+            inside a try/except stayed GREEN -- i.e. the stated invariant "no
+            future prune ships silent" did not hold at all.
+
+        So: the announcement must be a real log.warn (an except-handler's
+        log.error is a FAILURE report, not an announcement), must actually say
+        it is removing something, must not be commented out, and is claimed by
+        at most ONE prune -- otherwise a silent prune added beside an announced
+        one inherits its neighbour's line.
     """
+
+    # Words that announce a removal. An except-handler says "... failed", which
+    # is not one of these -- and it is log.error anyway.
+    ANNOUNCES = ('prun', 'withh', 'restrict', 'remov', 'drop')
+    # Deliberately tighter than the old +-8/+8. Measured spread of the six real
+    # announcements around their validate_keys: -8 to +6.
+    LOOK_BACK = 8
+    LOOK_FORWARD = 6
 
     def source(self):
         import os
@@ -3639,18 +4058,80 @@ class TestEveryPruneIsVisible(unittest.TestCase):
         with open(path) as handle:
             return handle.read().split('\n')
 
-    def test_no_prune_is_silent_or_below_warn(self):
-        lines = self.source()
-        offenders = []
+    def is_code(self, line):
+        return bool(line.strip()) and not line.strip().startswith('#')
+
+    def prune_sites(self, lines):
+        return [i for i, line in enumerate(lines)
+                if 'posters.validate_keys' in line and self.is_code(line)]
+
+    def announcements(self, lines):
+        """Line indexes of log.warn calls that say a poster is being removed."""
+        found = []
         for i, line in enumerate(lines):
-            if 'posters.validate_keys' not in line:
+            if 'log.warn' not in line or not self.is_code(line):
                 continue
-            # Look at the surrounding block for the level this prune logs at.
-            window = '\n'.join(lines[max(0, i - 8):i + 9])
-            if 'log.warn' in window or 'log.error' in window:
+            # The message often wraps; read the call's first few lines.
+            message = ' '.join(lines[i:i + 4]).lower()
+            for word in self.ANNOUNCES:
+                if word in message:
+                    found.append(i)
+                    break
+        return found
+
+    def test_every_prune_announces_itself_at_warn(self):
+        lines = self.source()
+        sites = self.prune_sites(lines)
+        self.assertGreaterEqual(
+            len(sites), 6, 'the prune census shrank -- check this guard still '
+                           'looks at the right call')
+        unclaimed = list(self.announcements(lines))
+        offenders = []
+        for site in sites:
+            window = [i for i in unclaimed
+                      if site - self.LOOK_BACK <= i <= site + self.LOOK_FORWARD]
+            if not window:
+                offenders.append((site + 1, lines[site].strip()[:70]))
                 continue
-            offenders.append((i + 1, line.strip()[:70]))
+            # Nearest first, and each announcement may be claimed ONCE: a new
+            # silent prune next to an announced one must not ride its line.
+            window.sort(key=lambda i: abs(i - site))
+            unclaimed.remove(window[0])
         self.assertEqual(
             offenders, [],
-            'these prunes are silent or only log below the shipped WARN '
-            'default, so a removed poster leaves no trace: %r' % (offenders,))
+            'these prunes remove a poster with no line saying so at the '
+            'shipped WARN default (an except-handler\'s log.error is a failure '
+            'report, not an announcement): %r' % (offenders,))
+
+    def test_an_except_handler_alone_does_not_satisfy_the_guard(self):
+        # Pins the rewrite itself: the old version passed on exactly this.
+        block = [
+            '            try:',
+            '                helper.metadata.posters.validate_keys(keep)',
+            '            except Exception as e:',
+            "                log.error('incipit cover: prune failed (%s)', e)",
+        ]
+        self.assertEqual(self.announcements(block), [],
+                         'a failure report was read as a prune announcement')
+        self.assertEqual(len(self.prune_sites(block)), 1)
+
+    def test_a_commented_out_announcement_does_not_count(self):
+        block = [
+            "            # log.warn('incipit cover: pruning the online entry')",
+            '            helper.metadata.posters.validate_keys(keep)',
+        ]
+        self.assertEqual(self.announcements(block), [])
+        self.assertEqual(len(self.prune_sites(block)), 1)
+
+    def test_a_commented_out_prune_is_not_a_site(self):
+        block = ['            # helper.metadata.posters.validate_keys(keep)']
+        self.assertEqual(self.prune_sites(block), [])
+
+# LAST STATEMENT IN THE FILE, always. This guard used to sit mid-file, and
+# `python3 tests/<file>.py` then ran only the classes DEFINED ABOVE IT and
+# printed OK -- measured: test_scoring ran 8 of 16, test_cache_times 4 of 20,
+# test_sort_titles 3 of 18. Discovery was unaffected, so the suite stayed
+# honest while a direct run (how a single fix gets checked) silently skipped
+# the new tests. tests/test_deploy_gate.py pins the position for every file.
+if __name__ == '__main__':
+    unittest.main()
