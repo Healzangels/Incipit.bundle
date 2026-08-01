@@ -130,3 +130,103 @@ class TestScoringConstants(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestHonorificDoesNotBlockAnAuthorMatch(unittest.TestCase):
+    """
+        A LEADING HONORIFIC MUST NOT COST THE MATCH.
+
+        Found live 2026-07-31. The library carried two artists for one man:
+        "Arthur Conan Doyle" (2 albums, photo + bio) and "Sir Arthur Conan
+        Doyle" (1 album, no art, no bio). Fix Match on the second offered
+        "Arthur Conan Doyle" at score 70 -- and Plex's auto-apply bar is 80, so
+        it never matched automatically and the artist stayed metadata-less.
+
+        The arithmetic is exact and reproducible:
+            reduce_string("Sir Arthur Conan Doyle") -> "sirarthurconandoyle"
+            reduce_string("Arthur Conan Doyle")     -> "arthurconandoyle"
+            Levenshtein = 3 ("sir") * the author weight 10 = 30
+            100 - 30 = 70
+
+        So three characters of courtesy title put a correct author match under
+        the bar. "Sir Terry Pratchett" and "Dame ..." are the same shape.
+
+        NOTE ON THE HARNESS: the sibling scorer score_album genuinely cannot be
+        driven here (it does title.encode('utf-8'), a py2 str but py3 bytes).
+        score_author does NOT encode, and plexenv stubs LevenshteinDistance, so
+        this path IS reachable -- the blanket "scoring is untestable" note in
+        TestScoringConstants applies to score_album only.
+    """
+
+    def tool_for(self, tagged_artist):
+        tool = ST.ScoreTool.__new__(ST.ScoreTool)
+        tool.calculate_score = ST.Util.LevenshteinDistance
+
+        class FakeMedia(object):
+            artist = tagged_artist
+
+        class FakeHelper(object):
+            media = FakeMedia()
+
+        tool.helper = FakeHelper()
+        return tool
+
+    def test_an_exact_author_still_costs_nothing(self):
+        tool = self.tool_for('Arthur Conan Doyle')
+        self.assertEqual(tool.score_author('Arthur Conan Doyle'), 0)
+
+    def test_a_leading_Sir_costs_nothing(self):
+        tool = self.tool_for('Sir Arthur Conan Doyle')
+        deduction = tool.score_author('Arthur Conan Doyle')
+        self.assertEqual(
+            deduction, 0,
+            'a courtesy title cost %s points; 30 of them put the match at 70, '
+            'under Plex\'s auto-apply bar of 80' % deduction)
+
+    def test_it_works_in_the_other_direction_too(self):
+        # The provider is equally free to carry the honorific.
+        tool = self.tool_for('Arthur Conan Doyle')
+        self.assertEqual(tool.score_author('Sir Arthur Conan Doyle'), 0)
+
+    def test_other_common_courtesy_titles(self):
+        for tagged, provider in (('Sir Terry Pratchett', 'Terry Pratchett'),
+                                 ('Dame Agatha Christie', 'Agatha Christie'),
+                                 ('Rev. W. Awdry', 'W. Awdry')):
+            tool = self.tool_for(tagged)
+            self.assertEqual(tool.score_author(provider), 0,
+                             '%s should match %s' % (tagged, provider))
+
+    def test_a_GENUINELY_different_author_is_still_penalised(self):
+        # The relaxation must not turn into "any two authors match".
+        tool = self.tool_for('Sir Arthur Conan Doyle')
+        self.assertGreater(tool.score_author('Agatha Christie'), 0)
+        tool = self.tool_for('Arthur Conan Doyle')
+        self.assertGreater(tool.score_author('Arthur C. Clarke'), 0)
+
+    def test_stripping_can_never_make_a_match_WORSE(self):
+        # Why score_author takes min(plain, stripped) rather than just stripped.
+        # Stripping is applied to both sides by the same rule, so it usually
+        # helps or ties -- but when only ONE side carries a leading courtesy
+        # title AND the other carries extra leading words, removing it can move
+        # the strings further apart. min() makes the relaxation monotonic: it
+        # can lower a deduction, never raise one.
+        tool = self.tool_for('Sir A B')
+        self.assertLessEqual(
+            tool.score_author('X Sir A B'),
+            # what the unstripped comparison alone would have cost
+            ST.Util.LevenshteinDistance('sirab', 'xsirab') * 10,
+            'the relaxation must never cost more than not relaxing at all')
+
+    def test_a_TWO_word_credit_is_left_intact(self):
+        # "Lord Dunsany" is the whole pen name. Reducing a two-token credit to
+        # one token is too thin to compare on, so the strip requires at least
+        # two tokens to remain.
+        self.assertEqual(ST.strip_courtesy_title('Lord Dunsany'), 'Lord Dunsany')
+        self.assertEqual(ST.strip_courtesy_title('Sir Pratchett'), 'Sir Pratchett')
+        # Three tokens is enough to be safe.
+        self.assertEqual(
+            ST.strip_courtesy_title('Sir Terry Pratchett'), 'Terry Pratchett')
+
+    def test_a_non_title_first_word_is_never_stripped(self):
+        for name in ('Arthur Conan Doyle', 'Ursula K. Le Guin', 'J. R. R. Tolkien'):
+            self.assertEqual(ST.strip_courtesy_title(name), name)

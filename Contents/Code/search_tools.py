@@ -1815,6 +1815,37 @@ class ArtistSearchTool(SearchTool):
             log.error("No artist to validate")
 
 
+# Courtesy titles that precede a credited author name. Deliberately SHORT and
+# restricted to forms that are never themselves a pen name: "Dr." is excluded
+# because Dr. Seuss exists, "Mr." because Mr. Men does. These are compared away
+# on BOTH sides (see ScoreTool.score_author), so the list only ever removes a
+# penalty -- it cannot cause two different authors to match.
+COURTESY_TITLES = (
+    'sir', 'dame', 'lord', 'lady', 'rev', 'reverend', 'father', 'sister',
+)
+
+
+def strip_courtesy_title(name):
+    """
+        `name` without a leading courtesy title.
+
+        Requires at least two tokens to REMAIN, so a one-word credit is never
+        emptied, and matches on the reduced token (trailing '.' and case are
+        irrelevant). Returns the input unchanged when nothing applies.
+    """
+    try:
+        parts = (name or '').strip().split()
+    except Exception:
+        return name
+    # Three tokens minimum, so at least two remain: stripping "Sir Pratchett"
+    # down to a single token is too thin to compare safely.
+    if len(parts) < 3:
+        return name
+    if parts[0].lower().rstrip('.') in COURTESY_TITLES:
+        return ' '.join(parts[1:])
+    return name
+
+
 class ScoreTool:
     # Starting value for score before deductions are taken.
     INITIAL_SCORE = 100
@@ -2022,14 +2053,35 @@ class ScoreTool:
         """
             Compare the input author similarity to the search result author.
             Score is calculated with LevenshteinDistance
+
+            A leading COURTESY TITLE is compared away. Found live 2026-07-31:
+            the library held two artists for one man -- "Arthur Conan Doyle"
+            (2 albums, photo and bio) and "Sir Arthur Conan Doyle" (1 album,
+            neither) -- because Fix Match offered the right author at score 70
+            and Plex's auto-apply bar is 80. The arithmetic is exact:
+            "sirarthurconandoyle" vs "arthurconandoyle" is a Levenshtein
+            distance of 3, times the author weight of 10, so 100 - 30 = 70.
+            Three characters of courtesy title sank a correct match.
+
+            Taking the BEST of the stripped and unstripped comparisons means
+            this can only ever LOWER a deduction, never raise one: when the
+            honorific is genuinely part of the credited name and the provider
+            carries it too, the unstripped comparison already scores 0 and
+            wins. Two different authors still differ by their actual names, so
+            the relaxation cannot make unrelated people match.
         """
         if self.helper.media.artist:
             scorebase3 = self.helper.media.artist
             scorebase4 = author
-            author_score = self.calculate_score(
+            plain = self.calculate_score(
                 self.reduce_string(scorebase3),
                 self.reduce_string(scorebase4)
-            ) * 10
+            )
+            without_titles = self.calculate_score(
+                self.reduce_string(strip_courtesy_title(scorebase3)),
+                self.reduce_string(strip_courtesy_title(scorebase4))
+            )
+            author_score = min(plain, without_titles) * 10
             log.debug("Score deduction from author: " + str(author_score))
             return author_score
 
