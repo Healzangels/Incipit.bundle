@@ -494,6 +494,25 @@ class AlbumUpdateTool(UpdateTool):
             # rather than dropping it.
             self.thumb_secondary = self.thumb
             self.thumb = response['imageSquare']
+        # A DIFFERENT Audible marketplace's art for the same recording. Extra
+        # choices only -- never the default, never a replacement. The api gates
+        # these on the narrator sets matching, because one ASIN can front
+        # different recordings in different marketplaces.
+        alternates = response.get('imageAlternates') or []
+        if isinstance(alternates, list):
+            # No builtin does this job here. `basestring` is a py2-only name
+            # that NameErrors under the py3 test harness, and `hasattr` is
+            # BLOCKED by the RestrictedPython sandbox -- the guard suite caught
+            # both, which is the whole reason it exists (a blocked builtin kills
+            # the plugin silently at compile time). Duck-type instead.
+            cleaned = []
+            for url in alternates:
+                try:
+                    if url and url.strip():
+                        cleaned.append(url)
+                except Exception:
+                    continue
+            self.thumb_alternates = cleaned
         if 'similar' in response:
             self.similar = response['similar']
         if 'subtitle' in response:
@@ -539,6 +558,7 @@ class AlbumUpdateTool(UpdateTool):
         # The original (usually portrait) cover, kept as a secondary poster when
         # a native square cover is used as the default.
         self.thumb_secondary = ''
+        self.thumb_alternates = []
         self.title = ''
         self.volume = ''
         self.volume2 = ''
@@ -1128,6 +1148,7 @@ class ArtistUpdateTool(UpdateTool):
         self.thumb = ''
         # The alternate (Audible) author image, offered as a secondary poster.
         self.thumb_secondary = ''
+        self.thumb_alternates = []
 
     def set_metadata_sort_title(self):
         """

@@ -1534,7 +1534,8 @@ def mirror_withheld(state, image_bytes, own_dict_key, tag):
 
 def cover_keep_list(thumb_key, local_key, thumb_present, local_present,
                     online_redundant, online_byte_exact, online_prune_ok,
-                    mirror_skipped, mirror_byte_exact, local_uploaded=False):
+                    mirror_skipped, mirror_byte_exact, local_uploaded=False,
+                    alternate_keys=None):
     """
         The membership list for `validate_keys` -- which entries of OUR
         namespace survive this pass.
@@ -1569,7 +1570,69 @@ def cover_keep_list(thumb_key, local_key, thumb_present, local_present,
     if local_present and not (mirror_skipped and mirror_byte_exact) \
             and not local_uploaded:
         keep.append(local_key)
+    # ALTERNATE-MARKETPLACE covers (the api's `imageAlternates`) are extra ART
+    # ONLY -- a different Audible marketplace's cover for the same recording.
+    # They must be listed here or validate_keys withholds them the moment they
+    # are offered: added and silently pruned in one pass, which looks exactly
+    # like the feature not working.
+    #
+    # Appended LAST and never displacing anything: the default poster and the
+    # local cover keep their positions and their meaning. Their retention is
+    # also independent of the online prune above -- the online copy being a
+    # byte-identical twin of cover.jpg says nothing about a DIFFERENT
+    # marketplace's art.
+    for key in (alternate_keys or []):
+        if key and key not in keep:
+            keep.append(key)
     return keep
+
+
+def offer_alternate_covers(helper, sort_order=3):
+    """
+        Offer the api's `imageAlternates` as extra pickable posters, returning
+        the keys actually added.
+
+        A DIFFERENT Audible marketplace's art for the same recording. The api
+        gates them on the narrator sets matching (one ASIN can front different
+        recordings in different marketplaces) and measured 7 of 15 both-region
+        ASINs carrying genuinely different art, so this is real choice rather
+        than duplicate tiles.
+
+        EXTRA CHOICE ONLY -- sort_order well below the default and the local
+        cover, so nothing here can become the selection. The returned keys must
+        be handed to cover_keep_list or validate_keys withholds them the instant
+        they are offered: added and pruned in one pass, which is
+        indistinguishable from the feature not working.
+
+        Skips a url already in the container (a re-offer costs a fetch and
+        changes nothing) and swallows every failure -- spare art is never worth
+        failing an update for.
+        @param helper the update helper carrying thumb_alternates
+        @param sort_order priority for the offered posters
+        @returns list of keys added to the container
+    """
+    added = []
+    # NOT getattr(): the sandbox blocks it (the guard suite caught that, as it
+    # caught hasattr in the parser). thumb_alternates is initialised on the
+    # helper, and a missing one is an AttributeError this try already covers.
+    try:
+        alternates = helper.thumb_alternates or []
+    except Exception:
+        return added
+    for url in alternates:
+        if url in helper.metadata.posters:
+            added.append(url)
+            continue
+        try:
+            data = fetch_url_bytes(url)
+            if not data:
+                continue
+            helper.metadata.posters[url] = Proxy.Media(data, sort_order=sort_order)
+            added.append(url)
+            log.info('incipit cover: offering an alternate-marketplace cover (%s)', url)
+        except Exception as e:
+            log.warn('incipit cover: alternate cover failed (%s: %s)', url, e)
+    return added
 
 
 def should_prune_local_twin(upload_holds_selection, local_present):
@@ -3878,6 +3941,11 @@ class AudiobookAlbum(Agent.Album):
                         sort_order=0 if (deferred_portrait_local or poisoned_local)
                         else primary_order
                     )
+            # Extra marketplace art, offered before the membership lists are
+            # computed so both of them can carry the keys. Never the default
+            # (sort_order well below), and never the selection.
+            alternate_keys = offer_alternate_covers(helper)
+
             # SELECT the online cover only when there is no local cover to be the
             # default. With a local cover set it is merely OFFERED, not selected;
             # validate_keys only touches our metadata:// posters, so a user's
@@ -3907,7 +3975,8 @@ class AudiobookAlbum(Agent.Album):
                     online_byte_exact=online_byte_exact,
                     online_prune_ok=online_prune_ok,
                     mirror_skipped=mirror_skipped,
-                    mirror_byte_exact=mirror_byte_exact)
+                    mirror_byte_exact=mirror_byte_exact,
+                    alternate_keys=alternate_keys)
                 if helper.thumb not in keep:
                     log.warn(
                         'incipit cover: pruning our online cover entry '
@@ -4016,7 +4085,8 @@ class AudiobookAlbum(Agent.Album):
                         online_prune_ok=online_prune_ok,
                         mirror_skipped=mirror_skipped,
                         mirror_byte_exact=mirror_byte_exact,
-                        local_uploaded=True)
+                        local_uploaded=True,
+                        alternate_keys=alternate_keys)
                     try:
                         helper.metadata.posters.validate_keys(keep)
                         log.warn('incipit cover: pruned our local-cover container '

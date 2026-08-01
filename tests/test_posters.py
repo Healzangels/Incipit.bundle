@@ -4209,6 +4209,110 @@ class UnrenderableFormatsAreNotUploaded(unittest.TestCase):
             self.assertEqual(len(self.posts), 1, '%s must POST once' % name)
 
 
+class AlternateRegionCoversSurviveThePrune(unittest.TestCase):
+    """
+        The API's `imageAlternates` must be OFFERED and must not be pruned.
+
+        Audible commissions different art per marketplace for one recording. The
+        api measured 7 of 15 both-region ASINs carrying a genuinely different
+        asset and now returns them as `imageAlternates` (narrator-gated, because
+        one ASIN can front DIFFERENT recordings in different marketplaces).
+
+        Offering them is only half the job: `validate_keys` prunes every entry
+        of OUR namespace that is not in the membership list, so an alternate
+        that is offered but omitted from cover_keep_list is added and then
+        immediately withheld -- a tile that never appears and leaves no trace.
+        That is exactly the failure the log-a-prune work exists for.
+    """
+
+    THUMB = 'https://m.media-amazon.com/images/I/51AAA.jpg'
+    LOCAL = 'incipit-local-cover'
+    ALT = 'https://m.media-amazon.com/images/I/99ZZZ.jpg'
+
+    def keep(self, **over):
+        args = dict(
+            thumb_key=self.THUMB, local_key=self.LOCAL,
+            thumb_present=True, local_present=True,
+            online_redundant=False, online_byte_exact=False,
+            online_prune_ok=True, mirror_skipped=False,
+            mirror_byte_exact=False,
+        )
+        args.update(over)
+        return AG.cover_keep_list(**args)
+
+    def test_an_alternate_is_kept(self):
+        self.assertIn(self.ALT, self.keep(alternate_keys=[self.ALT]))
+
+    def test_alternates_do_not_displace_the_existing_entries(self):
+        got = self.keep(alternate_keys=[self.ALT])
+        self.assertEqual(got[:2], [self.THUMB, self.LOCAL],
+                         'the default and the local cover keep their order')
+
+    def test_no_alternates_leaves_the_list_untouched(self):
+        # The whole feature must be inert when the api sends nothing.
+        self.assertEqual(self.keep(alternate_keys=[]), self.keep())
+        self.assertEqual(self.keep(alternate_keys=None), self.keep())
+
+    def test_an_alternate_that_duplicates_an_existing_key_is_not_listed_twice(self):
+        got = self.keep(alternate_keys=[self.THUMB])
+        self.assertEqual(got.count(self.THUMB), 1)
+
+    def test_alternates_survive_even_when_the_online_entry_is_pruned(self):
+        # The online copy being a byte-identical twin says nothing about a
+        # DIFFERENT marketplace's art.
+        got = self.keep(online_redundant=True, online_byte_exact=True,
+                        alternate_keys=[self.ALT])
+        self.assertIn(self.ALT, got)
+        self.assertNotIn(self.THUMB, got)
+
+
+class AlternateCoverOfferIsWiredIn(unittest.TestCase):
+    """
+        The alternate-cover offer must actually RUN, and both membership lists
+        must carry its keys.
+
+        cover_keep_list's unit tests pass whether or not anything calls it with
+        alternates, and offer_alternate_covers' own behaviour says nothing about
+        whether compile_metadata invokes it. That is the unwired-stage shape
+        this repo keeps paying for -- the 2026-07-28 sweep proved inline guards
+        here go unenforced, and the api side of this same feature was verified
+        the same day to survive deleting its call site with 1839 tests green.
+
+        There are TWO cover_keep_list calls in the album path (the ordinary one
+        and the local-uploaded one). An alternate omitted from EITHER is offered
+        and then pruned by validate_keys in the same pass -- invisible, and
+        indistinguishable from the feature not working.
+    """
+
+    SRC = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        '..', 'Contents', 'Code', '__init__.py')
+
+    def _source(self):
+        with open(self.SRC) as handle:
+            return handle.read()
+
+    def test_the_offer_is_invoked(self):
+        self.assertIn('alternate_keys = offer_alternate_covers(helper)',
+                      self._source())
+
+    def test_every_keep_list_call_carries_the_alternates(self):
+        src = self._source()
+        calls = src.count('keep = cover_keep_list(')
+        carried = src.count('alternate_keys=alternate_keys)')
+        self.assertEqual(
+            carried, calls,
+            'all %d cover_keep_list calls must pass alternate_keys; %d do'
+            % (calls, carried))
+
+    def test_the_offer_runs_before_the_membership_lists(self):
+        src = self._source()
+        offered = src.index('alternate_keys = offer_alternate_covers(helper)')
+        first_keep = src.index('keep = cover_keep_list(')
+        self.assertLess(offered, first_keep,
+                        'alternates must be offered before keep is computed')
+
+
 if __name__ == '__main__':
     unittest.main()
 
