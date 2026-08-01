@@ -100,6 +100,7 @@ class SelectionOwnership(unittest.TestCase):
 class WorkMemo(unittest.TestCase):
     def setUp(self):
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def test_the_same_token_is_suppressed_within_the_ttl(self):
         self.assertTrue(AG.should_run('tag', 'guid', 'token', 600))
@@ -162,10 +163,12 @@ class DeliberateDeselection(unittest.TestCase):
 
         AG.HTTP.Request = recorder
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.HTTP.Request = self.real
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _state(self, keys, selected='upload://posters/something-else'):
         # (rk, selected_key, keys, parent_thumb)
@@ -226,10 +229,12 @@ class PrefAssertedReselect(unittest.TestCase):
 
         AG.HTTP.Request = recorder
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.HTTP.Request = self.real
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _state(self, keys, selected='upload://posters/something-else'):
         return ('101', selected, keys, None)
@@ -302,6 +307,7 @@ class PortraitDeferralMirror(unittest.TestCase):
 
     def setUp(self):
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
         self.writes = []
         self.saved = (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
                       AG.fetch_url_bytes, AG.read_poster_state)
@@ -344,6 +350,7 @@ class PortraitDeferralMirror(unittest.TestCase):
         (AG.HTTP.Request, AG.Core.storage.load, AG.write_cover_sidecar,
          AG.fetch_url_bytes, AG.read_poster_state) = self.saved
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
         AG.Prefs.pop('cover_mirror_mode', None)
 
     def _helper(self):
@@ -517,6 +524,7 @@ class BestFitAuthorArtSelect(unittest.TestCase):
 
     def setUp(self):
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
         self.calls = []
         self.real = AG.converge_author_art
         AG.converge_author_art = lambda helper, target, other, tag, **kw: \
@@ -526,6 +534,7 @@ class BestFitAuthorArtSelect(unittest.TestCase):
     def tearDown(self):
         AG.converge_author_art = self.real
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _helper(self):
         class FakeHelper(object):
@@ -641,10 +650,12 @@ class SelectionAlreadyShowsThisImage(unittest.TestCase):
 
         AG.HTTP.Request = router
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.HTTP.Request = self.real
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     # A container key, shaped exactly like the live ones: the agent id plus
     # sha1 of the key string, NOT of the image.
@@ -742,11 +753,13 @@ class PrintJacketSelectionIsCorrected(unittest.TestCase):
         AG.HTTP.Request = router
         AG.read_poster_state = lambda guid, tag: ('101', self.selected, [], None)
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.HTTP.Request = self.real
         AG.read_poster_state = self.real_state
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _helper(self):
         class FakeHelper(object):
@@ -1008,11 +1021,13 @@ class PortraitFixCollapsesPerTrack(unittest.TestCase):
         AG.HTTP.Request = router
         AG.read_poster_state = state
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.HTTP.Request = self.real
         AG.read_poster_state = self.real_state
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _helper(self):
         class FakeHelper(object):
@@ -1159,6 +1174,7 @@ class CoverMirrorModes(unittest.TestCase):
 
     def setUp(self):
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
         self.writes = []
         self.reads = []
         self.existing = self.CURATED
@@ -1199,6 +1215,7 @@ class CoverMirrorModes(unittest.TestCase):
         # for (order-dependent greens are how that class of bug hides).
         AG.Prefs.pop('prefer_local_cover', None)
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _helper(self, guid='com.plexapp.agents.incipit://MODETEST_us'):
         class FakeMetadata(object):
@@ -1788,6 +1805,7 @@ class ConvergePrunesItsOwnDuplicate(unittest.TestCase):
 
     def setUp(self):
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
         self.saved = (AG.read_poster_state, AG.fetch_url_bytes,
                       AG.upload_and_select_poster)
         AG.read_poster_state = lambda guid, tag: (
@@ -1800,6 +1818,7 @@ class ConvergePrunesItsOwnDuplicate(unittest.TestCase):
         (AG.read_poster_state, AG.fetch_url_bytes,
          AG.upload_and_select_poster) = self.saved
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _helper(self, keys):
         outer = self
@@ -3179,6 +3198,7 @@ class LocalSelectIsNotPowerless(unittest.TestCase):
         AG.selected_poster_bytes = lambda rk, key, tag: (
             b'\xff\xd8\xff\xe0 a different poster entirely', True)
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.HTTP.Request = self.real_request
@@ -3186,9 +3206,72 @@ class LocalSelectIsNotPowerless(unittest.TestCase):
         AG.artist_poster_bytes = self.real_artist
         AG.selected_poster_bytes = self.real_selected
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _with_state(self, selected, keys):
         AG.read_poster_state = lambda guid, tag: ('101', selected, keys, None)
+
+    def test_a_sibling_track_replays_the_REAL_verdict_not_a_blanket_True(self):
+        """
+        THE MEMO MUST NOT INVERT A STAND-DOWN.
+
+        select_local_cover returns False when the operator's OWN upload holds
+        the selection, and the caller relies on that: it prunes our container
+        copy of cover.jpg only when the return says the upload really holds the
+        selection. The call site says so explicitly -- "a stand-down (the
+        operator's own pick is showing) reports False and the entry stays,
+        because it is then their only route back to local art".
+
+        But the per-pass memo stored only (token, timestamp), so the SECOND
+        call within the TTL returned a blanket True regardless of what the
+        first decided. On any book with 2+ tracks -- or any book at all if the
+        operator refreshes twice inside 90s -- the sibling pass therefore
+        reported "the upload holds the selection" when the truth was the
+        opposite, and the caller pruned the operator's cover.jpg tile out of
+        the picker while logging that it was doing the right thing.
+        """
+        sha, _padded, _ = AG.padded_variants(self.COVER)
+        # The operator's own upload holds the selection: a stand-down.
+        self._with_state(self.USER_SELECTION, [sha])
+
+        first = AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertFalse(first, 'a user upload must stand down')
+
+        # Sibling track, same pass, same bytes -- inside the 90s memo window.
+        second = AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertFalse(
+            second,
+            'the memo replayed True and the caller then pruned the operator\'s '
+            'own route back to their local art')
+
+    def test_an_UNKNOWN_verdict_defaults_to_not_pruning(self):
+        """
+        The verdict memo is capped and clears wholesale when it fills, while
+        recent_work_memo entries survive -- so on a large scan a sibling track
+        can find "already ran" with no recorded verdict. That default decides
+        whether the operator's container copy of cover.jpg gets pruned on no
+        evidence, and the two costs are not close: not pruning leaves a
+        duplicate tile, pruning wrongly destroys their route back to local art.
+        """
+        sha, _padded, _ = AG.padded_variants(self.COVER)
+        self._with_state(self.AGENT_SELECTION, [sha])
+        AG.select_local_cover(self.FakeHelper(), self.COVER)
+        # The work memo still says "done"; the verdict is gone.
+        AG.verdict_memo.clear()
+        self.assertFalse(
+            AG.select_local_cover(self.FakeHelper(), self.COVER),
+            'with no recorded verdict the prune must NOT be authorised')
+
+    def test_a_sibling_track_still_replays_a_genuine_TRUE(self):
+        # The fix must not simply return False always: a real convergence has
+        # to keep reporting True, or the duplicate-tile prune v1.3.168 exists
+        # for never fires on tracks 2..N.
+        sha, _padded, _ = AG.padded_variants(self.COVER)
+        self._with_state(self.AGENT_SELECTION, [sha])
+        first = AG.select_local_cover(self.FakeHelper(), self.COVER)
+        second = AG.select_local_cover(self.FakeHelper(), self.COVER)
+        self.assertEqual(second, first,
+                         'a sibling track must replay the SAME verdict')
 
     def test_an_agent_selection_is_overridden_even_when_ours_is_offered(self):
         # THE regression: cover.jpg sits in the container de-selected (Local
@@ -3288,6 +3371,7 @@ class TheUploadIsWhatSelects(unittest.TestCase):
         AG.selected_poster_bytes = lambda rk, key, tag: (
             b'\xff\xd8\xff\xe0 a different poster entirely', True)
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.HTTP.Request = self.real_request
@@ -3295,6 +3379,7 @@ class TheUploadIsWhatSelects(unittest.TestCase):
         AG.artist_poster_bytes = self.real_artist
         AG.selected_poster_bytes = self.real_selected
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _with_state(self, selected, keys):
         AG.read_poster_state = lambda guid, tag: ('101', selected, keys, None)
@@ -3424,6 +3509,7 @@ class SelectLocalCoverReportsWhetherItSelected(unittest.TestCase):
         AG.selected_poster_bytes = lambda rk, key, tag: (
             b'\xff\xd8\xff\xe0 a different poster entirely', True)
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.HTTP.Request = self.real_request
@@ -3431,6 +3517,7 @@ class SelectLocalCoverReportsWhetherItSelected(unittest.TestCase):
         AG.artist_poster_bytes = self.real_artist
         AG.selected_poster_bytes = self.real_selected
         AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
 
     def _with_state(self, selected, keys):
         AG.read_poster_state = lambda guid, tag: ('101', selected, keys, None)

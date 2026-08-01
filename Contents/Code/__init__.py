@@ -166,6 +166,38 @@ def mark_done(tag, guid, token):
     recent_work_memo[(tag, guid)] = (token, time())
 
 
+# The per-pass memo above answers "did this already run", which is all most
+# callers need. It is NOT enough for work whose RETURN VALUE gates a
+# destructive action: select_local_cover reports whether the upload really
+# holds the selection, and its caller prunes the operator's container copy of
+# cover.jpg on the strength of that. Replaying a blanket True on sibling tracks
+# inverted a stand-down and pruned the operator's only route back to their own
+# art. So the verdict is remembered alongside, and replayed honestly.
+verdict_memo = {}
+
+
+def remember_verdict(tag, guid, token, value):
+    """Record what (tag, guid, token) actually DECIDED, for sibling tracks."""
+    if len(verdict_memo) > 512:
+        verdict_memo.clear()
+    verdict_memo[(tag, guid, token)] = (bool(value), time())
+
+
+def recall_verdict(tag, guid, token, ttl):
+    """
+        The remembered verdict, or None when we do not have one.
+
+        None is deliberately distinct from False so the caller chooses its own
+        safe default rather than inheriting one. For the prune that default is
+        False: not pruning leaves a duplicate tile, pruning wrongly destroys the
+        operator's route back to their local art, and those costs are not close.
+    """
+    entry = verdict_memo.get((tag, guid, token))
+    if entry and (time() - entry[1]) < ttl:
+        return entry[0]
+    return None
+
+
 def local_cover_bytes(helper):
     """
         Raw bytes of the book folder's cover.jpg, or None.
@@ -2441,9 +2473,18 @@ def select_local_cover(helper, cover_bytes=None):
         log.error('%s: sha1 failed (%s)', tag, e)
         return False
     if not should_run(tag, guid, sha, 90):
-        # A sibling track already converged this album THIS pass -- the twin
-        # prune ran with it, so report True rather than resurrecting the entry.
-        return True
+        # A sibling track already handled this album THIS pass. Replay what it
+        # actually DECIDED -- not a blanket True. The caller prunes our
+        # container copy of cover.jpg on the strength of this value, and three
+        # of the paths below return False precisely to keep that copy offered
+        # (a user upload holding the selection is the operator's only route
+        # back to their local art). Reporting True for those inverted the
+        # stand-down on every track after the first.
+        #
+        # Unknown verdict -> False: not pruning leaves a duplicate tile,
+        # pruning wrongly destroys curated art.
+        replayed = recall_verdict(tag, guid, sha, 90)
+        return replayed if replayed is not None else False
     state = read_poster_state(guid, tag)
     if state is None:
         return False
@@ -2451,6 +2492,7 @@ def select_local_cover(helper, cover_bytes=None):
     if not selection_is_agent_owned(selected_key, [sha, sha_padded]):
         log.info('%s: selection is a user upload -- leaving it', tag)
         mark_done(tag, guid, sha)
+        remember_verdict(tag, guid, sha, False)
         # FALSE keeps our container copy OFFERED: it is the operator's only
         # route back to their local art while their own pick is showing.
         return False
@@ -2501,6 +2543,7 @@ def select_local_cover(helper, cover_bytes=None):
             # Memoised on the cover's own sha, so a repaired cover.jpg re-runs
             # immediately rather than waiting out the TTL.
             mark_done(tag, guid, sha)
+            remember_verdict(tag, guid, sha, False)
             log.warn('%s: cover.jpg IS the artist photo (byte-identical) -- refusing '
                      'to select it, so the book is not re-poisoned; the current '
                      'selection stands and will mirror to disk', tag)
@@ -2522,8 +2565,10 @@ def select_local_cover(helper, cover_bytes=None):
     # "correct and powerless" shape the portrait deferral hit at v1.3.121.
     # RETURNED, not discarded: the caller prunes our twin container entry only
     # when this reports that the upload really does hold the selection.
-    return upload_and_select_poster(guid, cover_bytes, tag, token=sha,
-                                    state=state, pref_asserted=True)
+    outcome = upload_and_select_poster(guid, cover_bytes, tag, token=sha,
+                                       state=state, pref_asserted=True)
+    remember_verdict(tag, guid, sha, outcome)
+    return outcome
 
 
 class AudiobookArtist(Agent.Artist):
