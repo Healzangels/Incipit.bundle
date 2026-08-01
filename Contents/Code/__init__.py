@@ -2009,6 +2009,27 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
         content_type = 'image/webp'
     elif image_bytes[:2] == b'BM':
         content_type = 'image/bmp'
+    # ...and REFUSE the two Plex stores but will not DRAW. Measured live
+    # 2026-08-01: Steven Erikson's artist tile was blank because the selected
+    # poster was a 24,314-byte WebP -- exactly 20 bytes over a 24,294-byte
+    # twin, so we had uploaded a WebP and then PADDED-re-selected it -- while a
+    # 1022x1280 JPEG sat unselected in our own container.
+    #
+    # Refusing is the SAFE direction and standing down is not a loss: whatever
+    # JPEG/PNG is already offered keeps the selection. Posting is the
+    # unrecoverable direction, because re-selecting a poster Plex already holds
+    # as a de-selected upload needs PUT, which this sandbox downgrades to a
+    # no-op -- so one bad upload wedges the item until a HUMAN picks in the UI.
+    # Confirmed live: the operator refreshed Erikson and nothing moved.
+    #
+    # Sniffing these two already existed here, purely to label the
+    # Content-Type; that is what made "we knowingly post a format that renders
+    # blank" true rather than accidental.
+    if content_type not in ('image/jpeg', 'image/png'):
+        log.warn('%s: refusing to upload %s -- Plex stores it but will not '
+                 'render it, and we could not re-select past it (rk %s)',
+                 tag, content_type, rk)
+        return False
     try:
         up = PMS + '/library/metadata/' + rk + '/posters'
         HTTP.Request(up, data=post_bytes,

@@ -4133,5 +4133,83 @@ class TestEveryPruneIsVisible(unittest.TestCase):
 # test_sort_titles 3 of 18. Discovery was unaffected, so the suite stayed
 # honest while a direct run (how a single fix gets checked) silently skipped
 # the new tests. tests/test_deploy_gate.py pins the position for every file.
+class UnrenderableFormatsAreNotUploaded(unittest.TestCase):
+    """
+    Plex STORES a WebP poster and its web client will not DRAW it.
+
+    Measured live 2026-08-01 on the .99 rebuild: Steven Erikson's artist tile
+    was blank, and the selected poster was `RIFF....WEBP` -- 24,314 bytes,
+    exactly 20 over a 24,294-byte twin, so the agent had uploaded a WebP and
+    then PADDED-re-selected it. A perfectly good JPEG (1022x1280, 1.16 MB) sat
+    unselected in our own container the whole time.
+
+    Worse, it is unrecoverable from inside the agent: re-selecting a poster
+    Plex already holds as a de-selected upload needs PUT, and the plugin
+    sandbox downgrades PUT to a no-op. So one bad upload wedges the artist
+    until a human picks in the UI -- a refresh cannot undo it (confirmed live;
+    the operator refreshed and nothing moved).
+
+    The upload path already SNIFFED webp/bmp in order to label the
+    Content-Type, which meant it knowingly posted a format that renders blank.
+    Refusing is strictly safer than posting: standing down leaves whatever
+    JPEG/PNG is already offered as the selection.
+    """
+
+    def setUp(self):
+        self.posts = []
+        self.real = AG.HTTP.Request
+
+        def recorder(url, **kwargs):
+            # Record UPLOADS only. The function also GETs the currently
+            # selected poster to compare bytes, so counting every request
+            # made "must POST once" fail against correct code.
+            if kwargs.get('data') is not None:
+                self.posts.append((url, kwargs))
+
+            class FakeResponse(object):
+                content = 'ok'
+
+            return FakeResponse()
+
+        AG.HTTP.Request = recorder
+        AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
+
+    def tearDown(self):
+        AG.HTTP.Request = self.real
+        AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
+
+    def _state(self, keys=(), selected='upload://posters/something-else'):
+        return ('101', selected, list(keys), None)
+
+    def test_a_webp_is_refused(self):
+        webp = b'RIFF\xde^\x00\x00WEBP' + b'x' * 400
+        result = AG.upload_and_select_poster(
+            'guid-webp', webp, 'test', state=self._state())
+        self.assertFalse(result)
+        self.assertEqual(self.posts, [], 'a WebP must never reach a POST')
+
+    def test_a_bmp_is_refused(self):
+        bmp = b'BM' + b'x' * 400
+        result = AG.upload_and_select_poster(
+            'guid-bmp', bmp, 'test', state=self._state())
+        self.assertFalse(result)
+        self.assertEqual(self.posts, [], 'a BMP must never reach a POST')
+
+    def test_jpeg_and_png_still_upload(self):
+        # The guard must be narrow: the formats Plex renders are untouched.
+        for name, blob in (('jpeg', b'\xff\xd8\xff\xe0 jpeg body'),
+                           ('png', b'\x89PNG\r\n\x1a\n png body')):
+            self.posts = []
+            AG.recent_work_memo.clear()
+            result = AG.upload_and_select_poster(
+                'guid-' + name, blob, 'test', state=self._state())
+            self.assertTrue(result, '%s must still upload' % name)
+            self.assertEqual(len(self.posts), 1, '%s must POST once' % name)
+
+
 if __name__ == '__main__':
     unittest.main()
+
+
