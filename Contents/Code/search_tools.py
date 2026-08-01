@@ -1846,6 +1846,175 @@ def strip_courtesy_title(name):
     return name
 
 
+# ---------------------------------------------------------------------------
+# NFO sidecars
+#
+# The ripper's own description of the file, produced by the SOURCE rather than
+# by the importer. Where it disagrees with a Chaptarr-written metadata.json the
+# nfo is the better witness: the json records what the importer MATCHED, and a
+# sidecar can be self-consistently wrong for a whole edition in a way no field
+# cross-check catches.
+#
+# Layout, measured across 259 real files (186 use it): three "Header\n====="
+# sections -- General Information, Media Information, Book Description -- with
+# aligned "Key:   value" pairs. Only the FIRST section describes the book;
+# Media Information is encoder trivia and the description is prose full of
+# colons, so both are skipped rather than parsed.
+# ---------------------------------------------------------------------------
+
+# A genre that says nothing. The field is present in 173 files and is often
+# literally the medium.
+NFO_JUNK_GENRES = ('audiobook', 'audiobooks', 'unknown', 'general')
+
+# "Stephen Fry (introductions)" is a CREDIT on the work, not a co-author.
+# Sending it as one skews the author score against the real match.
+NFO_ROLE_NOTE = re.compile(r'\s*\([^)]*\)\s*$')
+
+NFO_SECTION = re.compile(r'^([A-Za-z][A-Za-z ]{2,40})\s*\n=+\s*$', re.M)
+NFO_FIELD = re.compile(r'^\s{0,4}([A-Za-z][A-Za-z0-9 ().\-/]{1,30}):\s{2,}(.+?)\s*$')
+NFO_MARKETPLACE = re.compile(r'^Audible\.((?:co\.)?[a-z.]+)\s+Release$', re.I)
+
+
+def nfo_duration_ms(value):
+    """Milliseconds from "9 hours, 53 minutes, 19 seconds", or None."""
+    if not value:
+        return None
+    hours = re.search(r'(\d+)\s*hour', value, re.I)
+    minutes = re.search(r'(\d+)\s*min', value, re.I)
+    seconds = re.search(r'(\d+)\s*sec', value, re.I)
+    if not (hours or minutes):
+        return None
+    total = 0
+    if hours:
+        total += int(hours.group(1)) * 3600
+    if minutes:
+        total += int(minutes.group(1)) * 60
+    if seconds:
+        total += int(seconds.group(1))
+    return total * 1000 if total else None
+
+
+def nfo_people(value):
+    """
+        Split a credited-name field into names, DROPPING any entry that carries
+        a parenthetical role note.
+
+        "Arthur Conan Doyle, Stephen Fry (introductions)" yields Doyle alone.
+        Fry is a real contributor but not an author of the work, and sending
+        him as one skews the author score against the correct match -- the
+        exact failure the courtesy-title fix (v1.3.175) addressed from the
+        other direction. Stripping only the parentheses would keep the name and
+        cause precisely that.
+    """
+    out = []
+    for part in (value or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if NFO_ROLE_NOTE.search(part):
+            continue
+        if part.lower() in ('and',):
+            continue
+        out.append(part)
+    return out
+
+
+# A trailing part number on a multi-file rip: "... Book 13 - 001.mp3".
+NFO_PART_SUFFIX = re.compile(r'\s*[-_]\s*\d{1,3}\s*$')
+
+
+def nfo_candidate_paths(media_path):
+    """
+        Paths where this book's .nfo plausibly lives, best guess first.
+
+        DERIVED, not listed. Core.storage exposes load/save; reaching for a
+        directory-listing API this plugin has never used means an unavailable
+        one fails at call time, and the sandbox is unforgiving. Measured across
+        193 real folders holding both an nfo and audio: 165 (85%) name the nfo
+        exactly like the audio file, 26 are multi-file rips whose audio is the
+        nfo name plus a part number, and 2 use the folder name.
+
+        Kept short deliberately -- every miss is a real SMB round-trip, and this
+        runs per search.
+    """
+    if not media_path or '/' not in media_path:
+        return []
+    folder, _, filename = media_path.rpartition('/')
+    stem = filename.rsplit('.', 1)[0] if '.' in filename else filename
+    names = [stem]
+    trimmed = NFO_PART_SUFFIX.sub('', stem)
+    if trimmed and trimmed != stem:
+        names.append(trimmed)
+    leaf = folder.rsplit('/', 1)[-1]
+    if leaf and leaf not in names:
+        names.append(leaf)
+    out = []
+    for name in names:
+        candidate = folder + '/' + name + '.nfo'
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def parse_nfo(text):
+    """
+        A ripper .nfo as a dict using the SAME keys as the metadata.json
+        sidecar, so every existing consumer reads it unchanged, or None when
+        the text is not one of these files.
+
+        Deliberately conservative: unknown keys are dropped rather than passed
+        through, because this feeds matching and a stray field is a silent
+        skew, not a visible error.
+    """
+    if not text or 'Title:' not in text:
+        return None
+    # Only the first section describes the BOOK.
+    body = text
+    marks = [m.start() for m in NFO_SECTION.finditer(text)]
+    if len(marks) > 1:
+        body = text[:marks[1]]
+    raw = {}
+    for line in body.split('\n'):
+        found = NFO_FIELD.match(line)
+        if found:
+            raw[found.group(1).strip()] = found.group(2).strip()
+    if 'Title' not in raw:
+        return None
+
+    out = {}
+    out['title'] = raw['Title']
+    authors = nfo_people(raw.get('Author'))
+    if authors:
+        out['authors'] = authors
+    narrators = nfo_people(raw.get('Read By'))
+    if narrators:
+        out['narrators'] = narrators
+    if raw.get('Publisher'):
+        out['publisher'] = raw['Publisher']
+    duration = nfo_duration_ms(raw.get('Duration'))
+    if duration:
+        out['duration'] = duration
+    genre = (raw.get('Genre') or '').strip()
+    if genre and genre.lower() not in NFO_JUNK_GENRES:
+        out['genre'] = genre
+    unabridged = (raw.get('Unabridged') or '').strip().lower()
+    if unabridged in ('yes', 'true'):
+        out['abridged'] = False
+    elif unabridged in ('no', 'false'):
+        out['abridged'] = True
+    # The marketplace line names the STORE the rip came from, which is a far
+    # better region signal than guessing from a bracketed path segment.
+    for key in raw:
+        market = NFO_MARKETPLACE.match(key.strip())
+        if market:
+            tld = market.group(1).lower().rstrip('.')
+            region = 'us' if tld == 'com' else tld.split('.')[-1]
+            if region in available_regions:
+                out['region'] = region
+            break
+    return out
+
+
 class ScoreTool:
     # Starting value for score before deductions are taken.
     INITIAL_SCORE = 100
