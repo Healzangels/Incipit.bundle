@@ -3939,6 +3939,17 @@ class AudiobookAlbum(Agent.Album):
         # (validate_keys above) while the online cover rides at a lower priority
         # (primary_order = 1 when preferring local), so the operator can switch to
         # it and a later Refresh mirrors that pick back to cover.jpg.
+        # Bound BEFORE the branch. `alternate_keys` is assigned inside the
+        # `if helper.thumb:` arm below, but it is READ further down by the
+        # local-cover prune, which runs unconditionally after the whole
+        # if/elif chain. With no online thumb -- a book whose art is a local
+        # cover.jpg only -- the assignment never ran and that read raised
+        # UnboundLocalError, outside the try that follows it, aborting update()
+        # for exactly the books the local-cover path exists to serve. The same
+        # call defends against a falsy helper.thumb one argument earlier
+        # (`thumb_present=bool(helper.thumb)`), which makes this a slip rather
+        # than an assumption.
+        alternate_keys = []
         if helper.thumb:
             if remembered is not None:
                 # A sibling track already fetched, judged, and offered (or
