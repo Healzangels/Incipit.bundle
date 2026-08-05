@@ -4407,5 +4407,26 @@ def make_request(url, cache_time=None):
             # No point sleeping after the final attempt.
             if attempt < num_retries - 1:
                 sleep(wait)
-                sleep_time *= 2
+                # NOT `sleep_time *= 2`. RestrictedPython rejects that operator
+                # -- "Operator '*=' is not supported" -- and this line sits
+                # INSIDE the except handler, so the error it raises is not
+                # caught by that same handler. It propagated straight out of
+                # make_request, turning every retryable failure into an instant
+                # hard one and reaching the caller as
+                # "book fetch failed ... keeping existing metadata: Operator
+                # '*=' is not supported", which names the wrong culprit.
+                #
+                # It was unreachable until v1.3.186. Before that HTTP.Request's
+                # laziness meant errors surfaced at the CALLER's str(), so the
+                # ladder never ran at all ("Failed http request attempt"
+                # appeared ZERO times across four log files). Forcing .content
+                # inside the try made the ladder live and woke this.
+                # Measured on the 2026-08-05 rebuild: the ladder fired 56 times
+                # and 13 of them -- every invocation that reached this line --
+                # died right here.
+                #
+                # `+=` is fine (25 uses across search_tools/__init__, all in hot
+                # paths); it is specifically the other operators the sandbox
+                # refuses. tests/test_sandbox_operators.py pins this.
+                sleep_time = sleep_time * 2
     return response
