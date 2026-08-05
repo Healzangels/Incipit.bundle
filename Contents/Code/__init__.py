@@ -4275,8 +4275,36 @@ def make_request(url, cache_time=None):
             response = HTTP.Request(
                 url, headers=headers, cacheTime=cache_time,
                 timeout=90, sleep=fetch_sleep)
+            # FORCE THE FETCH INSIDE THE LADDER.
+            #
+            # HTTP.Request returns Plex's LAZY wrapper -- the network call does
+            # not happen until .content/str(). This documents it twice already
+            # (fetch_url_bytes' docstring, and the 2026-07-25 measurement where
+            # the un-fetched wrapper reached image_dimensions and raised
+            # 'HTTPRequest object has no attribute __getitem__'). So an HTTP
+            # status error was raised at the CALLER's str(), outside this try,
+            # and every retry and every 4xx/5xx decision below was dead code for
+            # exactly the transients they were written for.
+            #
+            # Proven from production, not inferred: across four agent log files
+            # 'Failed http request attempt' appears ZERO times while 55 HTTP
+            # errors surfaced at call sites -- 'incipit book fetch failed for
+            # <url> ... HTTP Error 404'. The ladder had never once fired.
+            #
+            # Touching .content here costs nothing: all eight call sites already
+            # consume it (six via str(), two via .content), and the wrapper
+            # memoises, so the caller's later read is free.
+            if response is not None:
+                response.content
             break
         except Exception as err:
+            # DISCARD the wrapper the failed attempt left behind. Under the lazy
+            # model HTTP.Request SUCCEEDS and only .content raises, so `response`
+            # is already bound to a poisoned wrapper -- returning it after the
+            # ladder gives up hands the caller an object that throws on read
+            # instead of the None every call site checks for. (The eager model
+            # never had this: the constructor raised, so response stayed None.)
+            response = None
             log.error(
                 "Failed http request attempt #%d: %s" % (attempt + 1, url))
             log.error(err)

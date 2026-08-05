@@ -99,6 +99,79 @@ class TestMakeRequest4xx(unittest.TestCase):
             raise err
         return request
 
+    def lazy_raiser(self, code):
+        """A fake that behaves like Plex's REAL HTTP.Request: LAZY.
+
+        The class above raises at construction, which is not what the framework
+        does. HTTP.Request returns a wrapper and the network happens at
+        .content/str(). This repo documents that twice -- fetch_url_bytes'
+        docstring, and the 2026-07-25 measurement where an un-fetched wrapper
+        reached image_dimensions and raised 'HTTPRequest object has no
+        attribute __getitem__'.
+
+        The difference was not academic. With the error surfacing only at the
+        CALLER's str(), it landed outside make_request's try, so the retry
+        ladder and every 4xx/5xx decision below it were dead code. Proven from
+        production: across four agent log files 'Failed http request attempt'
+        appears ZERO times while 55 HTTP errors surfaced at call sites. The
+        ladder had never once fired -- and these tests all passed throughout,
+        because every one of them raises eagerly.
+        """
+        calls = self.calls
+
+        class FakeHttpError(Exception):
+            pass
+
+        class LazyResponse(object):
+            @property
+            def content(self):
+                err = FakeHttpError('HTTP %s' % code)
+                err.code = code
+                raise err
+
+            def __str__(self):
+                return str(self.content)
+
+        def request(url, **kwargs):
+            calls.append(url)
+            return LazyResponse()
+        return request
+
+    def test_a_LAZY_transient_still_gets_the_full_ladder(self):
+        # Audible's one-off bot-check 403 -- the exact transient the ladder was
+        # written for, and the one it was never reaching.
+        AG.HTTP.Request = self.lazy_raiser(403)
+        self.assertIsNone(AG.make_request('http://images.example/blip.jpg'))
+        self.assertEqual(len(self.calls), 4)
+
+    def test_a_LAZY_permanent_code_still_aborts_after_one(self):
+        # The other direction: forcing the fetch must not resurrect the ladder
+        # for codes that are permanent, or a rotted image URL costs seconds per
+        # album again.
+        AG.HTTP.Request = self.lazy_raiser(404)
+        self.assertIsNone(AG.make_request('http://images.example/dead.jpg'))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_LAZY_success_is_returned_with_its_content_intact(self):
+        # Forcing .content must not consume or break the response the callers
+        # then read -- all eight call sites do str() or .content on it.
+        calls = self.calls
+
+        class OkResponse(object):
+            content = '{"ok":true}'
+
+            def __str__(self):
+                return self.content
+
+        def request(url, **kwargs):
+            calls.append(url)
+            return OkResponse()
+
+        AG.HTTP.Request = request
+        out = AG.make_request('http://api.test/x')
+        self.assertEqual(str(out), '{"ok":true}')
+        self.assertEqual(len(self.calls), 1)
+
     def test_a_400_stops_after_one_attempt(self):
         AG.HTTP.Request = self.raiser(400)
         self.assertIsNone(AG.make_request('http://api.test/x'))
