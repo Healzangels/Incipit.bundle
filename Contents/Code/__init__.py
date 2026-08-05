@@ -4224,6 +4224,40 @@ def is_api_host(url):
     return bool(base and url.startswith(base.rstrip('/')))
 
 
+# Longest we will honour from a Retry-After. The limiter's window is a minute,
+# so a full wait is the useful case; anything beyond that is a server asking for
+# a backoff longer than a scan can absorb, and the ladder's own timing is a
+# better answer than stalling Plex's update window indefinitely.
+MAX_RETRY_AFTER = 60
+
+
+def retry_after_seconds(err):
+    """
+        Seconds a 429 asked us to wait, or None when it did not say.
+
+        Only the delta-seconds form is read. @fastify/rate-limit (what our own
+        API runs) sends an integer, and an HTTP-date would need timezone-aware
+        parsing that buys nothing here -- returning None just falls back to the
+        ladder's own backoff, which is the safe direction.
+
+        getattr is BLOCKED by the RestrictedPython sandbox, so every access is a
+        plain attribute read inside try/except.
+    """
+    try:
+        raw = err.headers.get('Retry-After')
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        secs = int(str(raw).strip())
+    except Exception:
+        return None
+    if secs < 0:
+        return None
+    return secs
+
+
 def incipit_headers(url):
     """
         Attaches the user's own Hardcover token, but ONLY on requests to the
@@ -4346,8 +4380,32 @@ def make_request(url, cache_time=None):
             )
             if permanent or (answered_4xx and is_api_host(url)):
                 break
+            # A 429 TELLS US how long to wait; the ladder's 1/2/4s cannot
+            # outlast a per-minute window, so obeying it is the difference
+            # between succeeding and silently losing the record.
+            #
+            # Measured 2026-08-05 on a from-scratch rebuild of 1,591 albums:
+            # Plex re-matches an album once per track, the scan sustained ~90
+            # albums/min against a 100/min bucket, and this ladder spent all
+            # four attempts inside ~7s and gave up. update() then kept whatever
+            # the file tags said, so 34 albums ended up titled
+            # '"The Way of Kings" by B.Sanderson w/ K.Reading' and three more
+            # went unmatched -- damage that no later pass repairs on its own,
+            # because Plex does not re-run update() for an album it considers
+            # done.
+            #
+            # Waiting the stated time self-throttles the scan to the rate the
+            # server will actually serve. Slower, and correct. The API-side
+            # exemption for direct container-to-host calls should mean this
+            # never fires against our own API again; it stays because a 429
+            # from anywhere deserves the same treatment.
+            wait = sleep_time
+            if err_code == 429:
+                stated = retry_after_seconds(err)
+                if stated is not None:
+                    wait = min(stated, MAX_RETRY_AFTER)
             # No point sleeping after the final attempt.
             if attempt < num_retries - 1:
-                sleep(sleep_time)
+                sleep(wait)
                 sleep_time *= 2
     return response
