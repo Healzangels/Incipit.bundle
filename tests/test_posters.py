@@ -253,11 +253,14 @@ class PrefAssertedReselect(unittest.TestCase):
                          'the re-select must be the padded copy, not a no-op re-POST')
 
     def test_a_pref_reassert_out_of_levers_stands_down(self):
-        # Both variants already exist de-selected: the one-level pad budget is
-        # spent, and minting deeper pads would grow without bound.
-        sha, sha_padded, _bytes = AG.padded_variants(ARTIST)
+        # EVERY generation already exists de-selected: the pad budget is
+        # spent, and minting deeper pads would grow without bound. (Since
+        # v1.3.190 plain+v1 burned is no longer terminal -- that case mints
+        # v2, see PadGenerations -- so this pin burns the whole family.)
+        family = AG.pad_family_shas(ARTIST)
         result = AG.upload_and_select_poster(
-            'guid-q', ARTIST, 'test', state=self._state([sha, sha_padded]),
+            'guid-q', ARTIST, 'test',
+            state=self._state([s for s, _unused in family]),
             pref_asserted=True)
         self.assertFalse(result)
         self.assertEqual(self.posts, [])
@@ -3621,10 +3624,11 @@ class LocalSelectIsNotPowerless(unittest.TestCase):
         sha, _padded, _ = AG.padded_variants(self.COVER)
         self._with_state(self.AGENT_SELECTION, [sha])
         AG.select_local_cover(self.FakeHelper(), self.COVER)
-        self.assertEqual(len(self.posts), 1,
+        uploads = [p for p in self.posts if p[1].get('data') is not None]
+        self.assertEqual(len(uploads), 1,
                          'an agent-owned selection must be overridden, not stood down on')
-        self.assertEqual(self.posts[0][1]['data'], self.COVER + PAD,
-                         'the re-select needs NEW content, so it is the padded copy')
+        self.assertEqual(uploads[0][1]['data'], self.COVER + PAD,
+                         'the re-select needs NEW content: the first unburned pad generation')
 
     def test_a_user_upload_is_still_never_touched(self):
         # The Will Wight protection, unchanged: the operator picked their own
@@ -3741,8 +3745,40 @@ class TheUploadIsWhatSelects(unittest.TestCase):
         sha, _padded, _ = AG.padded_variants(self.COVER)
         self._with_state(self.AGENT_SELECTION, [sha])
         AG.select_local_cover(self.FakeHelper(), self.COVER)
-        self.assertEqual(len(self.posts), 1,
+        # Data-carrying requests only: the would-act path also pays ONE cheap
+        # localhost read for the human-lock rule (v1.3.190) before overriding
+        # a persisted selection; the pin guards the UPLOAD count.
+        uploads = [p for p in self.posts if p[1].get('data') is not None]
+        self.assertEqual(len(uploads), 1,
                          'a persisted selection still needs the upload lever')
+
+    def test_the_recovery_gate_is_wired_without_force(self):
+        # The caller-level gate is what the rebuild exposed: select_local_cover
+        # worked, but the album flow only CALLED it under helper.force, so
+        # scheduled refreshes never recovered a lost birth. The flow is too
+        # large to drive here, so pin the wiring at source (house precedent:
+        # test_the_offer_path_actually_applies_it).
+        import os
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'Contents', 'Code', '__init__.py')
+        with open(path) as handle:
+            body = handle.read()
+        self.assertIn('helper.force or local_cover_recovery_needed(helper)', body)
+
+    def test_a_human_locked_pick_stops_the_override(self):
+        # The would-act path must consult the thumb lock: a human who clicked
+        # the agent's own online art keeps it, exactly like author art.
+        saved = AG.thumb_field_locked
+        AG.thumb_field_locked = lambda rk, tag: True
+        try:
+            sha, _padded, _ = AG.padded_variants(self.COVER)
+            self._with_state(self.AGENT_SELECTION, [sha])
+            out = AG.select_local_cover(self.FakeHelper(), self.COVER)
+            self.assertFalse(out)
+            uploads = [p for p in self.posts if p[1].get('data') is not None]
+            self.assertEqual(uploads, [])
+        finally:
+            AG.thumb_field_locked = saved
 
     def test_no_container_offer_argument_exists(self):
         # Guard against re-introducing the v1.3.166 shape. Any future dedupe
@@ -4378,6 +4414,145 @@ class AlternateCoversAreJudgedByTheirPixels(unittest.TestCase):
         # file. Here the bytes are a BONUS from a third party -- if we cannot
         # confirm it is square art, it does not earn a tile.
         self.assertFalse(AG.alternate_cover_acceptable(b'\xff\xd8\xff\xe0 truncated'))
+
+
+class PadGenerations(unittest.TestCase):
+    """
+    Burned re-select levers must RETRY with the next pad generation, not wedge.
+
+    Measured 2026-08-08 on the from-scratch rebuild: the scan burst left
+    cover.jpg AND its v1 pad as de-selected uploads on 83% of 1,607 albums --
+    a raced select burns a byte-form without landing the selection, burned
+    forms can never re-post (Plex dedupes content, the sandbox cannot select
+    an existing upload), and with one pad level the item was wedged "out of
+    re-select levers" PERMANENTLY. Only an external API sweep could heal it.
+    Generations turn the dead end into a bounded retry; the whole family must
+    read as "ours"/"converged" everywhere, or a v2-selected upload looks
+    foreign and re-select loops mint runaway pads.
+    """
+
+    IMG = b'\xff\xd8\xff\xe0 the cover'
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
+        self.saved = (AG.HTTP.Request, AG.read_poster_state)
+        self.posts = []
+        outer = self
+
+        def poster(url, data=None, **kw):
+            class R(object):
+                content = ''
+            if data is not None:
+                outer.posts.append(data)
+            return R()
+        AG.HTTP.Request = poster
+
+    def tearDown(self):
+        (AG.HTTP.Request, AG.read_poster_state) = self.saved
+        AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
+
+    def _state(self, selected, keys):
+        return ('77', selected, keys, None)
+
+    def test_family_shapes(self):
+        fam = AG.pad_family_shas(self.IMG)
+        self.assertEqual(len(fam), 1 + len(AG.RESELECT_PADS))
+        self.assertEqual(fam[0][1], self.IMG)
+        self.assertEqual(len(set(s for s, _ in fam)), len(fam))
+        # v1 stays first in mint order -- pre-1.3.190 uploads carry it.
+        self.assertEqual(fam[1][1], self.IMG + AG.RESELECT_PADS[0])
+
+    def test_same_image_recognises_every_generation_but_not_double_pads(self):
+        for pad in AG.RESELECT_PADS:
+            self.assertTrue(AG.same_image(self.IMG, self.IMG + pad))
+        # Cross-generation copies are the same picture too.
+        self.assertTrue(AG.same_image(self.IMG + AG.RESELECT_PADS[0],
+                                      self.IMG + AG.RESELECT_PADS[1]))
+        # The documented boundary holds: pad-of-pad is NOT the original.
+        p = AG.RESELECT_PADS[0]
+        self.assertFalse(AG.same_image(self.IMG, self.IMG + p + p))
+
+    def test_burned_plain_and_v1_mint_v2(self):
+        fam = AG.pad_family_shas(self.IMG)
+        keys = ['upload://posters/' + fam[0][0], 'upload://posters/' + fam[1][0]]
+        out = AG.upload_and_select_poster(
+            'guid://x', self.IMG, 't', state=self._state('metadata://other', keys),
+            pref_asserted=True)
+        self.assertTrue(out)
+        self.assertEqual(self.posts, [self.IMG + AG.RESELECT_PADS[1]])
+
+    def test_all_generations_burned_stands_down_loudly(self):
+        fam = AG.pad_family_shas(self.IMG)
+        keys = ['upload://posters/' + s for s, _ in fam]
+        out = AG.upload_and_select_poster(
+            'guid://x', self.IMG, 't', state=self._state('metadata://other', keys),
+            pref_asserted=True)
+        self.assertFalse(out)
+        self.assertEqual(self.posts, [])
+
+    def test_a_v2_selected_upload_reads_as_converged(self):
+        # Without this, the pass after a v2 re-select would mint v3, forever.
+        fam = AG.pad_family_shas(self.IMG)
+        sel = 'upload://posters/' + fam[2][0]
+        out = AG.upload_and_select_poster(
+            'guid://x', self.IMG, 't', state=self._state(sel, [sel]),
+            pref_asserted=True)
+        self.assertTrue(out)
+        self.assertEqual(self.posts, [])
+
+
+class PlainPassRecovery(unittest.TestCase):
+    """
+    A lost birth selection must heal WITHOUT a forced refresh.
+
+    The recovering upload-lever was gated on helper.force, so scheduled and
+    plain refreshes never even tried -- the rebuild's 83% sat on online art
+    until an external sweep. The trigger is one cheap localhost read: a
+    persisted selection that is NOT an upload:// is the lost-birth class
+    (every healthy end state is an upload).
+    """
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        self.saved = AG.read_poster_state
+        self.reads = []
+        outer = self
+
+        def reader(guid, tag):
+            outer.reads.append(guid)
+            return outer.state
+        AG.read_poster_state = reader
+        self.state = None
+
+    def tearDown(self):
+        AG.read_poster_state = self.saved
+        AG.recent_work_memo.clear()
+
+    def _helper(self):
+        class M(object):
+            guid = 'com.plexapp.agents.incipit://B0RECOVER_us'
+
+        class H(object):
+            metadata = M()
+        return H()
+
+    def test_agent_container_selection_needs_recovery(self):
+        self.state = ('9', 'metadata://posters/com.plexapp.agents.incipit_x', [], None)
+        self.assertTrue(AG.local_cover_recovery_needed(self._helper()))
+
+    def test_an_upload_selection_is_healthy_and_memoised(self):
+        self.state = ('9', 'upload://posters/abc', [], None)
+        h = self._helper()
+        self.assertFalse(AG.local_cover_recovery_needed(h))
+        # The no-work answer memoises: track 2 of the same pass costs nothing.
+        self.assertFalse(AG.local_cover_recovery_needed(h))
+        self.assertEqual(len(self.reads), 1)
+
+    def test_unreadable_state_is_not_recovery(self):
+        self.state = None
+        self.assertFalse(AG.local_cover_recovery_needed(self._helper()))
 
 
 class HumanLockedSelection(unittest.TestCase):

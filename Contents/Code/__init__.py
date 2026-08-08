@@ -971,23 +971,66 @@ def backup_selected_poster(helper):
 
 PMS = 'http://127.0.0.1:32400'
 
-# Deterministic suffix for the padded re-upload trick (see
+# Deterministic suffixes for the padded re-upload trick (see
 # upload_and_select_poster). Decoders ignore trailing bytes after a JPEG EOI /
 # PNG IEND, so original + suffix renders identically but is NEW content to
 # Plex's content-addressed store -- and POSTing NEW content both uploads and
 # selects, the agent's only re-select lever (its PUT is downgraded to GET).
 # DETERMINISTIC on purpose: sha(padded) is then predictable, so later passes
 # recognize the padded upload as ours/selected instead of padding again and
-# accumulating a new upload per refresh. One pad level = exactly one extra
-# re-select per image; a further flip hits the old boundary and logs.
-RESELECT_PAD = b'\nincipit-reselect-v1'
+# accumulating a new upload per refresh.
+#
+# A FAMILY, not one level, since v1.3.190. The 2026-08-08 rebuild wedged 83%
+# of 1,607 albums "out of re-select levers": the scan burst left cover.jpg
+# AND its v1 pad as de-selected uploads (the select POST raced or failed),
+# and with both byte-forms burned the item was unfixable by ANY refresh --
+# the sandbox cannot select an existing upload, so the only remedy was an
+# external API sweep. Generations turn that dead end into a retry: each
+# failed round burns one form, the next round mints the next, and the cap
+# bounds store growth at len(RESELECT_PADS) extra copies per image ever.
+# Ownership, convergence and poison checks recognize the WHOLE family via
+# pad_family_shas/same_image, or a v2-selected upload would read as foreign
+# and re-select loops would mint runaway pads.
+RESELECT_PADS = [
+    b'\nincipit-reselect-v1',
+    b'\nincipit-reselect-v2',
+    b'\nincipit-reselect-v3',
+]
+# The v1 name survives: albums touched before v1.3.190 carry v1-padded
+# uploads, and the deploy-gate/test anchors reference it.
+RESELECT_PAD = RESELECT_PADS[0]
 
 
 def padded_variants(image_bytes):
-    """(sha_original, sha_padded, padded_bytes) for ownership/skip checks."""
+    """(sha_original, sha_v1_padded, v1_padded_bytes) for ownership/skip checks.
+
+    The v1-only historical shape; family-aware callers use pad_family_shas.
+    """
     sha = hashlib.sha1(image_bytes).hexdigest()
     padded = image_bytes + RESELECT_PAD
     return sha, hashlib.sha1(padded).hexdigest(), padded
+
+
+def pad_family_shas(image_bytes):
+    """[(sha, bytes)] for the plain image and EVERY pad generation, in mint
+    order. Index 0 is always the plain form."""
+    out = [(hashlib.sha1(image_bytes).hexdigest(), image_bytes)]
+    for pad in RESELECT_PADS:
+        padded = image_bytes + pad
+        out.append((hashlib.sha1(padded).hexdigest(), padded))
+    return out
+
+
+def strip_one_pad(image_bytes):
+    """`image_bytes` with ONE trailing family pad removed, if one is present.
+
+    One level only, deliberately: a doubly-padded blob means something
+    upstream is re-padding and must NOT silently read as the original
+    (the boundary the pre-family same_image already enforced)."""
+    for pad in RESELECT_PADS:
+        if image_bytes.endswith(pad):
+            return image_bytes[:-len(pad)]
+    return image_bytes
 
 
 def fetch_url_bytes(url):
@@ -1142,13 +1185,14 @@ def same_image(first, second):
         return False
     if len(first) == len(second) and first == second:
         return True
+    # Family-aware since v1.3.190: strip ONE trailing pad (any generation)
+    # from each side and compare the bases. Symmetric by construction, and
+    # the one-level strip preserves the double-padding boundary: base of
+    # image+PAD+PAD is image+PAD, which never equals image.
     try:
-        one, two = padded_variants(first)[2], padded_variants(second)[2]
+        return strip_one_pad(first) == strip_one_pad(second)
     except Exception:
         return False
-    if len(one) == len(second) and one == second:
-        return True
-    return len(two) == len(first) and two == first
 
 
 def selection_is_artist_art(artist_bytes, selected):
@@ -2078,7 +2122,8 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
     if not image_bytes:
         return False
     try:
-        sha, sha_padded, padded_bytes = padded_variants(image_bytes)
+        family = pad_family_shas(image_bytes)
+        sha = family[0][0]
     except Exception as e:
         log.error('%s: sha1 failed (%s)', tag, e)
         return False
@@ -2092,21 +2137,26 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
     if state is None:
         return False
     rk, selected_key, keys, parent_thumb = state
-    if selected_key and (sha in selected_key or sha_padded in selected_key):
-        log.info('%s: already the selected poster, skip', tag)
-        mark_done(tag, guid, memo_token)
-        return True
+    if selected_key:
+        # ANY family generation holding the selection is converged -- a
+        # v2-selected upload must not read as foreign, or this would re-run
+        # forever and mint the next generation every pass.
+        for fam_sha, _ in family:
+            if fam_sha in selected_key:
+                log.info('%s: already the selected poster, skip', tag)
+                mark_done(tag, guid, memo_token)
+                return True
     # Explicit loop, not any(): the sandbox does not provide any()/all()/sum()
     # (proven live -- `NameError: global name 'any' is not defined` aborted the
     # whole artist update). set() IS available; the blocklist is irregular, so
     # find in-repo precedent before using any builtin here.
     have_plain = False
-    have_padded = False
+    burned = {}
     for k in keys:
-        if sha in k:
-            have_plain = True
-        if sha_padded in k:
-            have_padded = True
+        for fam_sha, _ in family:
+            if fam_sha in k:
+                burned[fam_sha] = True
+    have_plain = sha in burned
     if have_plain and not pref_asserted:
         # Plex ALREADY offers this image and is not selecting it. For a BOOK,
         # nothing but a deliberate de-selection produces that state: on a new
@@ -2133,17 +2183,27 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
         )
         mark_done(tag, guid, memo_token)
         return False
-    if have_plain and pref_asserted and have_padded:
-        # The pref wants this image back but both variants already sit
-        # de-selected: the one-level pad budget is spent, and minting deeper
-        # pads would grow the store without bound. Loud, because the pref is
-        # now unenforceable without a manual UI pick.
-        log.warn(
-            '%s: image and its padded variant both exist de-selected on rk %s; '
-            'out of re-select levers -- pick it in the UI', tag, rk
-        )
-        mark_done(tag, guid, memo_token)
-        return False
+    # The pref path's lever: the FIRST family form Plex does not already hold.
+    # Before v1.3.190 this was plain-then-v1-then-give-up, and the give-up was
+    # PERMANENT -- the 2026-08-08 rebuild left 83% of the library wedged there
+    # (a burst-raced select burns a form without landing the selection, and
+    # burned forms can never be re-posted: Plex dedupes content and the
+    # sandbox cannot select an existing upload). Generations make the wedge a
+    # retry; the cap keeps the store bounded and the give-up log stays for the
+    # genuinely exhausted case.
+    unburned = None
+    if pref_asserted:
+        for fam_sha, fam_bytes in family:
+            if fam_sha not in burned:
+                unburned = fam_bytes
+                break
+        if unburned is None:
+            log.warn(
+                '%s: every pad generation already exists de-selected on rk %s; '
+                'out of re-select levers -- pick it in the UI', tag, rk
+            )
+            mark_done(tag, guid, memo_token)
+            return False
     # LAST cheap-evidence gap: the keys say nothing about whether the selection
     # is already our picture. The sha tests above only recognise an upload://
     # key, because Plex names uploads by CONTENT sha; a CONTAINER key is sha1 of
@@ -2181,10 +2241,11 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
                      'not uploading a duplicate', tag, rk)
             mark_done(tag, guid, memo_token)
             return True
-    # pref_asserted with the plain copy de-selected: the agent's own unpin put
-    # it there, so re-select via the pad -- new content, identical pixels.
+    # pref_asserted: post the first unburned family form (plain when nothing
+    # is burned, else the next pad generation) -- new content, identical
+    # pixels, and POSTing new content is what re-selects.
     reselect = have_plain and pref_asserted
-    post_bytes = padded_bytes if reselect else image_bytes
+    post_bytes = unburned if pref_asserted else image_bytes
     # Byte literals, not str: the same py2/py3 drift byte_at exists to kill.
     # Under py3 `image_bytes[:4] == '\\x89PNG'` is always False, so the tests
     # that now drive this function could never catch a mislabelled upload --
@@ -2362,11 +2423,12 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
                 # hash is by definition not one of our images, so skipping it
                 # is also the correct answer.
                 try:
-                    s, sp, _ = padded_variants(image_bytes)
+                    fam = pad_family_shas(image_bytes)
                 except Exception as e:
                     log.error('%s: could not hash a candidate image (%s)', tag, e)
                     continue
-                owned_shas.extend([s, sp])
+                for fam_sha, _unused in fam:
+                    owned_shas.append(fam_sha)
     if not selection_is_agent_owned(selected_key, owned_shas):
         log.info('%s: selection is a user upload -- leaving it', tag)
         mark_done(tag, guid, target_url)
@@ -2449,7 +2511,8 @@ def correct_portrait_selection(helper, cover_bytes, square_bytes):
     tag = 'incipit portrait-fix'
     guid = helper.metadata.guid
     try:
-        sha, sha_padded, _ = padded_variants(cover_bytes)
+        family = pad_family_shas(cover_bytes)
+        sha, sha_padded = family[0][0], family[1][0]
     except Exception as e:
         log.error('%s: could not hash the local cover (%s)', tag, e)
         return
@@ -2775,6 +2838,44 @@ def unpin_hardcover_author_art(helper):
     )
 
 
+def local_cover_recovery_needed(helper):
+    """
+        Whether prefer_local_cover should recover WITHOUT a forced refresh.
+
+        The 2026-08-08 rebuild proved the gap: fresh-scan births race Plex's
+        combiner (which seats the agent's online art over localmedia's
+        cover.jpg upload), and the recovering upload-lever ran only under
+        `helper.force` -- so scheduled and plain refreshes could never heal a
+        lost birth, and 83% of the library sat on online art indefinitely.
+
+        The trigger is precise and CHEAP -- one localhost state read, no image
+        bytes: a selection exists and it is NOT an upload. Every healthy end
+        state is an upload:// selection (localmedia's cover, the agent's own
+        select, or a human pick), so a container-key selection on a
+        prefer_local library is exactly the lost-birth class. Human picks of
+        container art are protected downstream by the thumb-lock gate in
+        select_local_cover, and the portrait deferral is re-applied by the
+        caller before any select.
+
+        Memoised per guid for the pass (the same per-track collapse every
+        selection path uses): track 1 answers for the whole album.
+    """
+    guid = helper.metadata.guid
+    if not should_run('incipit local-recovery', guid, 'check', 300):
+        return False
+    state = read_poster_state(guid, 'incipit local-recovery')
+    if state is None:
+        return False
+    rk, selected_key, keys, parent_thumb = state
+    needed = bool(selected_key) and not selected_key.startswith('upload')
+    if not needed:
+        # Only the NO-work answer is memoised: a needed recovery must stay
+        # re-askable, because select_local_cover's own verdict memo is what
+        # collapses its per-track cost once it actually runs.
+        mark_done('incipit local-recovery', guid, 'check')
+    return needed
+
+
 def select_local_cover(helper, cover_bytes=None):
     """
         Force the book folder's cover.jpg to become the SELECTED Plex poster on
@@ -2804,7 +2905,8 @@ def select_local_cover(helper, cover_bytes=None):
     tag = 'incipit local-select'
     guid = helper.metadata.guid
     try:
-        sha, sha_padded, _ = padded_variants(cover_bytes)
+        family = pad_family_shas(cover_bytes)
+        sha, sha_padded = family[0][0], family[1][0]
     except Exception as e:
         log.error('%s: sha1 failed (%s)', tag, e)
         return False
@@ -2825,7 +2927,10 @@ def select_local_cover(helper, cover_bytes=None):
     if state is None:
         return False
     rk, selected_key, keys, parent_thumb = state
-    if not selection_is_agent_owned(selected_key, [sha, sha_padded]):
+    owned = []
+    for fam_sha, _unused in family:
+        owned.append(fam_sha)
+    if not selection_is_agent_owned(selected_key, owned):
         log.info('%s: selection is a user upload -- leaving it', tag)
         mark_done(tag, guid, sha)
         remember_verdict(tag, guid, sha, False)
@@ -2856,8 +2961,25 @@ def select_local_cover(helper, cover_bytes=None):
     # which is the overwhelmingly common case: there is nothing to push, so the
     # read would be pure cost and "a converged library does no work on refresh"
     # would stop being true.
-    converged = bool(selected_key) and (sha in selected_key or sha_padded in selected_key)
+    converged = False
+    if selected_key:
+        for fam_sha, _unused in family:
+            if fam_sha in selected_key:
+                converged = True
+                break
     if not converged:
+        # A HUMAN pick is inviolable, whatever it points at -- the same thumb
+        # field-lock rule converge_author_art enforces (thumb_field_locked).
+        # Read HERE, on the would-act path only: a converged book must stay
+        # zero-cost on refresh (the pinned "does no work" invariant), and a
+        # user-upload selection already stood down above without paying for
+        # this read either.
+        if selected_key and thumb_field_locked(rk, tag):
+            log.info('%s: the poster was chosen by a human (thumb field '
+                     'locked) -- leaving it', tag)
+            mark_done(tag, guid, sha)
+            remember_verdict(tag, guid, sha, False)
+            return False
         artist_bytes, known = artist_poster_bytes(guid, tag, parent_thumb)
         # FAIL CLOSED. This path force-selects cover.jpg over whatever the
         # operator picked, so "could not tell" must not read as "not poison":
@@ -4161,7 +4283,8 @@ class AudiobookAlbum(Agent.Album):
         # helper.force is what makes cover_bytes freshly read, so neither branch
         # has anything to compare against on an incremental pass.
         if (
-            Prefs['prefer_local_cover'] and helper.force and not poisoned_local
+            Prefs['prefer_local_cover'] and not poisoned_local
+            and (helper.force or local_cover_recovery_needed(helper))
         ):
             if not deferred_portrait_local:
                 # PRUNE OUR TWIN. When the upload really does hold the selection,
@@ -4175,8 +4298,21 @@ class AudiobookAlbum(Agent.Album):
                 # Gated on the return value, NOT assumed: a stand-down (the
                 # operator's own pick is showing) reports False and the entry
                 # stays, because it is then their only route back to local art.
-                if should_prune_local_twin(
-                    select_local_cover(helper, cover_bytes),
+                #
+                # Plain-pass recovery (v1.3.190): without force the hoisted
+                # read above did not run, so cover_bytes is None and the
+                # portrait/poison flags could not have seen the file -- read
+                # here and RE-APPLY the portrait deferral before any select,
+                # or recovery would re-impose exactly the print jackets the
+                # force path declines. (Poison needs no re-check: the guard
+                # lives inside select_local_cover and fails closed.)
+                recovery_bytes = cover_bytes
+                if recovery_bytes is None:
+                    recovery_bytes = local_cover_bytes(helper)
+                    if recovery_bytes is not None and local_cover_is_portrait(recovery_bytes):
+                        recovery_bytes = None
+                if recovery_bytes is not None and should_prune_local_twin(
+                    select_local_cover(helper, recovery_bytes),
                     local_key in helper.metadata.posters
                 ):
                     keep = cover_keep_list(
