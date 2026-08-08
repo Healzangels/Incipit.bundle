@@ -2099,16 +2099,19 @@ class ConvergePrunesItsOwnDuplicate(unittest.TestCase):
         AG.recent_work_memo.clear()
         AG.verdict_memo.clear()
         self.saved = (AG.read_poster_state, AG.fetch_url_bytes,
-                      AG.upload_and_select_poster)
+                      AG.upload_and_select_poster, AG.thumb_field_locked)
         AG.read_poster_state = lambda guid, tag: (
             '101', 'metadata://posters/com.plexapp.agents.incipit_aaaa',
             ['metadata://posters/com.plexapp.agents.incipit_aaaa'], None)
+        # A scan-default selection: the human-lock gate (v1.3.189) must stand
+        # aside so this class keeps testing the post-select prune it is about.
+        AG.thumb_field_locked = lambda rk, tag: False
         AG.fetch_url_bytes = lambda url: b'\xff\xd8 the converged image'
         self.validated = []
 
     def tearDown(self):
         (AG.read_poster_state, AG.fetch_url_bytes,
-         AG.upload_and_select_poster) = self.saved
+         AG.upload_and_select_poster, AG.thumb_field_locked) = self.saved
         AG.recent_work_memo.clear()
         AG.verdict_memo.clear()
 
@@ -4375,6 +4378,121 @@ class AlternateCoversAreJudgedByTheirPixels(unittest.TestCase):
         # file. Here the bytes are a BONUS from a third party -- if we cannot
         # confirm it is square art, it does not earn a tile.
         self.assertFalse(AG.alternate_cover_acceptable(b'\xff\xd8\xff\xe0 truncated'))
+
+
+class HumanLockedSelection(unittest.TestCase):
+    """
+    A human's poster pick is inviolable -- the thumb FIELD LOCK says so.
+
+    Plex stamps <Field locked="1" name="thumb"/> on any manual selection (UI
+    click or /poster?url= API) and leaves scan defaults Field-less; measured
+    live 2026-08-08 on both boxes. Until then converge_author_art's ownership
+    rules protected only upload:// picks, and the fit direction (default-on
+    since v1.3.132) overrode a click-pick between the agent's own two provider
+    images BY DESIGN, on the recorded premise that Plex exposes no signal to
+    tell a click from a default. The signal exists; the operator directive of
+    2026-08-08 is that any human selection stays, whatever key it points at.
+    """
+
+    STATE = ('55', 'metadata://posters/com.plexapp.agents.incipit_aaa',
+             ['metadata://posters/com.plexapp.agents.incipit_aaa',
+              'metadata://posters/com.plexapp.agents.incipit_bbb'], None)
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        self.saved = (AG.HTTP.Request, AG.read_poster_state, AG.fetch_url_bytes,
+                      AG.upload_and_select_poster, AG.thumb_field_locked)
+        self.fetches = []
+        self.uploads = []
+        outer = self
+        AG.read_poster_state = lambda guid, tag: outer.STATE
+        AG.fetch_url_bytes = (
+            lambda url: outer.fetches.append(url) or b'\xff\xd8\xff\xe0 img')
+        AG.upload_and_select_poster = (
+            lambda guid, data, tag, **kw: outer.uploads.append(tag) or True)
+
+    def tearDown(self):
+        (AG.HTTP.Request, AG.read_poster_state, AG.fetch_url_bytes,
+         AG.upload_and_select_poster, AG.thumb_field_locked) = self.saved
+        AG.recent_work_memo.clear()
+
+    def _helper(self):
+        class FakePosters(object):
+            def __contains__(self, key):
+                return False
+
+        class FakeMetadata(object):
+            guid = 'com.plexapp.agents.incipit://B0LOCKTEST_us'
+            posters = FakePosters()
+
+        class FakeHelper(object):
+            metadata = FakeMetadata()
+
+        return FakeHelper()
+
+    def test_a_locked_selection_stops_every_direction_before_any_fetch(self):
+        # The gate must run BEFORE the ownership shas and the CDN fetch: zero
+        # image bytes move for a curated artist. This is the fit direction --
+        # exactly the one that used to steal the click-pick.
+        AG.thumb_field_locked = lambda rk, tag: True
+        AG.converge_author_art(self._helper(), 'http://t.jpg', 'http://o.jpg',
+                               'incipit author-art-fit')
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.uploads, [])
+
+    def test_an_untouched_default_still_converges(self):
+        # The gate must not be over-broad: an unlocked (scan-default)
+        # selection is still the agent's to improve. A mutation that hardcodes
+        # the lock True dies here; one that removes the gate dies above.
+        AG.thumb_field_locked = lambda rk, tag: False
+        AG.converge_author_art(self._helper(), 'http://t.jpg', 'http://o.jpg',
+                               'incipit author-art-fit')
+        self.assertEqual(self.uploads, ['incipit author-art-fit'])
+
+    def test_a_fresh_artist_with_no_selection_is_not_gated(self):
+        # No selection means nothing a human could have chosen -- the lock is
+        # not even consulted (it could only have been left by an earlier,
+        # since-cleared state, and reading it would cost a round trip).
+        self.STATE = ('55', None, [], None)
+        AG.thumb_field_locked = lambda rk, tag: (_ for _ in ()).throw(
+            AssertionError('the lock must not be read when nothing is selected'))
+        AG.converge_author_art(self._helper(), 'http://t.jpg', 'http://o.jpg',
+                               'incipit author-art-fit')
+        self.assertEqual(self.uploads, ['incipit author-art-fit'])
+
+    def test_the_lock_parses_the_field_element(self):
+        class FakeResponse(object):
+            content = ('<MediaContainer><Directory ratingKey="55">'
+                       '<Field locked="1" name="thumb"/>'
+                       '</Directory></MediaContainer>')
+        AG.HTTP.Request = lambda url, **kw: FakeResponse()
+        self.assertTrue(AG.thumb_field_locked('55', 't'))
+
+    def test_an_unlocked_item_reads_unlocked(self):
+        class FakeResponse(object):
+            content = ('<MediaContainer><Directory ratingKey="55" '
+                       'title="X"/></MediaContainer>')
+        AG.HTTP.Request = lambda url, **kw: FakeResponse()
+        self.assertFalse(AG.thumb_field_locked('55', 't'))
+
+    def test_a_lock_on_a_different_field_is_not_a_poster_lock(self):
+        # An operator who locked the TITLE (or summary, or anything else)
+        # has said nothing about the poster -- only name="thumb" counts.
+        class FakeResponse(object):
+            content = ('<MediaContainer><Directory ratingKey="55">'
+                       '<Field locked="1" name="title"/>'
+                       '</Directory></MediaContainer>')
+        AG.HTTP.Request = lambda url, **kw: FakeResponse()
+        self.assertFalse(AG.thumb_field_locked('55', 't'))
+
+    def test_an_unreadable_lock_fails_closed(self):
+        # "Could not tell" must read as "a human chose it": every caller is
+        # about to CHANGE the selection, and the poison-guard rule is that an
+        # unreadable state never licenses a write.
+        def boom(url, **kw):
+            raise IOError('sealed sandbox')
+        AG.HTTP.Request = boom
+        self.assertTrue(AG.thumb_field_locked('55', 't'))
 
 
 if __name__ == '__main__':

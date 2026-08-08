@@ -1085,6 +1085,38 @@ def read_poster_state(guid, tag):
         return None
 
 
+def thumb_field_locked(rk, tag):
+    """
+        Whether a HUMAN chose this item's poster.
+
+        Plex stamps <Field locked="1" name="thumb"/> on the item whenever a
+        poster is selected by hand -- a UI click or the /poster?url= API --
+        and leaves the item Field-less for container-scan defaults. Measured
+        on this deployment 2026-08-08: an API pick locks the field, a
+        never-touched artist carries no Field element at all, and the lock
+        survives plain and forced refreshes.
+
+        This is exactly the click-vs-default signal the ownership rules in
+        converge_author_art declared Plex never exposes -- the premise under
+        which the fit direction was allowed to override a click-pick between
+        the agent's own two provider images. It does exist, so that class is
+        no longer condemned to ambiguity. Operator directive 2026-08-08: a
+        human selection is inviolable, whatever key form it points at.
+
+        FAIL-CLOSED: an unreadable answer reports True ("assume a human chose
+        it"), because every caller is about to CHANGE the selection and the
+        poison-guard rule holds -- never overwrite what you cannot prove is
+        yours (the same discipline as artist_poster_bytes' `known` flag).
+    """
+    try:
+        url = PMS + '/library/metadata/' + rk
+        text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
+        return bool(re.search(r'<Field[^>]*name="thumb"', text))
+    except Exception as e:
+        log.error('%s: could not read the thumb field lock (%s)', tag, e)
+        return True
+
+
 def same_image(first, second):
     """
         True when the two blobs are the SAME picture -- byte-identical, or one
@@ -2280,6 +2312,20 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
     if state is None:
         return
     rk, selected_key, keys, parent_thumb = state
+    # A HUMAN pick is inviolable, whatever it points at -- see
+    # thumb_field_locked for the signal and its measurement. This runs FIRST,
+    # before the ownership shas and before any CDN fetch: it protects the one
+    # class the byte-sha rules cannot (a click-pick between the agent's own
+    # two provider images, which the fit direction overrode by design until
+    # the operator overruled that on 2026-08-08), and it makes every pass
+    # over a curated artist cheaper, not costlier. Only consulted when a
+    # selection EXISTS: a fresh artist with nothing selected has nothing a
+    # human could have chosen.
+    if selected_key and thumb_field_locked(rk, tag):
+        log.info('%s: the poster was chosen by a human (thumb field locked) '
+                 '-- leaving it', tag)
+        mark_done(tag, guid, target_url)
+        return
     # Strict mode (the unpin direction): act only on a selection this agent
     # demonstrably UPLOADED. A metadata:// container key is ambiguous by
     # construction -- the container may have defaulted to it, or the user may
