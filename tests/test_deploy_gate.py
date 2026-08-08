@@ -187,5 +187,77 @@ class TestMainGuardIsLastInEveryTestFile(unittest.TestCase):
             'every class defined below it and still print OK: %r' % (offenders,))
 
 
+class SandboxIllegalNames(unittest.TestCase):
+    """
+    A LEADING-UNDERSCORE NAME KILLS THE WHOLE PLUGIN, SILENTLY.
+
+    Plex compiles this bundle under RestrictedPython, whose name check is:
+
+        if name.startswith('_') and name != '_':
+            error('"%s" is an invalid variable name because it starts with "_"')
+
+    That is a COMPILE error, so the agent never loads at all -- no banner, no
+    handler, every search and refresh in the library falls back to nothing.
+    Nothing in the normal test suite can see it: these tests run under real
+    CPython, where `_unused` is perfectly ordinary.
+
+    Shipped live twice now. v1.3.190 introduced `for fam_sha, _unused in ...`
+    and the .99 deploy died with exactly the message above at line 2430 --
+    caught only because a poster fix mysteriously did nothing and the log was
+    read directly. A prior incident is why the rule was written down in the
+    first place; a note was clearly not enough, so this is the gate.
+
+    Bare `_` is explicitly legal (RestrictedPython exempts it) and dunders
+    (`__init__`) are used throughout and demonstrably load, so both are
+    allowed here -- matching the known-good baseline exactly.
+    """
+
+    CODE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'Contents', 'Code')
+
+    @staticmethod
+    def illegal(name):
+        if not name or not name.startswith('_'):
+            return False
+        if name == '_':
+            return False
+        if name.startswith('__') and name.endswith('__'):
+            return False
+        return True
+
+    def test_no_leading_underscore_names_anywhere_in_the_bundle(self):
+        import ast
+        offenders = []
+        scanned = 0
+        for filename in sorted(os.listdir(self.CODE_DIR)):
+            if not filename.endswith('.py'):
+                continue
+            path = os.path.join(self.CODE_DIR, filename)
+            with open(path) as handle:
+                tree = ast.parse(handle.read(), path)
+            scanned += 1
+            for node in ast.walk(tree):
+                name = None
+                if isinstance(node, ast.Name):
+                    name = node.id
+                elif isinstance(node, ast.arg):
+                    name = node.arg
+                elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                    name = node.name
+                elif isinstance(node, ast.Attribute):
+                    # RestrictedPython blocks `obj._attr` reads for the same
+                    # reason; the baseline has none, so this is free coverage.
+                    name = node.attr
+                elif isinstance(node, ast.alias):
+                    name = node.asname
+                if self.illegal(name):
+                    offenders.append((filename, getattr(node, 'lineno', '?'), name))
+        self.assertGreater(scanned, 0, 'no bundle source scanned at all')
+        self.assertEqual(
+            offenders, [],
+            'RestrictedPython rejects these at COMPILE time and the whole '
+            'plugin dies silently -- no banner, no agent: %r' % (offenders,))
+
+
 if __name__ == '__main__':
     unittest.main()

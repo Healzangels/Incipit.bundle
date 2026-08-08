@@ -2427,7 +2427,7 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
                 except Exception as e:
                     log.error('%s: could not hash a candidate image (%s)', tag, e)
                     continue
-                for fam_sha, _unused in fam:
+                for fam_sha, fam_ignored in fam:
                     owned_shas.append(fam_sha)
     if not selection_is_agent_owned(selected_key, owned_shas):
         log.info('%s: selection is a user upload -- leaving it', tag)
@@ -2928,7 +2928,7 @@ def select_local_cover(helper, cover_bytes=None):
         return False
     rk, selected_key, keys, parent_thumb = state
     owned = []
-    for fam_sha, _unused in family:
+    for fam_sha, fam_ignored in family:
         owned.append(fam_sha)
     if not selection_is_agent_owned(selected_key, owned):
         log.info('%s: selection is a user upload -- leaving it', tag)
@@ -2963,7 +2963,7 @@ def select_local_cover(helper, cover_bytes=None):
     # would stop being true.
     converged = False
     if selected_key:
-        for fam_sha, _unused in family:
+        for fam_sha, fam_ignored in family:
             if fam_sha in selected_key:
                 converged = True
                 break
