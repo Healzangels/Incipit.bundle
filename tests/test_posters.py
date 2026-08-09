@@ -4555,6 +4555,72 @@ class PlainPassRecovery(unittest.TestCase):
         self.assertFalse(AG.local_cover_recovery_needed(self._helper()))
 
 
+class JsonDecodeAndCropMath(unittest.TestCase):
+    """
+    Two py2/py3 divergences that made real code untestable.
+
+    json_decode passed `encoding="utf-8"` to json.loads. Py2 accepted (and
+    ignored, for str input) that kwarg; py3 REMOVED it, so under this harness
+    every call raised TypeError -- which json_decode's `except (AttributeError,
+    ValueError)` does not catch -- and the real decode path could never be
+    exercised here while production quietly worked.
+
+    get_square_image built its Amazon crop offset with bare `/` on ints, which
+    FLOORS under the deployed py2 and TRUE-divides under py3: a 601x400 cover
+    yields '100' in production and '100.5' in a test, so any harness assertion
+    would have pinned a URL production never emits.
+    """
+
+    def test_json_decode_actually_decodes(self):
+        self.assertEqual(AG.json_decode('{"a": 1}'), {'a': 1})
+        self.assertEqual(AG.json_decode('[1, 2]'), [1, 2])
+
+    def test_json_decode_still_swallows_garbage(self):
+        # The guard the try/except exists for: an API 500 page, an empty body,
+        # or the literal "None" string make_request returns on failure.
+        self.assertIsNone(AG.json_decode('<html>500</html>'))
+        self.assertIsNone(AG.json_decode(''))
+        # The literal "None" STRING is what make_request yields on failure;
+        # a None object is not a supported input on either python (json.loads
+        # raises TypeError there, by design).
+        self.assertIsNone(AG.json_decode('None'))
+
+    def test_json_decode_handles_unicode_bodies(self):
+        # The encoding kwarg was there for non-ASCII; prove it is not needed.
+        self.assertEqual(AG.json_decode('{"t": "L\u00e1szl\u00f3"}'), {'t': u'L\xe1szl\xf3'})
+
+    def test_crop_offset_is_an_INTEGER_on_both_pythons(self):
+        # get_square_image measures the image itself, so stub the measurement
+        # and drive the arithmetic: a 601-wide, 400-tall LANDSCAPE photo.
+        ArtistUpdateTool = MODULES['update_tools'].ArtistUpdateTool
+
+        class FakeTool(ArtistUpdateTool):
+            def __init__(self):
+                pass
+
+            def measure_image(self, url):
+                return (400, 601)  # (height, width)
+
+        out = FakeTool().get_square_image('https://m.media-amazon.com/images/I/x.jpg')
+        # (601-400)//2 == 100. A '100.5' here is the py3 harness pinning a
+        # crop URL the deployed py2 never produces.
+        self.assertIn('_CR100,0,', out)
+        self.assertNotIn('.5', out)
+
+    def test_a_portrait_photo_is_unaffected_by_the_change(self):
+        ArtistUpdateTool = MODULES['update_tools'].ArtistUpdateTool
+
+        class FakeTool(ArtistUpdateTool):
+            def __init__(self):
+                pass
+
+            def measure_image(self, url):
+                return (900, 600)  # taller than wide
+
+        out = FakeTool().get_square_image('https://m.media-amazon.com/images/I/x.jpg')
+        self.assertIn('_SX600_CR0,0,600,600__', out)
+
+
 class HumanLockedSelection(unittest.TestCase):
     """
     A human's poster pick is inviolable -- the thumb FIELD LOCK says so.

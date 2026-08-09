@@ -4389,7 +4389,12 @@ def json_decode(output):
         Decodes JSON output.
     """
     try:
-        return json.loads(output, encoding="utf-8")
+        # No `encoding=` kwarg. Py2's json.loads accepted (and ignored, for str
+        # input) one; py3 REMOVED it, so under the py3 test harness every call
+        # raised TypeError — which this clause does not catch — making the real
+        # decode path permanently untestable while production quietly worked.
+        # A str/unicode body decodes identically on both without it.
+        return json.loads(output)
     except (AttributeError, ValueError):
         # ValueError: malformed/empty/HTML body (e.g. an API 500 page, or the
         # "None" string when make_request returned nothing).

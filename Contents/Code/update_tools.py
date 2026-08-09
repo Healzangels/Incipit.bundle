@@ -1101,7 +1101,12 @@ class ArtistUpdateTool(UpdateTool):
         if (width > height):
             # Return a landscape image centered at the horizontal middle
             h_str = str(height)
-            padding = str((width - height) / 2)
+            # FLOOR division explicitly. Bare `/` on ints floors under the
+            # deployed py2 but TRUE-divides under the py3 test harness, so a
+            # 601x400 image gives '100' in production and '100.5' in a test —
+            # a harness pinning a crop URL production never emits (and, were
+            # the bundle ever run under py3, an invalid Amazon crop param).
+            padding = str((width - height) // 2)
             return image_url.replace(
                 '.jpg',
                 '.__01_SY'+h_str+'_CR'+padding+',0,'+h_str+','+h_str+'__.jpg'
