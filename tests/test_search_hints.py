@@ -52,6 +52,24 @@ def tool_for(sidecar=None, filename=None, album=None, artist=None):
     return tool
 
 
+def real_tool_for(album=None, artist='An Author', sidecar=None, filename=None):
+    """
+        Same tool, but normalizedName comes from the REAL normalize_name()
+        rather than being hand-set from the album kwarg.
+
+        tool_for's shortcut is fine for tests that only care about the hint
+        fields, but it silently skips the bracket-stripping and the
+        sidecar-title preference -- so any test reasoning about what the ASIN
+        probes SEE must come through here or it is measuring the fixture.
+    """
+    tool = tool_for(sidecar=sidecar, filename=filename, album=album, artist=artist)
+    tool.media.title = album
+    tool.resolved_title = None
+    tool.multi_author_source = None
+    tool.normalize_name()
+    return tool
+
+
 SIDECAR = {
     'title': 'The Lost Stories Collection',
     'authors': ['Michael Scott'],
@@ -458,16 +476,60 @@ class TestFilenameAsinNeedsTheB0Anchor(unittest.TestCase):
         tool = tool_for(album='Some Book [ISBN 9780593399439]')
         self.assertIsNone(tool.check_for_asin())
 
-    def test_a_real_B0_asin_in_the_tag_is_still_caught_by_the_OTHER_probe(self):
-        # The gate must not cost the legitimate case. It does not: a real ASIN
-        # in the album tag is picked up by pre_process_title(), which runs the
-        # B0-ANCHORED search_asin over normalizedName. That is a different
-        # entry point (build_url) from check_for_asin, which is why the gate
-        # above can be strict without losing anything.
-        tool = tool_for(album='Some Book B08WF9JR2P')
+    def test_a_BARE_B0_asin_in_the_tag_is_still_caught_by_the_OTHER_probe(self):
+        # The gate must not cost the legitimate case. For a BARE (unbracketed)
+        # ASIN it does not: pre_process_title() runs the B0-anchored search_asin
+        # over normalizedName, a different entry point (build_url) from
+        # check_for_asin, so the gate above can be strict without losing it.
+        #
+        # DRIVEN THROUGH THE REAL normalize_name(). This used to hand-set
+        # tool.normalizedName from the album kwarg, which is not what the live
+        # path does -- normalize_name() strips bracketed text before the probe
+        # ever sees it, so the hand-set version proved the claim for a spelling
+        # it does not actually hold for. See the bracketed sibling below.
+        tool = real_tool_for(album='Some Book B08WF9JR2P')
         tool.region_override = 'us'
+        self.assertEqual(tool.normalizedName, 'Some Book B08WF9JR2P')
         self.assertIsNone(tool.check_for_asin(), 'the quick-match path stays shut')
         self.assertTrue(tool.pre_process_title(), 'the anchored probe still finds it')
+
+    def test_a_BRACKETED_asin_is_covered_by_the_API_not_by_this_probe(self):
+        """
+        The other half of the claim, which the bundle does NOT satisfy.
+
+        normalize_name() deletes bracketed text (`re.sub(r'\\[[^"]*\\]', '')`),
+        so "Some Book [B08WF9JR2P]" normalizes to "Some Book" and the anchored
+        probe finds nothing. Measured, not assumed.
+
+        Nothing is lost, but only because a DIFFERENT mechanism covers it: the
+        query carries resolve_search_title() with its structure INTACT, so the
+        brackets survive into `title=` and the API's extractAsinAndClean -- which
+        scans bracketed tokens specifically -- pulls the ASIN out there.
+
+        The two spellings are covered by two different mechanisms, and neither
+        test knew about the other. That is worth pinning: the bundle probe
+        catches BARE, the API catches BRACKETED, and the thing that makes the
+        second work is sending the unnormalized title.
+        """
+        tool = real_tool_for(album='Some Book [B08WF9JR2P]')
+        tool.region_override = 'us'
+        self.assertEqual(tool.normalizedName, 'Some Book',
+                         'normalize_name strips the bracket, ASIN and all')
+        self.assertIsNone(tool.check_for_asin())
+        self.assertIsNone(tool.pre_process_title(),
+                          'the bundle probe cannot see a bracketed ASIN')
+
+    def test_the_query_preserves_a_bracketed_asin_for_the_api_to_extract(self):
+        # THE LOAD-BEARING HALF of the test above. If the query were ever
+        # "simplified" to send normalizedName instead of resolve_search_title(),
+        # bracketed ASINs would silently stop working everywhere -- no error,
+        # no log, just worse matching -- because the bundle probe already
+        # cannot see them.
+        tool = real_tool_for(album='Some Book [B08WF9JR2P]')
+        tool.prefs['api_base_url'] = 'http://api.test:3737'
+        query = tool.build_search_args()
+        self.assertIn('B08WF9JR2P', query, 'the ASIN must survive into the query')
+        self.assertIn('%5B', query, 'and so must the bracket the API scans for')
 
 
 class TestBuiltQueryCarriesTheHints(unittest.TestCase):
