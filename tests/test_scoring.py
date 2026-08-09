@@ -233,5 +233,62 @@ class TestHonorificDoesNotBlockAnAuthorMatch(unittest.TestCase):
 # test_sort_titles 3 of 18. Discovery was unaffected, so the suite stayed
 # honest while a direct run (how a single fix gets checked) silently skipped
 # the new tests. tests/test_deploy_gate.py pins the position for every file.
+class TestScorersCompareTextNotBytes(unittest.TestCase):
+    """
+    THE NON-ASCII AUTHOR SKEW.
+
+    Under the deployed py2, `media.artist` is a utf-8 BYTE string while the
+    provider's author arrives from JSON as UNICODE. score_author compared them
+    raw, so Levenshtein counted every non-ASCII letter as the 2-3 bytes that
+    encode it: an exact-match author with an accent scored as a MISMATCH. This
+    library is full of them -- Beren and Lúthien, Der große Bruderkrieg,
+    Japanese titles -- and the deduction is weighted x10, so a few accents
+    push a correct author under Plex's 80-point auto-apply bar.
+
+    to_text decodes instead of encoding, which fixes py2 AND removes the
+    harness trap the file above documents: score_album's `.encode('utf-8')`
+    made it undriveable here (bytes have no .replace under py3), so it had
+    NEVER been tested. It can be now.
+    """
+
+    def tool(self, tagged_artist, tagged_album=u'A Book'):
+        tool = ST.ScoreTool.__new__(ST.ScoreTool)
+        tool.calculate_score = ST.Util.LevenshteinDistance
+
+        class Media(object):
+            artist = tagged_artist
+            album = tagged_album
+
+        class Helper(object):
+            media = Media()
+
+        tool.helper = Helper()
+        return tool
+
+    def test_to_text_converges_both_spellings(self):
+        # The identity that makes the comparison meaningful at all.
+        self.assertEqual(ST.to_text(u'Lu\u0301thien'), u'Lu\u0301thien')
+        self.assertEqual(ST.to_text(u'Luthien'.encode('utf-8')), u'Luthien')
+        self.assertEqual(ST.to_text(u'gro\xdfe'.encode('utf-8')), u'gro\xdfe')
+
+    def test_an_exact_nonascii_author_scores_zero_deduction(self):
+        # The bug: byte-tag vs unicode-JSON inflated this to a real deduction.
+        name = u'Bj\xf6rn Andr\xe9asson'
+        tool = self.tool(name.encode('utf-8'))
+        self.assertEqual(tool.score_author(name), 0)
+
+    def test_an_exact_nonascii_ALBUM_scores_zero_deduction(self):
+        # score_album could not be driven from this harness at all before
+        # to_text; this is its first test.
+        title = u'Der gro\xdfe Bruderkrieg'
+        tool = self.tool(u'X'.encode('utf-8'), tagged_album=title.encode('utf-8'))
+        self.assertEqual(tool.score_album(title), 0)
+
+    def test_a_genuinely_different_author_still_deducts(self):
+        # The fix must not make everything match.
+        tool = self.tool(u'Bj\xf6rn Andr\xe9asson'.encode('utf-8'))
+        self.assertGreater(tool.score_author(u'Completely Different Person'), 0)
+
+
 if __name__ == '__main__':
     unittest.main()

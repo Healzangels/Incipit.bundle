@@ -74,6 +74,41 @@ def name_key(value):
         return ''
 
 
+def to_text(value):
+    """
+        Both sides of a scoring comparison as TEXT, whatever they arrive as.
+
+        THE SKEW: under the deployed py2, `media.artist` is a utf-8 BYTE
+        string while the provider's author comes from JSON as UNICODE.
+        Levenshtein then compares bytes to characters, so every non-ASCII
+        letter counts as the 2-3 bytes that encode it: "Lúthien" vs
+        "Luthien"-shaped tags, "Der große Bruderkrieg", Japanese titles all
+        pay an inflated distance and their author deduction is too harsh.
+
+        DECODE rather than encode. score_album mirrors the other direction
+        (`title.encode('utf-8')`) and that is precisely why it cannot be
+        driven from the py3 harness at all -- bytes have no `.replace('-','')`
+        there, a trap this file's own tests document at length. Decoding
+        converges both pythons on text: py2 gets character-wise comparison
+        (the fix), py3 leaves str untouched (so these scorers become testable
+        for the first time).
+    """
+    # ASK, DON'T INSPECT. The sandbox whitelist carries neither the byte-string
+    # builtin nor hasattr (both refused by this repo's own guard tests, which
+    # caught two earlier drafts of this function), and a missing builtin is a
+    # NameError that kills the whole plugin silently. Attempting the decode
+    # needs no builtin at all and lands correctly on both pythons:
+    #   py2 str      -> decodes to unicode (the fix)
+    #   py2 unicode  -> .decode re-encodes as ascii first and raises; caught
+    #   py3 str      -> no .decode at all -> AttributeError; caught
+    # ValueError covers the unicode errors, which subclass it -- catching them
+    # by NAME is separately banned here (py2 raises a different one).
+    try:
+        return value.decode('utf-8', 'replace')
+    except (AttributeError, ValueError):
+        return value
+
+
 def quote_param(value):
     """
         urllib.quote for any value that may arrive as framework/json unicode.
@@ -2435,11 +2470,11 @@ class ScoreTool:
             Compare the input album similarity to the search result album.
             Score is calculated with LevenshteinDistance
         """
-        scorebase1 = self.helper.media.album
+        scorebase1 = to_text(self.helper.media.album)
         if not scorebase1:
             log.error('No album title found in file metadata')
             return 50
-        scorebase2 = title.encode('utf-8')
+        scorebase2 = to_text(title)
         album_score = self.calculate_score(
             self.reduce_string(scorebase1),
             self.reduce_string(scorebase2)
@@ -2469,8 +2504,8 @@ class ScoreTool:
             the relaxation cannot make unrelated people match.
         """
         if self.helper.media.artist:
-            scorebase3 = self.helper.media.artist
-            scorebase4 = author
+            scorebase3 = to_text(self.helper.media.artist)
+            scorebase4 = to_text(author)
             plain = self.calculate_score(
                 self.reduce_string(scorebase3),
                 self.reduce_string(scorebase4)
