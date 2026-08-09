@@ -891,12 +891,24 @@ def backup_selected_poster(helper):
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.info('incipit poster-backup: unchanged, skip'); return
     # ...including when the selection is OUR OWN padded re-select of that same
-    # cover (see RESELECT_PAD): identical pixels, different bytes. Writing it
+    # cover (see RESELECT_PADS): identical pixels, different bytes. Writing it
     # back would silently grow the operator's cover.jpg by the pad -- breaking
     # any byte/sha reconciliation against the curated-cover manifest -- and
     # would make the padded copy the new "plain" base, so every later deselect
     # mints another pad level instead of stopping at the documented boundary.
-    if existing and selected == existing + RESELECT_PAD:
+    #
+    # EVERY generation, not just v1. This tested `existing + RESELECT_PAD`
+    # alone, so once v1.3.190 made the pad a FAMILY a v2/v3-padded selection
+    # failed the test and fell through to the write -- proved in curate mode
+    # with a v2 selection, a 52-byte write ending in RESELECT_PADS[1], i.e.
+    # exactly the byte growth this guard exists to prevent. Through
+    # strip_one_pad, the shipped family reader same_image already uses, so a
+    # fourth generation cannot teach one of them and not the other. The
+    # length test makes the equal case explicit -- it returned at the
+    # unchanged-skip above, and a bare strip comparison would otherwise read
+    # an unpadded identical selection as "padded".
+    if existing and len(selected) > len(existing) \
+            and strip_one_pad(selected) == existing:
         mark_done('poster-backup', helper.metadata.guid, thumb)
         log.info('incipit poster-backup: selection is our padded re-select of '
                  'this cover, skip'); return
@@ -1005,10 +1017,13 @@ def padded_variants(image_bytes):
     """(sha_original, sha_v1_padded, v1_padded_bytes) for ownership/skip checks.
 
     The v1-only historical shape; family-aware callers use pad_family_shas.
+    DELEGATES to it rather than recomputing: every production call site moved
+    to pad_family_shas at v1.3.190, leaving this exercised only by tests -- so
+    two independent implementations of the same rule agreed only by accident,
+    and the one the tests pin was the one nothing ran.
     """
-    sha = hashlib.sha1(image_bytes).hexdigest()
-    padded = image_bytes + RESELECT_PAD
-    return sha, hashlib.sha1(padded).hexdigest(), padded
+    fam = pad_family_shas(image_bytes)
+    return fam[0][0], fam[1][0], fam[1][1]
 
 
 def pad_family_shas(image_bytes):
@@ -1130,7 +1145,7 @@ def read_poster_state(guid, tag):
 
 def thumb_field_locked(rk, tag):
     """
-        Whether a HUMAN chose this item's poster.
+        (a_human_chose_this_poster, known) for the item with `rk`.
 
         Plex stamps <Field locked="1" name="thumb"/> on the item whenever a
         poster is selected by hand -- a UI click or the /poster?url= API --
@@ -1146,18 +1161,31 @@ def thumb_field_locked(rk, tag):
         no longer condemned to ambiguity. Operator directive 2026-08-08: a
         human selection is inviolable, whatever key form it points at.
 
-        FAIL-CLOSED: an unreadable answer reports True ("assume a human chose
-        it"), because every caller is about to CHANGE the selection and the
-        poison-guard rule holds -- never overwrite what you cannot prove is
-        yours (the same discipline as artist_poster_bytes' `known` flag).
+        TWO values, the shape this docstring already claimed to follow and did
+        not: it returned a BARE BOOL that failed closed to True, so no caller
+        could tell "a human chose this" from "I could not read it". Both
+        answers stand the selection down, but they must not be RECORDED alike
+        -- select_local_cover took the unreadable answer down its destructive
+        branch (mark_done + remember_verdict(False)), so one timed-out
+        localhost GET during a scan burst made every sibling track of the album
+        replay False and suppressed the container-twin prune for the whole
+        album. The poison guard ten lines below it already states the opposite
+        discipline: "a transient failure must retry, not be suppressed."
+
+        FAIL-CLOSED on the VALUE: an unreadable answer still reports True
+        ("assume a human chose it"), because every caller is about to CHANGE
+        the selection and the poison-guard rule holds -- never overwrite what
+        you cannot prove is yours. `known` is False ONLY for a failure, and it
+        is what says whether the stand-down may be memoised (the same
+        discipline as artist_poster_bytes' `known` flag).
     """
     try:
         url = PMS + '/library/metadata/' + rk
         text = str(HTTP.Request(url, timeout=8, cacheTime=0).content)
-        return bool(re.search(r'<Field[^>]*name="thumb"', text))
+        return (bool(re.search(r'<Field[^>]*name="thumb"', text)), True)
     except Exception as e:
         log.error('%s: could not read the thumb field lock (%s)', tag, e)
-        return True
+        return (True, False)
 
 
 def same_image(first, second):
@@ -1717,22 +1745,27 @@ def alternate_cover_acceptable(data):
 #
 # Keyed on the url alone, not the guid: "the bytes at this url are not square
 # art" is a property of the url, and the same dead url is offered across books.
-# Bounded and TTL'd like verdict_memo, so a later refresh retries.
-alternate_refusal_memo = {}
+#
+# THROUGH verdict_memo, not a bespoke dict. This pair hand-rolled a bounded TTL
+# memo -- down to a verbatim copy of the `if len(X) > 512: X.clear()` idiom --
+# that the generic remember_verdict/recall_verdict above already are. The
+# public helper names stay, so call sites and tests read the same.
+#
+# verdict_memo and NOT should_run/mark_done: recent_work_memo has no size bound
+# at all, and urls are a large keyspace.
 ALTERNATE_REFUSAL_TTL = 600
+ALTERNATE_REFUSAL_TAG = 'incipit alt-refusal'
 
 
 def alternate_refused_recently(url):
     """True when this url was fetched and rejected within the TTL."""
-    stamp = alternate_refusal_memo.get(url)
-    return bool(stamp and (time() - stamp) < ALTERNATE_REFUSAL_TTL)
+    return bool(recall_verdict(ALTERNATE_REFUSAL_TAG, url, 'refused',
+                               ALTERNATE_REFUSAL_TTL))
 
 
 def remember_alternate_refusal(url):
     """Record that this url did not yield a usable cover."""
-    if len(alternate_refusal_memo) > 512:
-        alternate_refusal_memo.clear()
-    alternate_refusal_memo[url] = time()
+    remember_verdict(ALTERNATE_REFUSAL_TAG, url, 'refused', True)
 
 
 def offer_alternate_covers(helper, sort_order=3):
@@ -1775,27 +1808,46 @@ def offer_alternate_covers(helper, sort_order=3):
         # sibling tracks re-pay the whole fetch+decode to reach the same no.
         if alternate_refused_recently(url):
             continue
+        # THE VERDICT, and nothing else, inside this try. Judge the PIXELS: the
+        # api can only vouch for the record; a Hardcover edition with a runtime
+        # can still ship the print jacket, and a dead CDN url returns HTML. See
+        # alternate_cover_acceptable.
+        data = None
+        acceptable = False
         try:
             data = fetch_url_bytes(url)
-            if not data:
-                remember_alternate_refusal(url)
-                continue
-            # Judge the PIXELS. The api can only vouch for the record; a
-            # Hardcover edition with a runtime can still ship the print jacket,
-            # and a dead CDN url returns HTML. See alternate_cover_acceptable.
-            if not alternate_cover_acceptable(data):
-                log.info('incipit cover: alternate refused -- not square art (%s)', url)
-                remember_alternate_refusal(url)
-                continue
-            helper.metadata.posters[url] = Proxy.Media(data, sort_order=sort_order)
-            added.append(url)
-            log.info('incipit cover: offering an alternate-marketplace cover (%s)', url)
+            acceptable = bool(data) and alternate_cover_acceptable(data)
         except Exception as e:
-            # Remembered too: a transient failure retried 26 more times inside
-            # one pass is the exact waste this memo exists for, and the TTL
-            # lets a later refresh try again.
+            # Belt and braces -- both helpers swallow their own failures and
+            # return a falsy answer, so this is not reachable in production.
+            # Recording it is still right: failing to reach a VERDICT is a
+            # refusal of the url, which is what this memo is keyed on.
+            log.warn('incipit cover: alternate cover could not be judged '
+                     '(%s: %s)', url, e)
             remember_alternate_refusal(url)
-            log.warn('incipit cover: alternate cover failed (%s: %s)', url, e)
+            continue
+        if not acceptable:
+            if data:
+                log.info('incipit cover: alternate refused -- not square art (%s)', url)
+            remember_alternate_refusal(url)
+            continue
+        # THE VERDICT IS YES from here, so nothing below may record a refusal.
+        # It used to: one blanket `except Exception` wrapped the container write
+        # as well, and since fetch_url_bytes and alternate_cover_acceptable both
+        # swallow their own exceptions that clause was reachable ONLY from these
+        # post-verdict lines -- i.e. only from the case where recording a
+        # refusal is WRONG. The memo is keyed on the url alone and is
+        # module-global, so one container-write blip suppressed a genuinely good
+        # cover for EVERY book in the library for the whole TTL.
+        try:
+            helper.metadata.posters[url] = Proxy.Media(data, sort_order=sort_order)
+        except Exception as e:
+            log.warn('incipit cover: alternate cover could not be offered '
+                     '(%s: %s) -- NOT recorded as a refusal, the image is good',
+                     url, e)
+            continue
+        added.append(url)
+        log.info('incipit cover: offering an alternate-marketplace cover (%s)', url)
     return added
 
 
@@ -2191,7 +2243,6 @@ def upload_and_select_poster(guid, image_bytes, tag, token=None, state=None,
     # (proven live -- `NameError: global name 'any' is not defined` aborted the
     # whole artist update). set() IS available; the blocklist is irregular, so
     # find in-repo precedent before using any builtin here.
-    have_plain = False
     burned = {}
     for k in keys:
         for fam_sha, _ in family:
@@ -2423,11 +2474,21 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
     # over a curated artist cheaper, not costlier. Only consulted when a
     # selection EXISTS: a fresh artist with nothing selected has nothing a
     # human could have chosen.
-    if selected_key and thumb_field_locked(rk, tag):
-        log.info('%s: the poster was chosen by a human (thumb field locked) '
-                 '-- leaving it', tag)
-        mark_done(tag, guid, target_url)
-        return
+    if selected_key:
+        locked, lock_known = thumb_field_locked(rk, tag)
+        if not lock_known:
+            # No mark_done: a transient failure must RETRY, not be suppressed.
+            # The value still fails closed (we leave the selection alone), but
+            # recording that stand-down would replay it on every sibling track
+            # of the album and outlive the blip by the whole TTL.
+            log.error('%s: could not read the thumb field lock -- leaving the '
+                      'selection alone and retrying next pass', tag)
+            return
+        if locked:
+            log.info('%s: the poster was chosen by a human (thumb field locked) '
+                     '-- leaving it', tag)
+            mark_done(tag, guid, target_url)
+            return
     # Strict mode (the unpin direction): act only on a selection this agent
     # demonstrably UPLOADED. A metadata:// container key is ambiguous by
     # construction -- the container may have defaulted to it, or the user may
@@ -2553,10 +2614,18 @@ def correct_portrait_selection(helper, cover_bytes, square_bytes):
     guid = helper.metadata.guid
     try:
         family = pad_family_shas(cover_bytes)
-        sha, sha_padded = family[0][0], family[1][0]
+        sha = family[0][0]
     except Exception as e:
         log.error('%s: could not hash the local cover (%s)', tag, e)
         return
+    # The WHOLE family, exactly as select_local_cover and converge_author_art
+    # build it. This kept only family[0] and family[1] -- the pre-v1.3.190
+    # plain+v1 pair -- so a v2/v3-padded upload THE AGENT ITSELF minted read
+    # as a foreign user upload and the portrait correction stood down
+    # permanently on precisely the albums the generations exist to rescue.
+    owned = []
+    for fam_sha, fam_ignored in family:
+        owned.append(fam_sha)
     # MEMO FIRST, like select_local_cover and converge_author_art. update() runs
     # once per TRACK, and every read below is a round trip -- read_poster_state
     # is two, and selected_poster_bytes downloads a full poster. Asking the memo
@@ -2573,7 +2642,7 @@ def correct_portrait_selection(helper, cover_bytes, square_bytes):
     rk, selected_key, keys, parent_thumb = state
     # The jacket's own shas count as ours: select_local_cover may have uploaded
     # it on an earlier pass, and undoing our own act is the whole point.
-    if not selection_is_agent_owned(selected_key, [sha, sha_padded]):
+    if not selection_is_agent_owned(selected_key, owned):
         log.info('%s: selection is a user upload -- leaving it', tag)
         mark_done(tag, guid, sha)
         return
@@ -2593,6 +2662,37 @@ def correct_portrait_selection(helper, cover_bytes, square_bytes):
         log.info('%s: the selection is not the print jacket -- leaving it', tag)
         mark_done(tag, guid, sha)
         return
+    # A HUMAN pick is inviolable -- the third override path to learn the thumb
+    # field-lock rule its two siblings got in this release, and without it this
+    # one could silently revert a deliberate click.
+    #
+    # Asked ONLY of the ambiguous class, and only HERE. selection_is_agent_owned
+    # admits two very different keys and its docstring records the difference:
+    # an `upload://` carrying one of THIS image's family shas is a poster the
+    # agent provably WROTE, so overriding it merely undoes our own act and needs
+    # no permission; a `com.plexapp.agents.incipit` container key is
+    # agent-SUPPLIED but click-vs-default INDISTINGUISHABLE, and that is exactly
+    # the class the field lock was measured to resolve. Placed after same_image
+    # has proven the jacket is really showing, so a converged book pays no round
+    # trip for a question whose answer it does not need.
+    agent_written = False
+    for fam_sha, fam_ignored in family:
+        if fam_sha in selected_key:
+            agent_written = True
+            break
+    if not agent_written:
+        locked, lock_known = thumb_field_locked(rk, tag)
+        if not lock_known:
+            # No mark_done: a blip must retry, not be suppressed -- the same
+            # rule the unreadable-selection branch above already follows.
+            log.error('%s: could not read the thumb field lock -- NOT '
+                      'overriding the selection on rk %s', tag, rk)
+            return
+        if locked:
+            log.info('%s: the jacket was chosen by a human (thumb field '
+                     'locked) -- leaving it', tag)
+            mark_done(tag, guid, sha)
+            return
     log.warn('%s: rk %s is showing the PORTRAIT cover.jpg the deferral declined; '
              'force-selecting the square online cover instead', tag, rk)
     # `selected` hands the bytes we just read to the callee's duplicate guard,
@@ -2900,13 +3000,24 @@ def local_cover_recovery_needed(helper):
 
         Memoised per guid for the pass (the same per-track collapse every
         selection path uses): track 1 answers for the whole album.
+
+        Returns (needed, state) -- the poster state it just fetched rides
+        along, because select_local_cover is the only thing a True answer
+        leads to and it asks read_poster_state the SAME question about the
+        SAME guid with nothing changing in between. Handing it over turns 4
+        localhost GETs into 2 on every plain recovery pass, and
+        read_poster_state disables the HTTP cache on both of its requests, so
+        neither round trip was ever free. `state` is None whenever there is
+        nothing to hand on (memo hit, unreadable read), and the callee then
+        does its own read exactly as before -- the same optional-prefetch
+        shape upload_and_select_poster already takes.
     """
     guid = helper.metadata.guid
     if not should_run('incipit local-recovery', guid, 'check', 300):
-        return False
+        return (False, None)
     state = read_poster_state(guid, 'incipit local-recovery')
     if state is None:
-        return False
+        return (False, None)
     rk, selected_key, keys, parent_thumb = state
     needed = bool(selected_key) and not selected_key.startswith('upload')
     if not needed:
@@ -2914,10 +3025,11 @@ def local_cover_recovery_needed(helper):
         # re-askable, because select_local_cover's own verdict memo is what
         # collapses its per-track cost once it actually runs.
         mark_done('incipit local-recovery', guid, 'check')
-    return needed
+        return (False, None)
+    return (True, state)
 
 
-def select_local_cover(helper, cover_bytes=None):
+def select_local_cover(helper, cover_bytes=None, state=None):
     """
         Force the book folder's cover.jpg to become the SELECTED Plex poster on
         a Refresh of an ALREADY-scanned book (the container path only wins on a
@@ -2964,7 +3076,11 @@ def select_local_cover(helper, cover_bytes=None):
         # pruning wrongly destroys curated art.
         replayed = recall_verdict(tag, guid, sha, 90)
         return replayed if replayed is not None else False
-    state = read_poster_state(guid, tag)
+    # `state` is an optional pre-fetched read_poster_state result (see
+    # local_cover_recovery_needed, which has just read exactly this for exactly
+    # this guid). Read here only when nobody handed one over.
+    if state is None:
+        state = read_poster_state(guid, tag)
     if state is None:
         return False
     rk, selected_key, keys, parent_thumb = state
@@ -3015,12 +3131,26 @@ def select_local_cover(helper, cover_bytes=None):
         # zero-cost on refresh (the pinned "does no work" invariant), and a
         # user-upload selection already stood down above without paying for
         # this read either.
-        if selected_key and thumb_field_locked(rk, tag):
-            log.info('%s: the poster was chosen by a human (thumb field '
-                     'locked) -- leaving it', tag)
-            mark_done(tag, guid, sha)
-            remember_verdict(tag, guid, sha, False)
-            return False
+        if selected_key:
+            locked, lock_known = thumb_field_locked(rk, tag)
+            if not lock_known:
+                # No mark_done, no remembered verdict -- the same discipline
+                # the poison guard below states and implements. This branch
+                # used to record False, so ONE timed-out localhost GET during
+                # a scan burst made every sibling track replay the stand-down
+                # and suppressed the container-twin prune for the whole album.
+                # The stand-down itself still happens (fail closed on the
+                # poster-preserving direction); it just is not remembered.
+                log.error('%s: could not read the thumb field lock -- NOT '
+                          'selecting cover.jpg, so a blip cannot take away a '
+                          'poster a human may have chosen', tag)
+                return False
+            if locked:
+                log.info('%s: the poster was chosen by a human (thumb field '
+                         'locked) -- leaving it', tag)
+                mark_done(tag, guid, sha)
+                remember_verdict(tag, guid, sha, False)
+                return False
         artist_bytes, known = artist_poster_bytes(guid, tag, parent_thumb)
         # FAIL CLOSED. This path force-selects cover.jpg over whatever the
         # operator picked, so "could not tell" must not read as "not poison":
@@ -4324,10 +4454,18 @@ class AudiobookAlbum(Agent.Album):
         # spelling them out twice meant four conditions to keep in sync.
         # helper.force is what makes cover_bytes freshly read, so neither branch
         # has anything to compare against on an incremental pass.
-        if (
-            Prefs['prefer_local_cover'] and not poisoned_local
-            and (helper.force or local_cover_recovery_needed(helper))
-        ):
+        #
+        # The recovery check is asked LAST and only when the cheap prefs
+        # already pass, so a library with prefer_local_cover off still pays
+        # nothing -- and it hands BACK the poster state it read, which
+        # select_local_cover below would otherwise re-read for the same guid
+        # with nothing changed in between (4 cache-disabled localhost GETs
+        # where 2 will do).
+        want_local = Prefs['prefer_local_cover'] and not poisoned_local
+        recovery_state = None
+        if want_local and not helper.force:
+            want_local, recovery_state = local_cover_recovery_needed(helper)
+        if want_local:
             if not deferred_portrait_local:
                 # PRUNE OUR TWIN. When the upload really does hold the selection,
                 # our container copy of the SAME cover.jpg is a second,
@@ -4354,7 +4492,8 @@ class AudiobookAlbum(Agent.Album):
                     if recovery_bytes is not None and local_cover_is_portrait(recovery_bytes):
                         recovery_bytes = None
                 if recovery_bytes is not None and should_prune_local_twin(
-                    select_local_cover(helper, recovery_bytes),
+                    select_local_cover(helper, recovery_bytes,
+                                       state=recovery_state),
                     local_key in helper.metadata.posters
                 ):
                     keep = cover_keep_list(

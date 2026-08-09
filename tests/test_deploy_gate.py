@@ -225,8 +225,69 @@ class SandboxIllegalNames(unittest.TestCase):
             return False
         return True
 
-    def test_no_leading_underscore_names_anywhere_in_the_bundle(self):
+    @classmethod
+    def offenders(cls, source, filename='<inline>'):
+        """
+            Every name in `source` RestrictedPython would reject at compile
+            time. ONE implementation, shared by the whole-bundle scan below and
+            the per-form tests: a second copy written for the synthetic cases
+            would MIRROR this walk instead of guarding it, and a form missed
+            here would then be missed there too.
+        """
         import ast
+        found = []
+        for node in ast.walk(ast.parse(source, filename)):
+            name = None
+            if isinstance(node, ast.Name):
+                name = node.id
+            elif isinstance(node, ast.arg):
+                name = node.arg
+            elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                name = node.name
+            elif isinstance(node, ast.Attribute):
+                # RestrictedPython blocks `obj._attr` reads for the same
+                # reason; the baseline has none, so this is free coverage.
+                name = node.attr
+            elif isinstance(node, ast.alias):
+                # RestrictedPython's visitImport/visitFrom checkName() the
+                # IMPORTED name FIRST and the asname second. Reading only
+                # `asname` therefore caught the single rarest fatal form
+                # (`import os as _os`) and missed `import _helpers`,
+                # `from x import _thing`, `import _foo as bar`,
+                # `from x import _a as b` and `from . import _mod` -- all of
+                # which kill the plugin at load.
+                #
+                # DELIBERATELY NOT ast.ImportFrom.module: `from _version import
+                # version` binds only `version`, RestrictedPython never
+                # checkName()s the module string, and Contents/Code/__init__.py
+                # has shipped exactly that line since 1.3.0 with v1.3.19x
+                # loading in production. Checking it would fail a known-good
+                # build (pinned below).
+                name = node.name if cls.illegal(node.name) else node.asname
+            elif isinstance(node, ast.ExceptHandler):
+                # `except SomeError as _e:` is fatal too, and nothing above
+                # sees it: ExceptHandler.name is a bare str under py3, not an
+                # ast.Name. (Under a py2 ast it IS an ast.Name and the branch
+                # above catches it, hence the type test rather than a cast.)
+                if isinstance(node.name, str):
+                    name = node.name
+            if cls.illegal(name):
+                found.append((filename, getattr(node, 'lineno', '?'), name))
+        return found
+
+    # Every form RestrictedPython kills the plugin for. One assertion each,
+    # because they fail for different reasons in the visitor.
+    FATAL_FORMS = (
+        'import _helpers\n',
+        'from x import _thing\n',
+        'import _foo as bar\n',
+        'from x import _a as b\n',
+        'from . import _mod\n',
+        'import os as _os\n',
+        'try:\n    x = 1\nexcept ValueError as _e:\n    pass\n',
+    )
+
+    def test_no_leading_underscore_names_anywhere_in_the_bundle(self):
         offenders = []
         scanned = 0
         for filename in sorted(os.listdir(self.CODE_DIR)):
@@ -234,29 +295,44 @@ class SandboxIllegalNames(unittest.TestCase):
                 continue
             path = os.path.join(self.CODE_DIR, filename)
             with open(path) as handle:
-                tree = ast.parse(handle.read(), path)
+                offenders.extend(self.offenders(handle.read(), filename))
             scanned += 1
-            for node in ast.walk(tree):
-                name = None
-                if isinstance(node, ast.Name):
-                    name = node.id
-                elif isinstance(node, ast.arg):
-                    name = node.arg
-                elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-                    name = node.name
-                elif isinstance(node, ast.Attribute):
-                    # RestrictedPython blocks `obj._attr` reads for the same
-                    # reason; the baseline has none, so this is free coverage.
-                    name = node.attr
-                elif isinstance(node, ast.alias):
-                    name = node.asname
-                if self.illegal(name):
-                    offenders.append((filename, getattr(node, 'lineno', '?'), name))
         self.assertGreater(scanned, 0, 'no bundle source scanned at all')
         self.assertEqual(
             offenders, [],
             'RestrictedPython rejects these at COMPILE time and the whole '
             'plugin dies silently -- no banner, no agent: %r' % (offenders,))
+
+    def test_every_fatal_import_and_except_form_is_caught(self):
+        for source in self.FATAL_FORMS:
+            self.assertNotEqual(
+                self.offenders(source), [],
+                'this form is fatal under RestrictedPython and the gate '
+                'let it through: %r' % (source,))
+
+    def test_from_underscore_module_import_plain_name_still_passes(self):
+        # THE KNOWN-GOOD BASELINE. `from _version import version` binds only
+        # `version`; RestrictedPython's visitFrom checkName()s the alias, never
+        # node.module. Widening the gate to the module string would fail a
+        # build that is loading in production right now.
+        self.assertEqual(self.offenders('from _version import version\n'), [])
+
+    def test_that_baseline_is_not_hypothetical(self):
+        # ...and it is the line the bundle actually ships, so the exemption
+        # above is load-bearing rather than a hypothetical carve-out.
+        path = os.path.join(self.CODE_DIR, '__init__.py')
+        with open(path) as handle:
+            self.assertIn('from _version import version', handle.read())
+
+    def test_ordinary_imports_are_not_flagged(self):
+        # The gate must not be over-broad: a dotted module, a plain alias and
+        # a normal except handler are all fine.
+        self.assertEqual(self.offenders(
+            'import os\n'
+            'import os.path\n'
+            'import json as j\n'
+            'from x import y as z\n'
+            'try:\n    x = 1\nexcept ValueError as e:\n    pass\n'), [])
 
 
 if __name__ == '__main__':

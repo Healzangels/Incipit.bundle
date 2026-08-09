@@ -949,6 +949,21 @@ class TestAlternateCoverMemo(unittest.TestCase):
     def test_an_unknown_id_recalls_nothing(self):
         self.assertEqual(ST.recall_alternate_covers('B0NOTHERE01'), [])
 
+    def test_the_memo_is_bounded(self):
+        """
+        A PluginHost lives for weeks; this memo sits on the PRIMARY search path
+        at one entry per candidate and had no cap and no TTL, so a full scan
+        retained ~10^4 entries permanently. The two memos added for the same
+        job in this release (verdict_memo and the alternate-refusal memo) are
+        both bounded at 512 -- this one was the outlier.
+        """
+        for i in range(600):
+            ST.remember_alternate_covers('B0BOUND%04d' % i, ['a.jpg'])
+        self.assertLessEqual(len(ST.ALTERNATE_COVER_MEMO), 513)
+        # ...and the bound must not break the feature: the most recent write
+        # is still recallable.
+        self.assertEqual(ST.recall_alternate_covers('B0BOUND0599'), ['a.jpg'])
+
     def test_the_region_suffix_plex_appends_still_matches(self):
         # Search emits the bare asin; update sees "<asin>_<region>". Without
         # normalising, the memo would never hit on the very path it exists for.

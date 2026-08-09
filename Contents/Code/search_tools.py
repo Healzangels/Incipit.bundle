@@ -186,6 +186,16 @@ def remember_alternate_covers(book_id, urls):
         except Exception:
             continue
     if kept:
+        # BOUNDED, like the two memos added for the same job in this release
+        # (verdict_memo and the alternate-refusal memo, both `if len(X) > 512:
+        # X.clear()`). This one sits on the PRIMARY search path at one entry
+        # per candidate and had no cap and no TTL, so in a long-lived
+        # PluginHost a full scan retained ~10^4 entries permanently. Clearing
+        # wholesale rather than evicting one entry is the house idiom: the memo
+        # is an optimisation, and a cleared one merely means the next search
+        # re-records what it is already holding in hand.
+        if len(ALTERNATE_COVER_MEMO) > 512:
+            ALTERNATE_COVER_MEMO.clear()
         ALTERNATE_COVER_MEMO[key] = kept
 
 

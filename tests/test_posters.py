@@ -61,6 +61,15 @@ class PaddedVariants(unittest.TestCase):
         # outside the agent; a change here silently breaks that reader.
         self.assertEqual(len(PAD), 20)
 
+    def test_it_agrees_with_pad_family_shas_because_it_IS_it(self):
+        # Every production call site moved to pad_family_shas at v1.3.190,
+        # leaving this exercised only by tests -- two independent
+        # implementations of one rule, agreeing by accident, and the one the
+        # tests pinned was the one nothing ran. It delegates now.
+        fam = AG.pad_family_shas(COVER)
+        self.assertEqual(AG.padded_variants(COVER),
+                         (fam[0][0], fam[1][0], fam[1][1]))
+
 
 class SearchCacheTime(unittest.TestCase):
     def test_a_manual_search_is_never_cached(self):
@@ -440,6 +449,108 @@ class PortraitDeferralMirror(unittest.TestCase):
         self.assertEqual(self.writes[0][1], self.PICKED)
 
 
+class PaddedReselectIsNeverMirroredToDisk(unittest.TestCase):
+    """
+    OUR OWN padded re-select must never be written back over cover.jpg.
+
+    Identical pixels, different bytes: writing it back grows the operator's
+    file by the pad, breaks byte/sha reconciliation against the curated-cover
+    manifest, and makes the padded copy the new "plain" base -- so every later
+    deselect mints another generation instead of stopping at the documented
+    boundary.
+
+    The guard tested `existing + RESELECT_PAD` and nothing else. v1.3.190 made
+    the pad a FAMILY, so a v2- or v3-padded selection failed that test and fell
+    through to the write: reproduced in curate mode with a v2 selection as a
+    52-byte write ending in RESELECT_PADS[1].
+    """
+
+    CURATED = b'\xff\xd8\xff\xe0 the operator curated file'
+    PICKED = b'\xff\xd8\xff\xe0 the poster the operator picked'
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        self.writes = []
+        self.selected_bytes = self.CURATED
+        self.saved = (AG.HTTP.Request, AG.Core.storage.load,
+                      AG.write_cover_sidecar)
+        outer = self
+
+        def router(url, **kwargs):
+            class FakeResponse(object):
+                content = ''
+            reply = FakeResponse()
+            if '/library/all' in url:
+                # No parentThumb: the poison guard needs one, and this book's
+                # question is the pad, not the artist photo.
+                reply.content = ('<MediaContainer size="1">'
+                                 '<Directory ratingKey="55" '
+                                 'thumb="/library/metadata/55/thumb/1"/>'
+                                 '</MediaContainer>')
+            elif '/thumb/' in url:
+                reply.content = outer.selected_bytes
+            return reply
+
+        AG.HTTP.Request = router
+        AG.Core.storage.load = lambda path: outer.CURATED
+        AG.write_cover_sidecar = (
+            lambda path, data: outer.writes.append((path, data)) or True)
+        # CURATE: the only mode where an existing file may be replaced at all,
+        # so it is the only mode in which this guard is the thing standing
+        # between the pad and the operator's art.
+        AG.Prefs['cover_mirror_mode'] = (
+            'Curation (the selected poster replaces cover.jpg)')
+
+    def tearDown(self):
+        (AG.HTTP.Request, AG.Core.storage.load,
+         AG.write_cover_sidecar) = self.saved
+        AG.Prefs.pop('cover_mirror_mode', None)
+        AG.recent_work_memo.clear()
+
+    def _helper(self):
+        class FakeMetadata(object):
+            guid = 'com.plexapp.agents.incipit://B0PADMIRROR_us'
+
+        class FakeHelper(object):
+            metadata = FakeMetadata()
+            thumb = 'https://images.example/online-cover.jpg'
+            force = True
+
+            def album_file_path(self):
+                return '/data/media/x/1 - Book/file.m4b'
+
+        return FakeHelper()
+
+    def test_every_pad_generation_is_recognised_as_our_own_reselect(self):
+        # READ THE CONSTANT: a fourth generation added to RESELECT_PADS must be
+        # covered here automatically, or this test would be the same
+        # one-generation blind spot it exists to close.
+        self.assertGreaterEqual(len(AG.RESELECT_PADS), 3,
+                                'an emptied constant would make this vacuous')
+        for index, pad in enumerate(AG.RESELECT_PADS):
+            AG.recent_work_memo.clear()
+            self.writes = []
+            self.selected_bytes = self.CURATED + pad
+            AG.backup_selected_poster(self._helper())
+            self.assertEqual(
+                self.writes, [],
+                'the v%d-padded selection was mirrored back over cover.jpg, '
+                'growing the operator\'s file by %d bytes'
+                % (index + 1, len(pad)))
+
+    def test_a_real_pick_is_still_mirrored(self):
+        # The guard must not be over-broad -- a genuinely different selection
+        # is exactly what curate mode exists to capture.
+        self.selected_bytes = self.PICKED
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(len(self.writes), 1)
+        self.assertEqual(self.writes[0][1], self.PICKED)
+
+    def test_an_unchanged_selection_writes_nothing(self):
+        AG.backup_selected_poster(self._helper())
+        self.assertEqual(self.writes, [])
+
+
 class SquareTilePortraitChoice(unittest.TestCase):
     """
     Which of two author portraits fills Plex's SQUARE artist tile better.
@@ -755,12 +866,17 @@ class PrintJacketSelectionIsCorrected(unittest.TestCase):
 
         AG.HTTP.Request = router
         AG.read_poster_state = lambda guid, tag: ('101', self.selected, [], None)
+        # An unlocked (scan-default) selection unless a test says otherwise:
+        # the ambiguous-key class now consults the thumb field lock.
+        self.real_lock = AG.thumb_field_locked
+        AG.thumb_field_locked = lambda rk, tag: (False, True)
         AG.recent_work_memo.clear()
         AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.HTTP.Request = self.real
         AG.read_poster_state = self.real_state
+        AG.thumb_field_locked = self.real_lock
         AG.recent_work_memo.clear()
         AG.verdict_memo.clear()
 
@@ -809,6 +925,88 @@ class PrintJacketSelectionIsCorrected(unittest.TestCase):
 
     def test_an_unreadable_poster_state_does_nothing(self):
         AG.read_poster_state = lambda guid, tag: None
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(self.posts, [])
+
+    def test_EVERY_pad_generation_of_our_own_upload_is_still_ours(self):
+        """
+        THE WHOLE FAMILY, exactly as select_local_cover builds it.
+
+        This kept only family[0] and family[1] -- the pre-v1.3.190 plain+v1
+        pair -- and handed those two shas to selection_is_agent_owned. So a
+        v2/v3-padded upload THE AGENT ITSELF minted read as a foreign user
+        upload and the portrait correction stood down PERMANENTLY, on
+        precisely the albums the pad generations exist to rescue (the burst-
+        raced selects that burn a byte-form without landing).
+        """
+        fam = AG.pad_family_shas(COVER)
+        self.assertGreaterEqual(len(fam), 4, 'family shrank; this went vacuous')
+        for index in range(len(fam)):
+            AG.recent_work_memo.clear()
+            AG.verdict_memo.clear()
+            self.posts = []
+            self.selected = 'upload://posters/' + fam[index][0]
+            AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+            self.assertEqual(
+                len(self.posts), 1,
+                'family index %d (our own upload) read as a FOREIGN upload, '
+                'so the print jacket is frozen forever' % index)
+            self.assertEqual(self.posts[0], ARTIST)
+
+    # --- the thumb field lock, for the AMBIGUOUS class only ---
+
+    def test_a_human_locked_container_pick_is_not_overridden(self):
+        # The third override path to learn the lock rule. `self.selected` is a
+        # com.plexapp.agents.incipit metadata key: agent-SUPPLIED, but
+        # click-vs-default indistinguishable by construction -- exactly the
+        # class selection_is_agent_owned documents as ambiguous and the field
+        # lock was measured to resolve.
+        AG.thumb_field_locked = lambda rk, tag: (True, True)
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(self.posts, [],
+                         'a deliberate human click must not be reverted')
+
+    def test_an_UNLOCKED_container_pick_is_still_corrected(self):
+        # Not over-broad: a scan default is still ours to fix. (A mutation
+        # hardcoding the lock True dies here; removing the gate dies above.)
+        AG.thumb_field_locked = lambda rk, tag: (False, True)
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_an_UNREADABLE_lock_stands_down_without_being_memoised(self):
+        AG.thumb_field_locked = lambda rk, tag: (True, False)
+        helper = self._helper()
+        AG.correct_portrait_selection(helper, COVER, ARTIST)
+        self.assertEqual(self.posts, [], 'a blip must not license an override')
+        self.assertNotIn(('incipit portrait-fix', helper.metadata.guid),
+                         AG.recent_work_memo,
+                         'a blip must RETRY next track, not be suppressed')
+
+    def test_our_OWN_upload_is_overridable_without_asking_the_lock(self):
+        # The other half of the rule. An upload:// carrying one of THIS
+        # image's family shas is a poster the agent provably WROTE, so
+        # overriding it merely undoes our own act -- and asking would cost a
+        # round trip to answer a question we do not need.
+        fam = AG.pad_family_shas(COVER)
+        self.selected = 'upload://posters/' + fam[0][0]
+
+        def never(rk, tag):
+            raise AssertionError('the lock must not be read for a key we wrote')
+
+        AG.thumb_field_locked = never
+        AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_a_converged_book_never_pays_for_the_lock_read(self):
+        # PLACEMENT. The consult sits AFTER same_image has proven the jacket is
+        # really showing, so a book that has already moved on pays nothing --
+        # the "a converged library does no work on refresh" invariant.
+        self.served = b'\xff\xd8\xff\xe0 some other agent cover'
+
+        def never(rk, tag):
+            raise AssertionError('the lock must not be read before same_image')
+
+        AG.thumb_field_locked = never
         AG.correct_portrait_selection(self._helper(), COVER, ARTIST)
         self.assertEqual(self.posts, [])
 
@@ -2108,7 +2306,7 @@ class ConvergePrunesItsOwnDuplicate(unittest.TestCase):
             ['metadata://posters/com.plexapp.agents.incipit_aaaa'], None)
         # A scan-default selection: the human-lock gate (v1.3.189) must stand
         # aside so this class keeps testing the post-select prune it is about.
-        AG.thumb_field_locked = lambda rk, tag: False
+        AG.thumb_field_locked = lambda rk, tag: (False, True)
         AG.fetch_url_bytes = lambda url: b'\xff\xd8 the converged image'
         self.validated = []
 
@@ -3756,20 +3954,26 @@ class TheUploadIsWhatSelects(unittest.TestCase):
         # The caller-level gate is what the rebuild exposed: select_local_cover
         # worked, but the album flow only CALLED it under helper.force, so
         # scheduled refreshes never recovered a lost birth. The flow is too
-        # large to drive here, so pin the wiring at source (house precedent:
-        # test_the_offer_path_actually_applies_it).
+        # large to drive here, so pin the wiring at source.
         import os
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             '..', 'Contents', 'Code', '__init__.py')
         with open(path) as handle:
             body = handle.read()
-        self.assertIn('helper.force or local_cover_recovery_needed(helper)', body)
+        # The check is REACHED on a non-forced pass...
+        self.assertIn('if want_local and not helper.force:', body)
+        self.assertIn(
+            'want_local, recovery_state = local_cover_recovery_needed(helper)',
+            body)
+        # ...and the state it read is THREADED into the select, rather than the
+        # same guid's poster state being fetched twice per plain recovery pass.
+        self.assertIn('state=recovery_state', body)
 
     def test_a_human_locked_pick_stops_the_override(self):
         # The would-act path must consult the thumb lock: a human who clicked
         # the agent's own online art keeps it, exactly like author art.
         saved = AG.thumb_field_locked
-        AG.thumb_field_locked = lambda rk, tag: True
+        AG.thumb_field_locked = lambda rk, tag: (True, True)
         try:
             sha, _padded, _ = AG.padded_variants(self.COVER)
             self._with_state(self.AGENT_SELECTION, [sha])
@@ -3777,6 +3981,42 @@ class TheUploadIsWhatSelects(unittest.TestCase):
             self.assertFalse(out)
             uploads = [p for p in self.posts if p[1].get('data') is not None]
             self.assertEqual(uploads, [])
+        finally:
+            AG.thumb_field_locked = saved
+
+    def test_an_UNREADABLE_lock_stands_down_but_is_NOT_memoised(self):
+        """
+        ONE BLIP MUST NOT SPEAK FOR THE WHOLE ALBUM.
+
+        This branch took the DESTRUCTIVE shape on an unreadable answer:
+        mark_done + remember_verdict(False) + return False. Because the verdict
+        memo is what sibling tracks replay, one timed-out localhost GET during
+        a scan burst made every remaining track of a 27-part book report False
+        -- and the caller prunes (or, here, declines to prune) our container
+        twin on the strength of that value, so the whole album inherited a
+        stand-down from a single blip. The poison guard ten lines below already
+        states the rule: "a transient failure must retry, not be suppressed."
+        """
+        saved = AG.thumb_field_locked
+        AG.thumb_field_locked = lambda rk, tag: (True, False)
+        try:
+            sha, _padded, _ = AG.padded_variants(self.COVER)
+            self._with_state(self.AGENT_SELECTION, [sha])
+            helper = self.FakeHelper()
+            self.assertFalse(AG.select_local_cover(helper, self.COVER),
+                             'fail closed: an unreadable lock never licenses '
+                             'an override')
+            uploads = [p for p in self.posts if p[1].get('data') is not None]
+            self.assertEqual(uploads, [])
+            guid = helper.metadata.guid
+            self.assertNotIn(('incipit local-select', guid), AG.recent_work_memo,
+                             'a blip must not collapse the sibling tracks')
+            self.assertIsNone(
+                AG.recall_verdict('incipit local-select', guid, sha, 90),
+                'a blip must not be replayed as a DECISION')
+            # The next track, with the read working again, does the work.
+            AG.thumb_field_locked = lambda rk, tag: (False, True)
+            self.assertTrue(AG.select_local_cover(helper, self.COVER))
         finally:
             AG.thumb_field_locked = saved
 
@@ -4404,10 +4644,43 @@ class AlternateCoversAreJudgedByTheirPixels(unittest.TestCase):
 
     def test_the_offer_path_actually_applies_it(self):
         # The predicate's own tests pass whether or not offer_alternate_covers
-        # calls it -- the unwired-stage shape this repo keeps paying for.
-        with open(self.SRC) as handle:
-            src = handle.read()
-        self.assertIn('if not alternate_cover_acceptable(data):', src)
+        # calls it -- the unwired-stage shape this repo keeps paying for. Was a
+        # source-string pin, which any rephrasing of the call broke while the
+        # WIRING it cared about was still intact. Drive the real offer path and
+        # flip only the predicate: its verdict must decide whether a tile
+        # appears, and it must be asked about the bytes actually fetched.
+        saved = (AG.fetch_url_bytes, AG.alternate_cover_acceptable, AG.Proxy.Media)
+        AG.verdict_memo.clear()
+        judged = []
+        data = _jpeg(2400, 2400)
+        try:
+            AG.fetch_url_bytes = lambda url: data
+            AG.Proxy.Media = lambda payload, sort_order=0: ('media', sort_order)
+
+            class FakePosters(dict):
+                pass
+
+            class FakeHelper(object):
+                thumb_alternates = ['https://x/alt.jpg']
+
+                class metadata(object):
+                    posters = FakePosters()
+
+            AG.alternate_cover_acceptable = (
+                lambda payload: judged.append(payload) or False)
+            self.assertEqual(AG.offer_alternate_covers(FakeHelper()), [],
+                             'a NO from the predicate must withhold the tile')
+            self.assertEqual(judged, [data],
+                             'the predicate must judge the fetched bytes')
+            AG.verdict_memo.clear()
+            AG.alternate_cover_acceptable = lambda payload: True
+            self.assertEqual(AG.offer_alternate_covers(FakeHelper()),
+                             ['https://x/alt.jpg'],
+                             'a YES must offer it -- or the wiring is dead')
+        finally:
+            (AG.fetch_url_bytes, AG.alternate_cover_acceptable,
+             AG.Proxy.Media) = saved
+            AG.verdict_memo.clear()
 
     def test_an_unmeasurable_image_is_refused(self):
         # Opposite of local_cover_is_portrait, which keeps an unmeasurable local
@@ -4540,19 +4813,85 @@ class PlainPassRecovery(unittest.TestCase):
 
     def test_agent_container_selection_needs_recovery(self):
         self.state = ('9', 'metadata://posters/com.plexapp.agents.incipit_x', [], None)
-        self.assertTrue(AG.local_cover_recovery_needed(self._helper()))
+        needed, state = AG.local_cover_recovery_needed(self._helper())
+        self.assertTrue(needed)
 
     def test_an_upload_selection_is_healthy_and_memoised(self):
         self.state = ('9', 'upload://posters/abc', [], None)
         h = self._helper()
-        self.assertFalse(AG.local_cover_recovery_needed(h))
+        self.assertEqual(AG.local_cover_recovery_needed(h), (False, None))
         # The no-work answer memoises: track 2 of the same pass costs nothing.
-        self.assertFalse(AG.local_cover_recovery_needed(h))
+        self.assertEqual(AG.local_cover_recovery_needed(h), (False, None))
         self.assertEqual(len(self.reads), 1)
 
     def test_unreadable_state_is_not_recovery(self):
         self.state = None
-        self.assertFalse(AG.local_cover_recovery_needed(self._helper()))
+        self.assertEqual(AG.local_cover_recovery_needed(self._helper()),
+                         (False, None))
+
+    def test_the_state_it_read_is_handed_BACK_not_thrown_away(self):
+        """
+        FOUR CACHE-DISABLED LOCALHOST GETS WHERE TWO WILL DO.
+
+        This read read_poster_state for the guid and discarded the tuple, and
+        select_local_cover -- the only thing a True answer leads to -- then
+        asked read_poster_state the SAME question about the SAME guid with
+        nothing changing in between. read_poster_state is two requests and
+        disables the HTTP cache on both, so neither round trip was free.
+        """
+        self.state = ('9', 'metadata://posters/com.plexapp.agents.incipit_x', [], None)
+        needed, state = AG.local_cover_recovery_needed(self._helper())
+        self.assertTrue(needed)
+        self.assertEqual(state, self.state,
+                         'the fetched state must ride along for the callee')
+
+    def test_select_local_cover_uses_a_handed_state_instead_of_re_reading(self):
+        # The receiving half. The threading pattern already existed for
+        # upload_and_select_poster(..., state=state, ...); this is the same
+        # shape one level up.
+        saved = (AG.artist_poster_bytes, AG.selected_poster_bytes,
+                 AG.upload_and_select_poster, AG.thumb_field_locked)
+        AG.thumb_field_locked = lambda rk, tag: (False, True)
+        AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
+        try:
+            AG.artist_poster_bytes = lambda guid, tag, parent_thumb=None: (b'x', True)
+            AG.selected_poster_bytes = lambda rk, key, tag: (b'other', True)
+            AG.upload_and_select_poster = lambda *a, **kw: True
+            state = ('9', 'metadata://posters/com.plexapp.agents.incipit_x',
+                     [], None)
+            self.assertTrue(AG.select_local_cover(
+                self._helper(), b'\xff\xd8\xff\xe0 cover', state=state))
+            self.assertEqual(self.reads, [],
+                             'a pre-fetched state must not be re-read')
+        finally:
+            (AG.artist_poster_bytes, AG.selected_poster_bytes,
+             AG.upload_and_select_poster, AG.thumb_field_locked) = saved
+            AG.recent_work_memo.clear()
+            AG.verdict_memo.clear()
+
+    def test_select_local_cover_still_reads_when_nobody_hands_one_over(self):
+        # The optional prefetch must not become a requirement: the forced path
+        # calls select_local_cover with no state at all.
+        saved = (AG.artist_poster_bytes, AG.selected_poster_bytes,
+                 AG.upload_and_select_poster, AG.thumb_field_locked)
+        AG.thumb_field_locked = lambda rk, tag: (False, True)
+        AG.recent_work_memo.clear()
+        AG.verdict_memo.clear()
+        self.state = ('9', 'metadata://posters/com.plexapp.agents.incipit_x',
+                      [], None)
+        try:
+            AG.artist_poster_bytes = lambda guid, tag, parent_thumb=None: (b'x', True)
+            AG.selected_poster_bytes = lambda rk, key, tag: (b'other', True)
+            AG.upload_and_select_poster = lambda *a, **kw: True
+            self.assertTrue(AG.select_local_cover(
+                self._helper(), b'\xff\xd8\xff\xe0 cover'))
+            self.assertEqual(len(self.reads), 1)
+        finally:
+            (AG.artist_poster_bytes, AG.selected_poster_bytes,
+             AG.upload_and_select_poster, AG.thumb_field_locked) = saved
+            AG.recent_work_memo.clear()
+            AG.verdict_memo.clear()
 
 
 class JsonDecodeAndCropMath(unittest.TestCase):
@@ -4675,7 +5014,7 @@ class HumanLockedSelection(unittest.TestCase):
         # The gate must run BEFORE the ownership shas and the CDN fetch: zero
         # image bytes move for a curated artist. This is the fit direction --
         # exactly the one that used to steal the click-pick.
-        AG.thumb_field_locked = lambda rk, tag: True
+        AG.thumb_field_locked = lambda rk, tag: (True, True)
         AG.converge_author_art(self._helper(), 'http://t.jpg', 'http://o.jpg',
                                'incipit author-art-fit')
         self.assertEqual(self.fetches, [])
@@ -4685,8 +5024,34 @@ class HumanLockedSelection(unittest.TestCase):
         # The gate must not be over-broad: an unlocked (scan-default)
         # selection is still the agent's to improve. A mutation that hardcodes
         # the lock True dies here; one that removes the gate dies above.
-        AG.thumb_field_locked = lambda rk, tag: False
+        AG.thumb_field_locked = lambda rk, tag: (False, True)
         AG.converge_author_art(self._helper(), 'http://t.jpg', 'http://o.jpg',
+                               'incipit author-art-fit')
+        self.assertEqual(self.uploads, ['incipit author-art-fit'])
+
+    def test_an_UNREADABLE_lock_stands_down_WITHOUT_suppressing_the_retry(self):
+        """
+        FAIL CLOSED ON THE VALUE, NOT ON THE MEMO.
+
+        thumb_field_locked returned a bare bool that failed closed to True, so
+        a caller could not tell "a human chose this" from "I could not read
+        it" -- and converge_author_art recorded the stand-down with mark_done,
+        which replays for the whole 600s TTL and for every sibling track. One
+        timed-out localhost GET therefore froze an artist's convergence long
+        after the blip was over. The selection is still left alone; it is just
+        not REMEMBERED as a decision.
+        """
+        AG.thumb_field_locked = lambda rk, tag: (True, False)
+        helper = self._helper()
+        AG.converge_author_art(helper, 'http://t.jpg', 'http://o.jpg',
+                               'incipit author-art-fit')
+        self.assertEqual(self.uploads, [], 'an unreadable lock must not act')
+        self.assertNotIn(('incipit author-art-fit', helper.metadata.guid),
+                         AG.recent_work_memo,
+                         'a blip must RETRY next pass, not be memoised')
+        # ...and the retry really does converge once the read succeeds.
+        AG.thumb_field_locked = lambda rk, tag: (False, True)
+        AG.converge_author_art(helper, 'http://t.jpg', 'http://o.jpg',
                                'incipit author-art-fit')
         self.assertEqual(self.uploads, ['incipit author-art-fit'])
 
@@ -4707,14 +5072,14 @@ class HumanLockedSelection(unittest.TestCase):
                        '<Field locked="1" name="thumb"/>'
                        '</Directory></MediaContainer>')
         AG.HTTP.Request = lambda url, **kw: FakeResponse()
-        self.assertTrue(AG.thumb_field_locked('55', 't'))
+        self.assertEqual(AG.thumb_field_locked('55', 't'), (True, True))
 
     def test_an_unlocked_item_reads_unlocked(self):
         class FakeResponse(object):
             content = ('<MediaContainer><Directory ratingKey="55" '
                        'title="X"/></MediaContainer>')
         AG.HTTP.Request = lambda url, **kw: FakeResponse()
-        self.assertFalse(AG.thumb_field_locked('55', 't'))
+        self.assertEqual(AG.thumb_field_locked('55', 't'), (False, True))
 
     def test_a_lock_on_a_different_field_is_not_a_poster_lock(self):
         # An operator who locked the TITLE (or summary, or anything else)
@@ -4724,16 +5089,21 @@ class HumanLockedSelection(unittest.TestCase):
                        '<Field locked="1" name="title"/>'
                        '</Directory></MediaContainer>')
         AG.HTTP.Request = lambda url, **kw: FakeResponse()
-        self.assertFalse(AG.thumb_field_locked('55', 't'))
+        self.assertEqual(AG.thumb_field_locked('55', 't'), (False, True))
 
-    def test_an_unreadable_lock_fails_closed(self):
+    def test_an_unreadable_lock_fails_closed_AND_says_it_is_unknown(self):
         # "Could not tell" must read as "a human chose it": every caller is
         # about to CHANGE the selection, and the poison-guard rule is that an
         # unreadable state never licenses a write.
+        #
+        # But it must SAY so. The value alone was ambiguous -- indistinguishable
+        # from a real lock -- so callers memoised a failure as a decision. The
+        # `known` flag is the whole difference, and it is why this is the same
+        # two-value shape artist_poster_bytes returns.
         def boom(url, **kw):
             raise IOError('sealed sandbox')
         AG.HTTP.Request = boom
-        self.assertTrue(AG.thumb_field_locked('55', 't'))
+        self.assertEqual(AG.thumb_field_locked('55', 't'), (True, False))
 
 
 class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
@@ -4753,16 +5123,21 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
         THIRD-PARTY host and so carrying the framework's full 1s pacing.
     """
 
+    # The refusal memo IS verdict_memo now: the bespoke dict was a verbatim
+    # re-implementation of remember_verdict/recall_verdict, down to the
+    # `if len(X) > 512: X.clear()` bound. The public helper names stayed.
+    KEY = (AG.ALTERNATE_REFUSAL_TAG, 'https://audible-uk/square.jpg', 'refused')
+
     def setUp(self):
         self.real_fetch = AG.fetch_url_bytes
         self.real_media = AG.Proxy.Media
         AG.Proxy.Media = lambda data, sort_order=0: ('media', sort_order)
-        AG.alternate_refusal_memo.clear()
+        AG.verdict_memo.clear()
 
     def tearDown(self):
         AG.fetch_url_bytes = self.real_fetch
         AG.Proxy.Media = self.real_media
-        AG.alternate_refusal_memo.clear()
+        AG.verdict_memo.clear()
 
     def _helper(self, alternates):
         class FakePosters(dict):
@@ -4806,19 +5181,68 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
             AG.offer_alternate_covers(self._helper(['https://overdrive/gone.jpg']))
         self.assertEqual(len(fetched), 1)
 
-    def test_a_RAISING_fetch_is_remembered_too(self):
-        # 26 retries inside ONE pass is the waste; the TTL is what lets a later
-        # refresh try again.
+    def test_an_HTML_body_is_fetched_ONCE_too(self):
+        # A REAL refusal, and the second of the two live shapes: the dead
+        # OverDrive url served `<!DOCTYP...`, which measures as no image at
+        # all. (This test used to drive a RAISING fetch_url_bytes, which
+        # cannot happen in production -- it swallows its own exceptions and
+        # returns None -- so it only ever exercised the blanket
+        # `except Exception` around the container write, since removed.)
         fetched = []
 
-        def boom(url):
+        def html_fetch(url):
             fetched.append(url)
-            raise ValueError('connection reset')
+            return b'<!DOCTYPE html><html>not a picture</html>'
 
-        AG.fetch_url_bytes = boom
+        AG.fetch_url_bytes = html_fetch
         for _ in range(27):
-            AG.offer_alternate_covers(self._helper(['https://cdn/flaky.jpg']))
-        self.assertEqual(len(fetched), 1)
+            self.assertEqual(
+                AG.offer_alternate_covers(self._helper(['https://overdrive/html.jpg'])),
+                [], 'an HTML body is never offered as art')
+        self.assertEqual(len(fetched), 1,
+                         'tracks 2..27 must not re-fetch a known-bad url')
+
+    def test_a_CONTAINER_WRITE_failure_is_NOT_remembered(self):
+        """
+        THE MEMO IS FOR THE IMAGE, NOT FOR THE CONTAINER.
+
+        The refusal used to be recorded from a blanket `except Exception` that
+        also wrapped `helper.metadata.posters[url] = Proxy.Media(...)`. Since
+        fetch_url_bytes and alternate_cover_acceptable both swallow their own
+        exceptions and return a falsy answer, that clause was reachable ONLY
+        from the post-verdict lines -- i.e. only from the one case where
+        recording a refusal is wrong. And the memo is keyed on the URL alone
+        and module-global, so a single container-write blip suppressed a
+        genuinely good cover for EVERY book in the library for the whole TTL.
+        """
+        fetched = []
+
+        def counting_fetch(url):
+            fetched.append(url)
+            return _jpeg(2400, 2400)
+
+        class ExplodingPosters(dict):
+            def __setitem__(self, key, value):
+                raise ValueError('container write failed')
+
+        class FakeHelper(object):
+            thumb_alternates = ['https://audible-uk/square.jpg']
+
+            class metadata(object):
+                posters = ExplodingPosters()
+
+        AG.fetch_url_bytes = counting_fetch
+        self.assertEqual(AG.offer_alternate_covers(FakeHelper()), [],
+                         'a failed container write offers nothing this pass')
+        self.assertNotIn(self.KEY, AG.verdict_memo,
+                         'a good image must not be blacklisted library-wide '
+                         'because one container write blipped')
+        # ...and the proof it is not merely absent from the dict: the very next
+        # book with the same url still gets its tile.
+        good = self._helper(['https://audible-uk/square.jpg'])
+        self.assertEqual(AG.offer_alternate_covers(good),
+                         ['https://audible-uk/square.jpg'])
+        self.assertEqual(len(fetched), 2, 'the retry has to re-fetch')
 
     def test_an_ACCEPTED_alternate_is_still_offered_and_still_not_refetched(self):
         # The memo must not swallow the good case: it is offered on track 1 and
@@ -4837,7 +5261,7 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
             self.assertEqual(AG.offer_alternate_covers(helper), [url])
         self.assertEqual(len(fetched), 1)
         self.assertIn(url, helper.metadata.posters)
-        self.assertNotIn(url, AG.alternate_refusal_memo,
+        self.assertNotIn(self.KEY, AG.verdict_memo,
                          'an accepted url must never be marked refused')
 
     def test_a_refusal_does_not_poison_a_DIFFERENT_url(self):
@@ -4852,7 +5276,20 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
     def test_the_memo_is_bounded(self):
         for i in range(600):
             AG.remember_alternate_refusal('https://x/%d.jpg' % i)
-        self.assertLessEqual(len(AG.alternate_refusal_memo), 513)
+        self.assertLessEqual(len(AG.verdict_memo), 513)
+
+    def test_the_memo_is_the_shared_verdict_store(self):
+        # Expressed in terms of remember_verdict/recall_verdict rather than a
+        # hand-rolled twin of them, so the bound and the TTL cannot drift.
+        # The bespoke dict is GONE, not merely unused.
+        url = 'https://x/refused-once.jpg'
+        self.assertFalse(AG.alternate_refused_recently(url))
+        AG.remember_alternate_refusal(url)
+        self.assertTrue(AG.alternate_refused_recently(url))
+        self.assertTrue(AG.recall_verdict(
+            AG.ALTERNATE_REFUSAL_TAG, url, 'refused', AG.ALTERNATE_REFUSAL_TTL))
+        self.assertFalse(hasattr(AG, 'alternate_refusal_memo'),
+                         'the bespoke dict must be gone, not shadowed')
 
 
 if __name__ == '__main__':
