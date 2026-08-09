@@ -1568,6 +1568,21 @@ class AlbumSearchTool(SearchTool):
                 if not (isinstance(identifier, (str, unicode))
                         and identifier.startswith('B0')):
                     identifier = c['id']
+                # Stash the api's alternate covers, keyed by the BARE id the
+                # way alternate_cover_key documents (it strips the region
+                # suffix that update sees, so both ends meet).
+                #
+                # The item route serves `imageAlternates` itself and WINS when
+                # it has them; this memo is the documented fallback for when it
+                # does not -- dedupe builds alternates from the merged candidate
+                # set, which a per-id lookup cannot rebuild. The audnexus search
+                # path has always populated it; THIS path, the multi-provider
+                # one every configured deployment actually uses, never did, so
+                # the fallback could not fire where it was most likely needed.
+                try:
+                    remember_alternate_covers(identifier, c.get('coverAlternates'))
+                except Exception:
+                    pass
                 search_results.append(
                     {
                         'asin': identifier + '_' + self.region_override,

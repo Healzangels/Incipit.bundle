@@ -893,6 +893,51 @@ class TestAlternateCoverMemo(unittest.TestCase):
         ST.remember_alternate_covers('B0TEST0001', ['a.jpg'])
         self.assertEqual(ST.recall_alternate_covers('B0TEST0001_us'), ['a.jpg'])
 
+    def test_the_MULTI_PROVIDER_search_path_records_them_too(self):
+        """
+        The memo is the documented fallback for when the item response carries
+        no imageAlternates — but only the audnexus search path ever populated
+        it. parse_incipit_candidates, the path every deployment with
+        api_base_url set actually uses, never did, so the fallback could not
+        fire exactly where it was most likely to be needed.
+        """
+        tool = ST.AlbumSearchTool.__new__(ST.AlbumSearchTool)
+        tool.region_override = 'us'
+
+        class Media(object):
+            artist = 'An Author'
+
+        tool.media = Media()
+        out = tool.parse_incipit_candidates([
+            {
+                'id': 'B0ALTTEST1',
+                'asin': 'B0ALTTEST1',
+                'title': 'A Book',
+                'authors': ['An Author'],
+                'narrators': ['A Narrator'],
+                'confidence': 0.9,
+                'coverAlternates': ['alt1.jpg', 'alt2.jpg'],
+            }
+        ])
+        self.assertEqual(len(out), 1)
+        # Recalled with the region suffix Plex hands back at update time.
+        self.assertEqual(
+            ST.recall_alternate_covers('B0ALTTEST1_us'), ['alt1.jpg', 'alt2.jpg'])
+
+    def test_a_candidate_without_alternates_stores_nothing(self):
+        tool = ST.AlbumSearchTool.__new__(ST.AlbumSearchTool)
+        tool.region_override = 'us'
+
+        class Media(object):
+            artist = 'An Author'
+
+        tool.media = Media()
+        tool.parse_incipit_candidates([
+            {'id': 'B0NOALTS01', 'asin': 'B0NOALTS01', 'title': 'A Book',
+             'authors': ['An Author'], 'narrators': [], 'confidence': 0.9}
+        ])
+        self.assertEqual(ST.recall_alternate_covers('B0NOALTS01'), [])
+
     def test_empty_or_junk_is_not_stored(self):
         ST.remember_alternate_covers('B0TEST0002', [])
         ST.remember_alternate_covers('B0TEST0003', None)

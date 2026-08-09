@@ -3042,7 +3042,6 @@ class AudiobookArtist(Agent.Artist):
     primary_provider = True
     accepts_from = ['com.plexapp.agents.localmedia']
 
-    prev_search_provider = 0
 
     def search(self, results, media, lang, manual):
         """
@@ -3282,9 +3281,10 @@ class AudiobookArtist(Agent.Artist):
             )
             score_helper.run_score_author()
 
-            # Print separators for easy reading
-            if index <= len(result):
-                log.separator(log_level="info")
+            # Print separators for easy reading. (No guard: `index` enumerates
+            # `result`, so it can never exceed len(result) — the condition that
+            # used to wrap this was always true.)
+            log.separator(log_level="info")
 
         info = sorted(info, key=lambda inf: inf['score'], reverse=True)
         return info
@@ -3611,7 +3611,6 @@ class AudiobookAlbum(Agent.Album):
     primary_provider = True
     accepts_from = ['com.plexapp.agents.localmedia']
 
-    prev_search_provider = 0
 
     def search(self, results, media, lang, manual):
         """
@@ -3803,9 +3802,10 @@ class AudiobookAlbum(Agent.Album):
             )
             score_helper.run_score_book()
 
-            # Print separators for easy reading
-            if index <= len(result):
-                log.separator(log_level="info")
+            # Print separators for easy reading. (No guard: `index` enumerates
+            # `result`, so it can never exceed len(result) — the condition that
+            # used to wrap this was always true.)
+            log.separator(log_level="info")
 
         info = sorted(info, key=lambda inf: inf['score'], reverse=True)
         return info
@@ -3884,18 +3884,19 @@ class AudiobookAlbum(Agent.Album):
         # upload, never a hand-placed cover.jpg).
         promote_picked_cover(helper)
 
-        # LOCAL COVER (Elevated-policy attempt). Prior builds (1.3.23-1.3.27)
-        # proved Proxy.LocalFile is REJECTED by the posters container and the
-        # default sandbox blocks open()/Core -- so the agent couldn't read the
-        # sidecar. NEW lever (Info.plist PlexPluginCodePolicy=Elevated): it may
-        # unlock open()/Core.storage. And crucially Proxy.Media(BYTES) IS
-        # accepted here. So if we can READ cover.jpg we serve it as our own
-        # poster at sort_order=0 and prune to it -> the local cover becomes the
-        # sole default even with Incipit ABOVE Local Media Assets (titles stay
-        # clean). local_cover_bytes() swallows every failure, so a still-sealed
-        # sandbox just yields None and we fall through to the online cover
-        # exactly as before. If this works it replaces select_cover_poster.py
-        # for freshly-scanned items; if it doesn't, that script stays the fix.
+        # LOCAL COVER. Proxy.LocalFile is REJECTED by the posters container
+        # (proven in 1.3.23-1.3.27) and the default sandbox blocks open()/Core,
+        # so the agent could not read the sidecar at all. Info.plist's
+        # PlexPluginCodePolicy=Elevated unlocks Core.storage, and Proxy.Media
+        # (BYTES) IS accepted here — so cover.jpg is read and served as our own
+        # poster at sort_order=0, then pruned to, and the local cover becomes
+        # the default even with Incipit ABOVE Local Media Assets (titles stay
+        # clean). local_cover_bytes() swallows every failure, so a sealed
+        # sandbox simply yields None and we fall through to the online cover.
+        #
+        # (This was written as an "attempt" that might replace an external
+        # select_cover_poster.py script. It worked, shipped, and has been the
+        # mechanism ever since — the speculative framing outlived its truth.)
         #
         # Deliberately OUTSIDE any `if helper.thumb:` gate: a record with no
         # online image (Hardcover/OpenLibrary book-level matches have none) used
