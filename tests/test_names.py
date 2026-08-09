@@ -255,5 +255,107 @@ class OutboundArtistQueryName(unittest.TestCase):
             'symptom: %r' % (offenders,))
 
 
+class FakeArtistTag(object):
+    """The one field handle_multi_artist reads and rewrites."""
+
+    def __init__(self, artist):
+        self.artist = artist
+
+
+class SeriesQualifierBeforeSplit(unittest.TestCase):
+    """
+        The ORDER of the series strip and the multi-author split.
+
+        MULTI_AUTHOR_RE treats "and" (and ",", "&", "/", ";") as a co-author
+        separator. When the split ran first, a series name that CONTAINED one
+        was torn in half and the trailing-paren strip -- which needs a trailing
+        ")" -- could no longer see it:
+
+            "Ryan Cahill (Bound and the Broken)"
+              -> ["Ryan Cahill (Bound", "the Broken)"]
+
+        Measured live on .99 2026-08-09: the strip had never fired once across
+        a 1,606-album library, two junk queries went out
+        (`name=Ryan%20Cahill%20%28Bound`, `name=the%20Broken%29`), and the
+        phantom artist survived until a later refresh happened to rescue it via
+        recover_author_from_book. "Davis Ashura (Instrument of Omens)" -- the
+        docstring's own example -- always worked, because no separator sits
+        inside its parentheses; that is why the gap went unnoticed.
+    """
+
+    def collapse(self, tag):
+        """Run the real handle_multi_artist and return the resulting artist."""
+        tool = ST.ArtistSearchTool.__new__(ST.ArtistSearchTool)
+        tool.media = FakeArtistTag(tag)
+        tool.handle_multi_artist()
+        return tool.media.artist
+
+    def test_a_separator_inside_the_qualifier_no_longer_defeats_the_strip(self):
+        # Each of these carries a MULTI_AUTHOR_RE separator inside the
+        # parentheses, so each one reproduced the live defect.
+        for tag, expected in (
+            ('Ryan Cahill (Bound and the Broken)', 'Ryan Cahill'),
+            ('Michael J. Sullivan (Riyria and Legends)', 'Michael J. Sullivan'),
+            ('Jim Butcher (Dresden, Codex Alera)', 'Jim Butcher'),
+            ('Someone (A & B)', 'Someone'),
+            ('Someone (A/B)', 'Someone'),
+            ('Someone (A; B)', 'Someone'),
+        ):
+            self.assertEqual(
+                self.collapse(tag), expected,
+                '%r must reach the author search as %r; a separator inside the '
+                'series qualifier must not tear the name in half'
+                % (tag, expected))
+
+    def test_the_case_that_always_worked_still_works(self):
+        # No separator inside the parens: the post-split strip handled this one
+        # even before the fix. It must not regress.
+        self.assertEqual(
+            self.collapse('Davis Ashura (Instrument of Omens)'),
+            'Davis Ashura')
+
+    def test_real_co_author_tags_still_collapse_to_the_primary(self):
+        # The whole point of the split. Stripping first is only safe because
+        # none of these has a TRAILING parenthetical.
+        for tag, expected in (
+            ('Terry Pratchett & Neil Gaiman', 'Terry Pratchett'),
+            ('Brandon Sanderson and Janci Patterson', 'Brandon Sanderson'),
+            ('Jefferson Mays, Daniel Abraham, Ty Franck', 'Jefferson Mays'),
+            ('John Bellairs/George Guidall', 'John Bellairs'),
+        ):
+            self.assertEqual(self.collapse(tag), expected)
+
+    def test_a_qualifier_on_ONE_co_author_is_still_stripped(self):
+        # Pins the SECOND (post-split) call: the tag as a whole has no trailing
+        # parenthetical, so only the strip that runs on the survivor can reach
+        # it. Deleting either call must fail this suite.
+        self.assertEqual(
+            self.collapse('Ryan Cahill (Bound), Someone Else'),
+            'Ryan Cahill')
+
+    def test_a_name_that_is_not_an_author_is_left_alone(self):
+        # GraphicAudio is a studio, not an author -- no rule here can save it,
+        # and none should mangle it either. Recovery from the book match is
+        # what matches this one.
+        self.assertEqual(self.collapse('GraphicAudio'), 'GraphicAudio')
+
+    def test_author_candidates_does_not_split_inside_the_qualifier(self):
+        # The retry loop reads the FULL original tag, so it carries the same
+        # trap independently: unfixed it yields two junk candidates and spends
+        # a network round-trip on each.
+        tool = ST.ArtistSearchTool.__new__(ST.ArtistSearchTool)
+        tool.media = FakeArtistTag('Ryan Cahill (Bound and the Broken)')
+        tool.multi_author_source = 'Ryan Cahill (Bound and the Broken)'
+        self.assertEqual(tool.author_candidates(), ['Ryan Cahill'])
+
+    def test_author_candidates_still_lists_every_real_co_author(self):
+        tool = ST.ArtistSearchTool.__new__(ST.ArtistSearchTool)
+        tool.media = FakeArtistTag('Jefferson Mays, Daniel Abraham, Ty Franck')
+        tool.multi_author_source = 'Jefferson Mays, Daniel Abraham, Ty Franck'
+        self.assertEqual(
+            tool.author_candidates(),
+            ['Jefferson Mays', 'Daniel Abraham', 'Ty Franck'])
+
+
 if __name__ == '__main__':
     unittest.main()

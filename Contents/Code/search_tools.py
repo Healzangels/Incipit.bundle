@@ -1767,6 +1767,12 @@ class ArtistSearchTool(SearchTool):
         # collapsed media.artist to the primary), falling back to the current
         # artist if get_primary_author never ran.
         source = self.multi_author_source or self.media.artist or ''
+        # Same ordering trap as handle_multi_artist: a series qualifier holding
+        # a separator ("(Bound and the Broken)") has to go BEFORE the split, or
+        # it is torn into two candidates that match nothing and the retry loop
+        # spends a network round-trip on each. The per-part strip below still
+        # runs, for a qualifier carried by an individual co-author.
+        source = self.clear_series_text(source)
         candidates = []
         for part in MULTI_AUTHOR_RE.split(source):
             cleaned = self.clear_contributor_text(part)
@@ -1850,10 +1856,47 @@ class ArtistSearchTool(SearchTool):
             self.media.artist = r
             return
 
+    def apply_series_strip(self):
+        """
+            Remove a trailing "(Series)" qualifier from media.artist, logging
+            the rewrite. Deliberately called TWICE by handle_multi_artist --
+            see the ordering note there.
+        """
+        cleaned = self.clear_series_text(self.media.artist)
+        if cleaned == self.media.artist:
+            return False
+        log.info(
+            'Stripped series qualifier from author: "%s" -> "%s"',
+            self.media.artist,
+            cleaned
+        )
+        self.media.artist = cleaned
+        return True
+
     def handle_multi_artist(self):
         """
             Handles multi-artist lists.
         """
+        # STRIP THE SERIES QUALIFIER BEFORE SPLITTING.
+        #
+        # MULTI_AUTHOR_RE treats "and" -- and ",", "&", "/", ";" -- as a
+        # co-author separator, so a series name that CONTAINS one is torn in
+        # half before the trailing-paren rule can see it. Measured live on .99
+        # 2026-08-09:
+        #
+        #   "Ryan Cahill (Bound and the Broken)"
+        #     -> ["Ryan Cahill (Bound", "the Broken)"]
+        #
+        # Neither half ends in ")", so the strip below was a no-op (it had
+        # never once fired across the whole library) and two junk names went
+        # out as `name=Ryan%20Cahill%20%28Bound` and `name=the%20Broken%29`.
+        # The phantom artist that left behind was only rescued by a later
+        # refresh falling through to recover_author_from_book.
+        #
+        # Safe for real co-author tags: the rule removes a SINGLE TRAILING
+        # parenthetical, which "Terry Pratchett & Neil Gaiman" does not have.
+        self.apply_series_strip()
+
         author_array = [
             a.strip()
             for a in MULTI_AUTHOR_RE.split(self.media.artist)
@@ -1872,18 +1915,12 @@ class ArtistSearchTool(SearchTool):
                     self.media.artist
                 )
 
-        # Strip a trailing "(Series)" qualifier so a phantom "Author (Series)"
-        # artist matches the real author. Unconditional: it only rewrites a name
-        # that CARRIES such a qualifier, and leaving one in place merely tanks
-        # author similarity -- there is no library for which keeping it is better.
-        series_cleaned = self.clear_series_text(self.media.artist)
-        if series_cleaned != self.media.artist:
-            log.info(
-                'Stripped series qualifier from author: "%s" -> "%s"',
-                self.media.artist,
-                series_cleaned
-            )
-            self.media.artist = series_cleaned
+        # And again on the SURVIVOR. The pre-split call cannot reach a qualifier
+        # carried by one co-author rather than the whole tag: "Ryan Cahill
+        # (Bound), Someone Else" has no TRAILING parenthetical as a whole, but
+        # the primary picked out of it does. A no-op when the first call already
+        # handled it, so a name is never logged twice.
+        self.apply_series_strip()
 
     def artist_path(self):
         """The decoded file path for this artist's album, or None. The artist
