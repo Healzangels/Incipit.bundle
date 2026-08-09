@@ -1704,6 +1704,37 @@ def alternate_cover_acceptable(data):
     return (float(shorter) / float(longer)) >= 0.9
 
 
+# An ACCEPTED alternate needs no memo: it lands in the container, and the
+# membership check below skips it on every later track (cover_keep_list carries
+# the key through validate_keys, so it survives the prune). A REFUSED one has
+# no such trace -- the loop just continues, writing nothing -- so update()'s
+# per-track fanout re-fetched and re-decoded the same dead url once per track,
+# forever. Refusals are not rare: the live measurement behind
+# alternate_cover_acceptable found 2 of 6 offered alternates unusable (a
+# portrait print jacket and an OverDrive url serving HTML). On a 27-part book
+# that is 26 redundant fetches per pass, each on a THIRD-PARTY host and so
+# carrying the framework's full 1s pacing plus a download and a decode.
+#
+# Keyed on the url alone, not the guid: "the bytes at this url are not square
+# art" is a property of the url, and the same dead url is offered across books.
+# Bounded and TTL'd like verdict_memo, so a later refresh retries.
+alternate_refusal_memo = {}
+ALTERNATE_REFUSAL_TTL = 600
+
+
+def alternate_refused_recently(url):
+    """True when this url was fetched and rejected within the TTL."""
+    stamp = alternate_refusal_memo.get(url)
+    return bool(stamp and (time() - stamp) < ALTERNATE_REFUSAL_TTL)
+
+
+def remember_alternate_refusal(url):
+    """Record that this url did not yield a usable cover."""
+    if len(alternate_refusal_memo) > 512:
+        alternate_refusal_memo.clear()
+    alternate_refusal_memo[url] = time()
+
+
 def offer_alternate_covers(helper, sort_order=3):
     """
         Offer the api's `imageAlternates` as extra pickable posters, returning
@@ -1740,20 +1771,30 @@ def offer_alternate_covers(helper, sort_order=3):
         if url in helper.metadata.posters:
             added.append(url)
             continue
+        # A refusal leaves no trace in the container, so without this the
+        # sibling tracks re-pay the whole fetch+decode to reach the same no.
+        if alternate_refused_recently(url):
+            continue
         try:
             data = fetch_url_bytes(url)
             if not data:
+                remember_alternate_refusal(url)
                 continue
             # Judge the PIXELS. The api can only vouch for the record; a
             # Hardcover edition with a runtime can still ship the print jacket,
             # and a dead CDN url returns HTML. See alternate_cover_acceptable.
             if not alternate_cover_acceptable(data):
                 log.info('incipit cover: alternate refused -- not square art (%s)', url)
+                remember_alternate_refusal(url)
                 continue
             helper.metadata.posters[url] = Proxy.Media(data, sort_order=sort_order)
             added.append(url)
             log.info('incipit cover: offering an alternate-marketplace cover (%s)', url)
         except Exception as e:
+            # Remembered too: a transient failure retried 26 more times inside
+            # one pass is the exact waste this memo exists for, and the TTL
+            # lets a later refresh try again.
+            remember_alternate_refusal(url)
             log.warn('incipit cover: alternate cover failed (%s: %s)', url, e)
     return added
 
@@ -4407,9 +4448,28 @@ def is_api_host(url):
         True when url targets the configured incipit-api host (our own local,
         allowlisted service) rather than a third party (Audible/audnexus in
         stock mode, or an Amazon image CDN).
+
+        THE SEPARATOR IS THE WHOLE GUARD. A bare startswith on the base has no
+        boundary after it, so a base of "http://incipit-api" -- a plausible
+        container/service-name setting, and the pref is free text -- also
+        accepts "http://incipit-api.attacker.example/x.jpg". Both callers act on
+        the answer in ways that must not reach a third party: incipit_headers
+        attaches the operator's Hardcover TOKEN, and make_request drops the
+        framework's 1s pacing. And the URLs reaching here are not all ours --
+        the alternate-cover path fetches urls straight out of a JSON body.
+        Same shape with a port: base "http://host:3737" would match
+        "http://host:37370/...".
+
+        Requiring "/" costs nothing: every api url in this plugin is built as
+        `base.rstrip('/') + '/' + ...` (region_tools.get_api_search_url and the
+        callers that follow it), so a legitimate url always continues with the
+        separator. A bare `base` with nothing after it is accepted too.
     """
     base = Prefs['api_base_url']
-    return bool(base and url.startswith(base.rstrip('/')))
+    if not base or not url:
+        return False
+    base = base.rstrip('/')
+    return url == base or url.startswith(base + '/')
 
 
 # Longest we will honour from a Retry-After. The limiter's window is a minute,

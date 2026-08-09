@@ -4736,7 +4736,124 @@ class HumanLockedSelection(unittest.TestCase):
         self.assertTrue(AG.thumb_field_locked('55', 't'))
 
 
+class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
+    """
+        A refused alternate leaves NO trace in the container, so without a memo
+        every sibling track re-pays the whole fetch+decode to reach the same no.
+
+        An ACCEPTED one needs no memo: it lands in the container, and
+        cover_keep_list carries its key through validate_keys so the membership
+        check skips it on every later track. The asymmetry is the bug -- the
+        cheap path was guarded and the expensive one was not.
+
+        Refusals are not rare. The live measurement behind
+        alternate_cover_acceptable found 2 of 6 offered alternates unusable (a
+        973x1500 portrait print jacket, and an OverDrive url serving HTML). On
+        a 27-part book that was 26 redundant fetches per pass, each against a
+        THIRD-PARTY host and so carrying the framework's full 1s pacing.
+    """
+
+    def setUp(self):
+        self.real_fetch = AG.fetch_url_bytes
+        self.real_media = AG.Proxy.Media
+        AG.Proxy.Media = lambda data, sort_order=0: ('media', sort_order)
+        AG.alternate_refusal_memo.clear()
+
+    def tearDown(self):
+        AG.fetch_url_bytes = self.real_fetch
+        AG.Proxy.Media = self.real_media
+        AG.alternate_refusal_memo.clear()
+
+    def _helper(self, alternates):
+        class FakePosters(dict):
+            def validate_keys(self, keys):
+                self.validated = keys
+
+        class FakeHelper(object):
+            thumb_alternates = alternates
+
+            class metadata(object):
+                posters = FakePosters()
+        return FakeHelper()
+
+    def test_a_REFUSED_alternate_is_fetched_ONCE_across_27_tracks(self):
+        # A portrait print jacket: the exact shape the live measurement found.
+        fetched = []
+
+        def counting_fetch(url):
+            fetched.append(url)
+            return _jpeg(973, 1500)
+
+        AG.fetch_url_bytes = counting_fetch
+        url = 'https://hardcover/print-jacket.jpg'
+        for _ in range(27):
+            helper = self._helper([url])
+            self.assertEqual(AG.offer_alternate_covers(helper), [],
+                             'a portrait jacket is never offered')
+        self.assertEqual(len(fetched), 1,
+                         'tracks 2..27 must not re-fetch a known-bad url')
+
+    def test_a_DEAD_url_is_fetched_ONCE_too(self):
+        # An OverDrive url serving HTML comes back as no usable bytes.
+        fetched = []
+
+        def empty_fetch(url):
+            fetched.append(url)
+            return None
+
+        AG.fetch_url_bytes = empty_fetch
+        for _ in range(27):
+            AG.offer_alternate_covers(self._helper(['https://overdrive/gone.jpg']))
+        self.assertEqual(len(fetched), 1)
+
+    def test_a_RAISING_fetch_is_remembered_too(self):
+        # 26 retries inside ONE pass is the waste; the TTL is what lets a later
+        # refresh try again.
+        fetched = []
+
+        def boom(url):
+            fetched.append(url)
+            raise ValueError('connection reset')
+
+        AG.fetch_url_bytes = boom
+        for _ in range(27):
+            AG.offer_alternate_covers(self._helper(['https://cdn/flaky.jpg']))
+        self.assertEqual(len(fetched), 1)
+
+    def test_an_ACCEPTED_alternate_is_still_offered_and_still_not_refetched(self):
+        # The memo must not swallow the good case: it is offered on track 1 and
+        # skipped thereafter by the CONTAINER check, not by the refusal memo.
+        fetched = []
+
+        def counting_fetch(url):
+            fetched.append(url)
+            return _jpeg(2400, 2400)
+
+        AG.fetch_url_bytes = counting_fetch
+        url = 'https://audible-uk/square.jpg'
+        helper = self._helper([url])
+        for _ in range(27):
+            # Same helper: the container persists between tracks.
+            self.assertEqual(AG.offer_alternate_covers(helper), [url])
+        self.assertEqual(len(fetched), 1)
+        self.assertIn(url, helper.metadata.posters)
+        self.assertNotIn(url, AG.alternate_refusal_memo,
+                         'an accepted url must never be marked refused')
+
+    def test_a_refusal_does_not_poison_a_DIFFERENT_url(self):
+        # Keyed per url, so one bad alternate cannot suppress a good sibling.
+        def by_url(url):
+            return _jpeg(973, 1500) if 'bad' in url else _jpeg(2400, 2400)
+
+        AG.fetch_url_bytes = by_url
+        helper = self._helper(['https://x/bad.jpg', 'https://x/good.jpg'])
+        self.assertEqual(AG.offer_alternate_covers(helper), ['https://x/good.jpg'])
+
+    def test_the_memo_is_bounded(self):
+        for i in range(600):
+            AG.remember_alternate_refusal('https://x/%d.jpg' % i)
+        self.assertLessEqual(len(AG.alternate_refusal_memo), 513)
+
+
 if __name__ == '__main__':
     unittest.main()
-
-
