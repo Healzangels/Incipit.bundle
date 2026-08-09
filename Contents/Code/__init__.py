@@ -3923,6 +3923,13 @@ class AudiobookAlbum(Agent.Album):
         if not self.call_item_api(update_helper):
             return
 
+        # Self-check BEFORE writing metadata: compare the analyzed audio against
+        # the runtime of the record we are about to apply. Costs nothing (both
+        # numbers are already in hand) and turns the manual 2026-08-09 sweep --
+        # which found 52 wrong-edition albums -- into something the agent does
+        # on every refresh, by itself.
+        update_helper.report_runtime_mismatch()
+
         self.compile_metadata(update_helper)
 
     def call_search_api(self, helper):

@@ -330,6 +330,106 @@ def get_library_roots():
     return LIBRARY_ROOTS_CACHE
 
 
+def media_duration_ms(media):
+    """
+        Summed duration of every part of this album, in ms, or None.
+
+        ONE implementation, module level, because BOTH the search hint and the
+        update-time self-check need it and a second copy is how the two drift
+        (2026-08-08 cost this project three separate mirror-drift bugs).
+
+        Completeness matters on a MULTI-FILE book mid-analysis: Plex returns a
+        real duration for the files it has analyzed and its -1 sentinel for the
+        rest. Summing only the analyzed parts yields a too-SHORT total, which
+        reads as a runtime mismatch against the CORRECT edition -- turning the
+        duration veto, the main wrong-edition guard, onto the right match. A
+        partial sum is worse than none, so any missing part yields None.
+
+        In the legacy album media object `tracks` is a dict keyed by track
+        index, so iterate its values (iterating the dict yields string keys).
+        @param media the Plex media object for the album
+        @returns total milliseconds, or None when unknown/incomplete
+    """
+    try:
+        tracks = media.tracks
+        try:
+            track_iter = tracks.values()
+        except Exception:
+            track_iter = tracks
+        total = 0
+        complete = True
+        for track in (track_iter or []):
+            for item in (track.items or []):
+                for part in (item.parts or []):
+                    # Parts expose duration as a string; Plex reports -1 (or
+                    # nothing) for a not-yet-analyzed file. A malformed value
+                    # counts as missing, not zero, so it marks the sum partial.
+                    part_ms = 0
+                    try:
+                        if part.duration:
+                            part_ms = int(part.duration)
+                    except Exception:
+                        part_ms = 0
+                    if part_ms > 0:
+                        total += part_ms
+                    else:
+                        complete = False
+        if total and complete:
+            return total
+    except Exception as e:
+        log.error('incipit duration probe failed: %s', e)
+    return None
+
+
+# How far the file may sit from the record before we call it a mismatch. 10%
+# is the band the 2026-08-09 library sweep used: inside it sat every legitimate
+# edition difference, outside it sat every real defect.
+RUNTIME_OK_TOLERANCE = 0.10
+# A file that is a clean whole MULTIPLE of the record contains the book more
+# than once; a clean FRACTION holds only part of it. Measured on this library:
+# Harry Potter 1 at 2.00x had chapters 1-17 twice, The Trouble with Peace at
+# 2.00x repeated chapter 001 at the exact midpoint.
+RUNTIME_MULTIPLES = (2, 3, 4)
+
+
+def runtime_verdict(file_ms, record_minutes):
+    """
+        Compare the ANALYZED FILE against the runtime of the record it matched.
+
+        This is the check that, run by hand on 2026-08-09, found 52 albums whose
+        audio did not match their metadata. Both numbers are already in hand at
+        update time, so the agent can reach that verdict itself on every refresh
+        instead of waiting for someone to sweep the library.
+
+        Returns None when either side is unknown -- a fresh scan has no duration
+        yet, and silence must never read as agreement.
+        @param file_ms summed part duration in ms, or None
+        @param record_minutes runtime the matched record claims, or 0
+        @returns (kind, ratio) with kind ok|duplicated|partial|mismatch, or None
+    """
+    # `or 0` rather than an early `if not ...: return` -- mutation testing
+    # showed that guard was redundant with the <= 0 check below, i.e. an
+    # untested branch pretending to be a safety net. None and 0 both fall
+    # through to one explicit zero check; only a genuinely un-floatable value
+    # (a string, say) reaches the except.
+    try:
+        file_min = float(file_ms or 0) / 60000.0
+        rec = float(record_minutes or 0)
+    except Exception:
+        return None
+    if file_min <= 0 or rec <= 0:
+        return None
+    ratio = file_min / rec
+    if abs(ratio - 1.0) <= RUNTIME_OK_TOLERANCE:
+        return ('ok', ratio)
+    for mult in RUNTIME_MULTIPLES:
+        if abs(ratio - mult) <= 0.03 * mult:
+            return ('duplicated', ratio)
+        if abs(ratio - (1.0 / mult)) <= 0.04:
+            return ('partial', ratio)
+    return ('mismatch', ratio)
+
+
 class SearchTool:
     def __init__(self, content_type, lang, manual, media, prefs, results):
         self.content_type = content_type
@@ -1235,37 +1335,7 @@ class AlbumSearchTool(SearchTool):
         # guard, ONTO the right match. A partial sum is worse than none, so if any
         # part is missing or non-positive, withhold duration entirely and fall back
         # to the safe title+author path (which cannot auto-apply on its own).
-        duration = None
-        try:
-            tracks = self.media.tracks
-            try:
-                track_iter = tracks.values()
-            except Exception:
-                track_iter = tracks
-            total = 0
-            complete = True
-            for track in (track_iter or []):
-                for item in (track.items or []):
-                    for part in (item.parts or []):
-                        # Parts expose duration as a string; Plex reports -1 (or
-                        # nothing) for a not-yet-analyzed file. A malformed value
-                        # counts as missing, not zero, so it marks the sum partial.
-                        part_ms = 0
-                        try:
-                            if part.duration:
-                                part_ms = int(part.duration)
-                        except Exception:
-                            part_ms = 0
-                        if part_ms > 0:
-                            total += part_ms
-                        else:
-                            complete = False
-            # Only trust the sum when no part was missing -- a partial (too-short)
-            # total would wrongly veto the correct edition.
-            if total and complete:
-                duration = total
-        except Exception as e:
-            log.error('incipit duration probe failed: %s', e)
+        duration = media_duration_ms(self.media)
         log.debug('incipit duration resolved: %s' % str(duration))
         # Plex reports -1 for a not-yet-analyzed file; only send a real runtime.
         if duration and duration > 0:

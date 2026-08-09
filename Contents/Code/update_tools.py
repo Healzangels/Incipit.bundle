@@ -1,7 +1,8 @@
 # Import internal tools
 from logging import Logging
 from region_tools import RegionTool
-from search_tools import (MULTI_AUTHOR_RE, name_key, quote_param,
+from search_tools import (MULTI_AUTHOR_RE, media_duration_ms, name_key,
+                          quote_param, runtime_verdict,
                           recall_alternate_covers)
 import re
 import struct
@@ -471,6 +472,11 @@ class AlbumUpdateTool(UpdateTool):
             self.narrator = response['narrators']
         if 'rating' in response:
             self.rating = response['rating']
+        if 'runtimeLengthMin' in response:
+            # Kept ONLY for the update-time self-check: the agent compares it
+            # against the analyzed file so a wrong edition announces itself
+            # instead of waiting for someone to sweep the library.
+            self.runtime_minutes = response['runtimeLengthMin']
         if 'seriesPrimary' in response:
             self.series = response['seriesPrimary']['name']
             if 'position' in response['seriesPrimary']:
@@ -558,6 +564,7 @@ class AlbumUpdateTool(UpdateTool):
         self.genres = []
         self.narrator = []
         self.rating = None
+        self.runtime_minutes = 0
         self.series = ''
         self.series2 = ''
         self.similar = []
@@ -572,6 +579,50 @@ class AlbumUpdateTool(UpdateTool):
         self.title = ''
         self.volume = ''
         self.volume2 = ''
+
+    def report_runtime_mismatch(self):
+        """
+            Say so, loudly, when the AUDIO does not match the RECORD.
+
+            Both numbers are already in hand here: the analyzed file duration
+            and the runtime of whatever this album matched. Comparing them is
+            free, runs on every refresh, and is exactly the check that had to be
+            performed BY HAND on 2026-08-09 to discover that 52 albums were
+            serving the wrong edition.
+
+            The agent cannot repair this itself -- Plex only changes a match via
+            Fix Match, never from update() -- so the useful thing it CAN do is
+            make the defect impossible to miss. warn level, because the default
+            log level is WARN and a line nobody sees is the same as no check.
+
+            Silent when the file is not analyzed yet (a fresh scan sends no
+            duration) or the record carries no runtime: absence of evidence must
+            never be logged as agreement.
+        """
+        try:
+            verdict = runtime_verdict(
+                media_duration_ms(self.media), self.runtime_minutes)
+            if verdict is None:
+                return
+            kind, ratio = verdict
+            if kind == 'ok':
+                return
+            file_min = int(round(media_duration_ms(self.media) / 60000.0))
+            reason = {
+                'duplicated': 'the file appears to contain the book MORE THAN ONCE',
+                'partial': 'the file holds only PART of the book',
+                'mismatch': 'the file does not match this edition',
+            }.get(kind, kind)
+            log.warn(
+                'incipit runtime check: "%s" -- %s (file %s min vs record %s '
+                'min, %.2fx). The audio and the metadata disagree; only a Fix '
+                'Match can re-point this album.',
+                self.title or self.media.title, reason, file_min,
+                self.runtime_minutes, ratio
+            )
+        except Exception as e:
+            # A diagnostic must never break the update it is diagnosing.
+            log.error('incipit runtime check failed: %s', e)
 
     def set_metadata_rating(self):
         """
