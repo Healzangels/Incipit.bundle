@@ -74,6 +74,43 @@ def name_key(value):
         return ''
 
 
+# A generational/honorific tail on a person's name. Required to follow
+# whitespace or a comma, so it can only ever strip a SEPARATE token: without
+# that guard the folded key of "Hawaii" ends in "ii" and "Tel Aviv" ends in
+# "iv", and a bare endswith() would quietly truncate real names.
+NAME_SUFFIX_TAIL_RE = re.compile(
+    r'[\s,]+(?:jr|jnr|sr|snr|ii|iii|iv|v|phd|md|esq)\.?\s*$', re.IGNORECASE)
+
+
+def name_keys_with_suffix_dropped(value):
+    """Every name_key this string could be filed under: itself, and itself
+       without a trailing generational suffix.
+
+       A library files Slaughterhouse-Five under <Kurt Vonnegut Jr> while every
+       provider credits "Kurt Vonnegut" -- two spellings of one person that no
+       raw comparison can reconcile. Returning a SET keeps the caller a plain
+       intersection, and folding through name_key means punctuation, spacing and
+       diacritics stop mattering at the same time.
+    """
+    if not value:
+        return set()
+    keys = set()
+    base = name_key(value)
+    if base:
+        keys.add(base)
+    try:
+        trimmed = NAME_SUFFIX_TAIL_RE.sub('', value)
+    except Exception:
+        trimmed = value
+    # Never let the suffix strip empty the name: "Jr" alone is nobody, and an
+    # empty key would intersect with any other empty key and confirm anything.
+    if trimmed and trimmed.strip():
+        trimmed_key = name_key(trimmed)
+        if trimmed_key:
+            keys.add(trimmed_key)
+    return keys
+
+
 def to_text(value):
     """
         Both sides of a scoring comparison as TEXT, whatever they arrive as.
@@ -2012,16 +2049,30 @@ class ArtistSearchTool(SearchTool):
            folder in this file's path. The recovered author must be both a real
            book author for this title AND present on disk as this book's folder,
            so a wrong name (a same-title book by another author) can never win.
-           Returns None when nothing is confirmed."""
+           Returns None when nothing is confirmed.
+
+           Compared on NAME KEYS, not raw strings, and with a trailing
+           generational suffix tolerated on either side. Measured live
+           2026-08-11: Slaughterhouse-Five sits in <Kurt Vonnegut Jr>/ while
+           every provider credits "Kurt Vonnegut", so a raw equality test
+           rejected a correct answer and the album kept "Narrator: Ethan Hawke"
+           as its artist -- the exact mis-tag this recovery exists to repair.
+           name_key also folds punctuation and diacritics, so "J.R.R. Tolkien"
+           now confirms against a <J R R Tolkien> folder for the same reason."""
         path = self.artist_path()
         if not path:
             return None
-        segments = [seg.strip().lower() for seg in path.split('/') if seg.strip()]
+        segment_keys = set()
+        for seg in path.split('/'):
+            if seg and seg.strip():
+                segment_keys.update(name_keys_with_suffix_dropped(seg))
         results = book_results if isinstance(book_results, list) else [book_results]
         for candidate in (results or []):
             try:
                 for author in (candidate.get('authors', []) or []):
-                    if author and author.strip().lower() in segments:
+                    if not author:
+                        continue
+                    if name_keys_with_suffix_dropped(author) & segment_keys:
                         return author
             except Exception:
                 continue
