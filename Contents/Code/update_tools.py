@@ -1051,9 +1051,15 @@ class AlbumUpdateTool(UpdateTool):
         # works for "Book 1" and "Book One"
         album_title = re.sub(
             r", book [\w\s-]+\s*$", "", self.title, flags=re.IGNORECASE)
-        # If the title ends with "unabridged"/"abridged", with or without parenthesis
-        # remove them; case insensitive
-        album_title = re.sub(r" *\(?(un)?abridged\)?$", "",
+        # If the title ends with "unabridged"/"abridged", with or without
+        # parenthesis remove them; case insensitive.
+        #
+        # The SEPARATOR goes with it. Audible titles the Narnia readings
+        # "The Horse and His Boy: Unabridged", and stripping only " Unabridged"
+        # left "The Horse and His Boy:" on the shelf -- a dangling colon, on 3
+        # albums, next to siblings with clean titles. A book title never ends in
+        # a colon, dash or comma, so consuming one here cannot eat real text.
+        album_title = re.sub(r"[\s:;,–—-]*\(?(un)?abridged\)?\s*$", "",
                              album_title, flags=re.IGNORECASE)
         # Trim any leading/trailing spaces just in case
         album_title = album_title.strip()
