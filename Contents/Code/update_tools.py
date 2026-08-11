@@ -936,7 +936,23 @@ class AlbumUpdateTool(UpdateTool):
         # sort title as bare "Series, Book N" with the book name dropped.
         if not self.title:
             self.title = self.metadata.title
-        new_sort = ' - '.join(filter(None, [series_with_volume, self.title]))
+        # Simplify the title half UNCONDITIONALLY, unlike the display title
+        # which honours the simplify_title pref.
+        #
+        # A sort title is a SHELVING KEY, and a trailing edition qualifier in one
+        # can only ever split a shelf -- which is exactly what it did: v1.3.200
+        # cleaned "The Horse and His Boy: Unabridged" on the album page while
+        # this composer went on reading the raw self.title, so the shelf still
+        # read "Book 5 - The Horse and His Boy: Unabridged" next to siblings
+        # that did not. Measured live on the 3 Narnia readings right after
+        # deploying 1.3.200.
+        #
+        # It also drops a trailing ", Book N" from the title half, which the
+        # volume already carries as its own component -- no "Book 5 - Title,
+        # Book 5". The composer already normalises the SERIES half regardless of
+        # prefs (leading article, whitespace); this is the same treatment for the
+        # title half.
+        new_sort = ' - '.join(filter(None, [series_with_volume, self.simplify_title()]))
         # Fold typographic apostrophes LAST, on the composed string: the prefix
         # then depends on the words rather than on which quote character the
         # source happened to use, and no other consumer of self.series or
