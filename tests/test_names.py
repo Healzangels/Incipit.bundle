@@ -357,5 +357,47 @@ class SeriesQualifierBeforeSplit(unittest.TestCase):
             ['Jefferson Mays', 'Daniel Abraham', 'Ty Franck'])
 
 
+class FolderVolumeRange(unittest.TestCase):
+    """
+    A folder naming a RANGE of volumes is not volume N.
+
+    FOLDER_NUMBER_RE reads the first number and calls it the position, which is
+    the same failure the decimal note beside it describes ("3.5 - The Road To
+    Sevendor" -> Book 3), one step further. Measured live 2026-08-11: the
+    omnibus folder "1-9 - The Lost Stories Collection" shelved as Book 1 and
+    collided with the real Book 1, The Alchemyst, on the Nicholas Flamel shelf.
+    A span has no single position, so the honest answer is none at all.
+    """
+
+    def test_a_range_folder_yields_no_volume(self):
+        self.assertEqual(
+            anchor('Michael Scott', ['Michael Scott'],
+                   series='Secrets of the Immortal Nicholas Flamel',
+                   book='1-9 - The Lost Stories Collection'),
+            (None, None),
+        )
+
+    def test_other_range_shapes(self):
+        for folder in ('10-12 - Omnibus Three', '1-3 Omnibus', '2-4 - Books Two to Four'):
+            self.assertEqual(
+                anchor('An Author', ['An Author'], book=folder), (None, None),
+                'range folder %r must not yield a volume' % folder)
+
+    def test_a_normal_numbered_folder_still_works(self):
+        series, number = anchor('Michael Scott', ['Michael Scott'],
+                                series='Secrets of the Immortal Nicholas Flamel',
+                                book='1 - The Alchemyst')
+        self.assertEqual(number, '1')
+
+    def test_a_TITLE_starting_with_digits_is_not_a_range(self):
+        # The dash must join the numbers with no spaces, which is what keeps
+        # these safe -- both are real titles, not spans.
+        self.assertEqual(anchor('An Author', ['An Author'], book='01 - 1984')[1], '01')
+        self.assertEqual(
+            anchor('An Author', ['An Author'], book='1 - 12 Rules for Life')[1], '1')
+
+    def test_a_decimal_folder_is_untouched(self):
+        self.assertEqual(anchor('An Author', ['An Author'], book='3.5 - A Novella')[1], '3.5')
+
 if __name__ == '__main__':
     unittest.main()

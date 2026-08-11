@@ -164,6 +164,22 @@ def series_key(name):
 # digits, so a year-shaped folder ("1984") is still refused.
 FOLDER_NUMBER_RE = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,2})?)\s*[-._\s]\s*\S')
 
+# A folder naming a RANGE of volumes -- "1-9 - The Lost Stories Collection",
+# "10-12 - Omnibus Three". FOLDER_NUMBER_RE happily reads the first number and
+# calls it the volume, which is the same failure the decimal note above
+# describes, one step further: measured live 2026-08-11, an omnibus spanning
+# books 1-9 shelved as "Book 1" and collided with the real Book 1 (The
+# Alchemyst) on the Nicholas Flamel shelf.
+#
+# A collection spanning volumes has NO single position, so the honest answer is
+# no folder-derived number at all rather than the first one.
+#
+# The dash must join the two numbers with NO spaces, which is how a range is
+# written. That is what keeps a real title starting with a digit safe: verified
+# on "01 - 1984" and "1 - 12 Rules for Life", both of which still yield their
+# own number.
+FOLDER_RANGE_RE = re.compile(r'^\s*\d{1,3}-\d{1,3}\s*[-._\s]\s*\S')
+
 
 # Generational/honorific tails that survive a comma split but name nobody.
 NAME_SUFFIX_KEYS = ('jr', 'sr', 'ii', 'iii', 'iv', 'phd', 'md', 'esq')
@@ -232,6 +248,10 @@ def series_from_path_segments(segments, author_names):
     book_folder = clean[-2]
     series_folder = clean[-3]
     author_folder = clean[-4]
+    # A RANGE folder names a span, not a volume: refuse it before the number
+    # regex reads its first digit as the position.
+    if FOLDER_RANGE_RE.match(book_folder):
+        return (None, None)
     number = FOLDER_NUMBER_RE.match(book_folder)
     if not number:
         return (None, None)
