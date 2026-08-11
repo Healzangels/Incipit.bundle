@@ -47,6 +47,8 @@ def tool_for(path, author, series, volume, title, prefs=None):
     tool.media = FakeMedia(path)
     tool.author = [{'name': author}]
     tool.series, tool.volume, tool.title = series, volume, title
+    # __init__ sets this on every real tool; __new__ skips it.
+    tool.series_span = False
     tool.album_file_path = lambda: path
     return tool
 
@@ -55,6 +57,13 @@ def derive(**kw):
     tool = tool_for(**kw)
     tool.derive_series_from_path()
     return (tool.series, tool.volume)
+
+
+def derive_tool(**kw):
+    """The tool itself, for assertions beyond the (series, volume) pair."""
+    tool = tool_for(**kw)
+    tool.derive_series_from_path()
+    return tool
 
 
 OSRETH = ROOT + '/Katherine Addison/The Chronicles of Osreth'
@@ -187,6 +196,48 @@ class ExistingBehaviourStillHolds(unittest.TestCase):
                    series='', volume='', title='Artemis'),
             ('', ''))
 
+
+class RangeFolderSpan(unittest.TestCase):
+    """
+    WIRING: a range folder must SET the span flag, not merely withhold a number.
+
+    The composer's half and the parser's half were each tested on their own, and
+    a mutation that stopped derive_series_from_path setting the flag left the
+    whole suite green -- the two halves are one feature, and only an end-to-end
+    assertion holds them together.
+    """
+
+    def test_a_range_folder_sets_the_span_flag(self):
+        tool = derive_tool(
+            path=ROOT + '/Michael Scott/Secrets of the Immortal Nicholas Flamel' + '/1-9 - The Lost Stories Collection/x.m4b',
+            author='Michael Scott', series='', volume='',
+            title='The Lost Stories Collection')
+        self.assertEqual(tool.series, 'Secrets of the Immortal Nicholas Flamel')
+        self.assertEqual(tool.volume, '')
+        self.assertTrue(tool.series_span,
+                        'a range folder must mark the book as a SPAN')
+
+    def test_a_numbered_folder_does_NOT_set_it(self):
+        tool = derive_tool(
+            path=ROOT + '/Michael Scott/Secrets of the Immortal Nicholas Flamel' + '/1 - The Alchemyst/x.m4b',
+            author='Michael Scott', series='', volume='', title='The Alchemyst')
+        self.assertEqual(tool.volume, 'Book 1')
+        self.assertFalse(tool.series_span,
+                         'a normal numbered book is not a span')
+
+    def test_the_span_composes_a_grouped_sort_title(self):
+        # End to end: folder -> flag -> sort title, the whole point of the pair.
+        tool = derive_tool(
+            path=ROOT + '/Michael Scott/Secrets of the Immortal Nicholas Flamel' + '/1-9 - The Lost Stories Collection/x.m4b',
+            author='Michael Scott', series='', volume='',
+            title='The Lost Stories Collection')
+        tool.force = True
+        tool.metadata = type('M', (), {'title': 'The Lost Stories Collection',
+                                       'title_sort': ''})()
+        tool.set_metadata_sort_title()
+        self.assertEqual(
+            tool.metadata.title_sort,
+            'Secrets of the Immortal Nicholas Flamel - The Lost Stories Collection')
 
 if __name__ == '__main__':
     unittest.main()

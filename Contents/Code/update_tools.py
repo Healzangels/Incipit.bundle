@@ -248,12 +248,9 @@ def series_from_path_segments(segments, author_names):
     book_folder = clean[-2]
     series_folder = clean[-3]
     author_folder = clean[-4]
-    # A RANGE folder names a span, not a volume: refuse it before the number
-    # regex reads its first digit as the position.
-    if FOLDER_RANGE_RE.match(book_folder):
-        return (None, None)
+    is_range = bool(FOLDER_RANGE_RE.match(book_folder))
     number = FOLDER_NUMBER_RE.match(book_folder)
-    if not number:
+    if not number and not is_range:
         return (None, None)
     # Anchor: the folder two levels above the file must be the author -- in
     # ANY of the spellings either side uses for a co-written credit.
@@ -265,6 +262,22 @@ def series_from_path_segments(segments, author_names):
     # The series folder must be a real name, not a number or the author again.
     if re.match(r'^\d+$', series_folder) or name_key(series_folder) in author_names:
         return (None, None)
+    # A RANGE folder ("1-9 - The Lost Stories Collection") names a SPAN, not a
+    # volume. Refuse the number -- FOLDER_NUMBER_RE would read its first digit
+    # as the position and shelve an omnibus on top of the real book 1 -- but
+    # keep the SERIES, which the parent folder states just as clearly for a
+    # collection as for any other book.
+    #
+    # Deliberately AFTER the anchor and the series-folder checks: an omnibus
+    # earns its series name by passing exactly the guards a normal book passes,
+    # never by short-circuiting them. Returning it early was the first cut, and
+    # it would have handed a series to any layout this function is built to
+    # refuse.
+    #
+    # A (series, None) pair is only useful because set_metadata_sort_title now
+    # composes "<Series> - <Title>" for it; the two changes are one feature.
+    if is_range:
+        return (series_folder, None)
     return (series_folder, number.group(1))
 
 
@@ -276,6 +289,9 @@ class UpdateTool:
         self.media = media
         self.metadata = metadata
         self.prefs = prefs
+        # True when the SERIES is known but the position deliberately is not --
+        # an omnibus spanning volumes. See set_metadata_sort_title.
+        self.series_span = False
         self.region = self.extract_region_from_id()
 
     def build_url(self):
@@ -894,6 +910,10 @@ class AlbumUpdateTool(UpdateTool):
             self.series = series_name
         if folder_wins or not self.volume:
             self.volume = self.volume_prefix(number)
+        # series_from_path_segments returns a name with NO number only for a
+        # range folder, which is how the composer tells a span from a standalone.
+        if derived_series and series_name and not number:
+            self.series_span = True
         # Now that the series name is known, strip a bare "(<Series>)" the
         # provider left in the title so the display + sort titles are clean.
         # Only when the folder supplied the series -- a provider that gave its
@@ -948,6 +968,29 @@ class AlbumUpdateTool(UpdateTool):
                 SERIES_SORT_ARTICLE_RE.sub('', self.series).strip()
                 + ', ' + self.volume.strip()
             )
+        elif self.series and self.series_span:
+            # A collection SPANNING several books ("1-9 - The Lost Stories
+            # Collection"). It has no position -- inventing one shelved it on
+            # top of the real book 1 -- but it is still part of the series, and
+            # composing the title alone dropped it off its own shelf to sort
+            # among unrelated albums.
+            #
+            # So group without claiming a slot: "<Series> - <Title>" sorts with
+            # the series, ahead of "<Series>, Book 1" (space < comma), and never
+            # collides with a numbered volume.
+            #
+            # Plain attribute access, never getattr: the Plex sandbox blocks
+            # getattr and the repo's own guard test refuses it. __init__ always
+            # sets series_span, so the attribute is there for every real tool.
+            #
+            # Gated on the SPAN FLAG, never on "series but no volume". Those are
+            # different things: a stray series name with no position is a
+            # STANDALONE, and test_a_standalone_gets_no_series_prefix pins that
+            # it must sort under its own title rather than a half-formed key. A
+            # first cut inferred the case from the missing volume and broke
+            # exactly that test -- the span is something we KNOW from the folder,
+            # not something to guess from an absence.
+            series_with_volume = SERIES_SORT_ARTICLE_RE.sub('', self.series).strip()
         # Only include subtitle in sort if not in a series
         if not self.volume:
             self.title = self.metadata.title

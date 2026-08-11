@@ -127,10 +127,13 @@ class PartIndexAndFolderTitle(unittest.TestCase):
 class SortTitle(unittest.TestCase):
     """set_metadata_sort_title, driven through a minimal fake metadata object."""
 
-    def _tool(self, series, volume, title, existing_sort='', force=False):
+    def _tool(self, series, volume, title, existing_sort='', force=False,
+              series_span=False):
         tool = UT.AlbumUpdateTool.__new__(UT.AlbumUpdateTool)
         tool.series, tool.volume, tool.title = series, volume, title
         tool.force = force
+        # __init__ sets this on every real tool; __new__ skips it.
+        tool.series_span = series_span
         tool.metadata = type('M', (), {'title': title, 'title_sort': existing_sort})()
         return tool
 
@@ -149,6 +152,43 @@ class SortTitle(unittest.TestCase):
         # A series NAME with no position cannot build a shelf key, so the book
         # must sort under its own title rather than a half-formed one.
         tool = self._tool('Some Series', '', 'Last Man Standing')
+        tool.set_metadata_sort_title()
+        self.assertEqual(tool.metadata.title_sort, 'Last Man Standing')
+
+    def test_a_span_groups_with_its_series_without_claiming_a_slot(self):
+        # An omnibus ("1-9 - The Lost Stories Collection") has no position --
+        # inventing one shelved it on top of the real book 1 -- but it IS part
+        # of the series, and composing the title alone dropped it off its own
+        # shelf. "<Series> - <Title>" groups it without taking a number.
+        tool = self._tool('Secrets of the Immortal Nicholas Flamel', '',
+                          'The Lost Stories Collection', force=True, series_span=True)
+        tool.set_metadata_sort_title()
+        self.assertEqual(
+            tool.metadata.title_sort,
+            'Secrets of the Immortal Nicholas Flamel - The Lost Stories Collection')
+
+    def test_a_span_sorts_AHEAD_of_book_one_and_never_collides(self):
+        # Space sorts before comma, so the collection leads its series and can
+        # never share a key with a numbered volume.
+        span = self._tool('Some Series', '', 'An Omnibus', force=True, series_span=True)
+        span.set_metadata_sort_title()
+        one = self._tool('Some Series', 'Book 1', 'The First Book', force=True)
+        one.set_metadata_sort_title()
+        self.assertLess(span.metadata.title_sort, one.metadata.title_sort)
+        self.assertNotEqual(span.metadata.title_sort, one.metadata.title_sort)
+
+    def test_the_leading_article_is_dropped_from_a_span_too(self):
+        tool = self._tool('The Expanse', '', 'An Omnibus', force=True, series_span=True)
+        tool.set_metadata_sort_title()
+        self.assertEqual(tool.metadata.title_sort, 'Expanse - An Omnibus')
+
+    def test_a_STANDALONE_still_gets_no_prefix(self):
+        # The distinction the span flag exists for. A stray series name with no
+        # position is a standalone, not a span: inferring the case from the
+        # missing volume gave every standalone a half-formed shelf key, which is
+        # what test_a_standalone_gets_no_series_prefix has always forbidden.
+        tool = self._tool('Some Series', '', 'Last Man Standing', force=True,
+                          series_span=False)
         tool.set_metadata_sort_title()
         self.assertEqual(tool.metadata.title_sort, 'Last Man Standing')
 

@@ -374,14 +374,14 @@ class FolderVolumeRange(unittest.TestCase):
             anchor('Michael Scott', ['Michael Scott'],
                    series='Secrets of the Immortal Nicholas Flamel',
                    book='1-9 - The Lost Stories Collection'),
-            (None, None),
+            ('Secrets of the Immortal Nicholas Flamel', None),
         )
 
     def test_other_range_shapes(self):
         for folder in ('10-12 - Omnibus Three', '1-3 Omnibus', '2-4 - Books Two to Four'):
             self.assertEqual(
-                anchor('An Author', ['An Author'], book=folder), (None, None),
-                'range folder %r must not yield a volume' % folder)
+                anchor('An Author', ['An Author'], book=folder), ('Some Series', None),
+                'range folder %r must yield the SERIES but no volume' % folder)
 
     def test_a_normal_numbered_folder_still_works(self):
         series, number = anchor('Michael Scott', ['Michael Scott'],
