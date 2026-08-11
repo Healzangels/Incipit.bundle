@@ -1321,12 +1321,56 @@ class TagTool:
 
     def add_series_to_moods(self):
         """
-            Adds book series' to moods, since collections are not supported
+            Adds book series' to moods, since collections are not supported.
+
+            RETIRES the "Series:" moods this record no longer claims. Purely
+            additive was the old behaviour and it made a wrong shelf permanent:
+            moods is restored from the AGENT'S OWN persisted model (the agent
+            registers persist_stored_files), so clearing the tag in the library
+            is undone on the next update(). Measured 2026-08-11 -- 53 albums
+            carried a translated shelf ("Series: Kolekcja Swiat Dysku" and
+            friends); removing them through Plex's bulk-edit API worked and they
+            came straight back on the next refresh, while the API was returning
+            the correct sub-series.
+
+            Only "Series:" entries are touched -- the field is shared with
+            AUTHOR moods, which are re-added verbatim. And only when this record
+            actually HAS a series: a sparse record must never be able to wipe a
+            shelf it cannot replace, which is the same guard add_genres and
+            add_narrators_to_styles already make.
+
+            clear()+add() rather than a selective remove(): those two are the
+            only set operations this file already proves against the sandbox.
         """
+        wanted = []
         if self.helper.series:
-            self.helper.metadata.moods.add("Series: " + self.helper.series)
+            wanted.append("Series: " + self.helper.series)
         if self.helper.series2:
-            self.helper.metadata.moods.add("Series: " + self.helper.series2)
+            wanted.append("Series: " + self.helper.series2)
+        if not wanted:
+            return
+        # Rebuild only when something is actually stale. A rewrite Plex logs as
+        # "something changed" costs a per-track tags write, which is the cost
+        # the populate_moods gate above exists to avoid.
+        try:
+            existing = [mood for mood in self.helper.metadata.moods]
+        except Exception as err:
+            # Never let a cosmetic retire cost the shelf itself: fall back to
+            # the additive behaviour rather than raise out of update().
+            log.error('could not read existing moods, adding without retire: %s', err)
+            existing = []
+        stale = [
+            mood for mood in existing
+            if mood.startswith("Series: ") and mood not in wanted
+        ]
+        if stale:
+            log.info('retiring %d stale series mood(s): %s', len(stale), ', '.join(stale))
+            self.helper.metadata.moods.clear()
+            for mood in existing:
+                if mood not in stale:
+                    self.helper.metadata.moods.add(mood)
+        for mood in wanted:
+            self.helper.metadata.moods.add(mood)
 
     def add_similar(self):
         """
