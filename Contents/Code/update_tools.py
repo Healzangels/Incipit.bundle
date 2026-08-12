@@ -154,6 +154,52 @@ def series_key(name):
     return SERIES_KEY_STRIP_RE.sub('', folded)
 
 
+# Cross-author franchise CONTAINERS. The API refuses to shelve one it gets from
+# a PROVIDER -- a number inside a franchise is a coordinate, not a place on a
+# shelf (CONTAINER_SHELF_NAMES in incipit-api's shelfPolicy.ts).
+#
+# The folder fallback below is deliberately NOT bound by that rule, and this
+# list does not change what it does. <Brandon Sanderson>/<The Cosmere>/18 is the
+# OPERATOR stating where a book goes, which is a different kind of claim from a
+# provider volunteering a franchise name; the fallback exists precisely for
+# books no provider can place, and the comment on it names Arcanum Unbounded as
+# its live case. Censused across both libraries 2026-08-11: the folder supplies
+# a shelf for 32 of 1,649 albums on prod and 24 of 1,650 on test, and exactly
+# 4 and 3 of those are container names. Enforcing the API's rule here would
+# leave those seven with no shelf at all and nothing to replace it.
+#
+# So this exists to make the case VISIBLE rather than silent. Today's seven are
+# benign and operator-filed; a future one might not be, and without a log line
+# there is nothing to notice it by.
+#
+# DUPLICATED ON PURPOSE, and it will drift: the bundle and the API are separate
+# repos with no shared module, so there is no import that could keep them in
+# step and no test that can compare them. Kept tiny for that reason. Drift costs
+# a missing or spurious LOG LINE and nothing else -- no shelf moves either way.
+FOLDER_CONTAINER_NAMES = (
+    'warhammer 40,000',
+    'cosmere',
+    'cosmere universe',
+    'jack ryan universe',
+    'halo',
+    'camp half-blood chronicles',
+    'eisenhorn/ravenor/bequin'
+)
+FOLDER_CONTAINER_KEYS = tuple([series_key(n) for n in FOLDER_CONTAINER_NAMES])
+
+
+def is_container_series(name):
+    """
+        Whether a series name is a cross-author franchise container.
+
+        Folded-EXACT, never substring: "The Xenos: Warhammer 40,000" contains a
+        container name and is not one. Same rule the API applies, same reason.
+    """
+    if not name:
+        return False
+    return series_key(name) in FOLDER_CONTAINER_KEYS
+
+
 # A book folder that leads with a track/series number: "27 - Cube Route",
 # "17 Harpy Thyme", "1. The Gunslinger", "03_Title". Capped at 3 digits and a
 # real separator required, so a year-shaped folder ("1984") is not mistaken for
@@ -938,6 +984,26 @@ class AlbumUpdateTool(UpdateTool):
                     'REPLACED it with the folder pair "%s, %s" for "%s"',
                     provider_series, self.series, self.volume, self.title
                 )
+        elif derived_series and is_container_series(series_name):
+            # The folder named a franchise CONTAINER. Deliberately still applied
+            # -- see FOLDER_CONTAINER_NAMES -- but said out loud, because it is
+            # the one folder answer the API would have refused from a provider,
+            # and nothing else in the pipeline would ever mention it.
+            #
+            # `derived_series` is invariantly true here, exactly as the note on
+            # its assignment says, so no test can kill dropping it -- mutating it
+            # out leaves the suite green. Kept for the same reason that note
+            # gives: it names WHICH of the three reasons put us on this branch.
+            # Restore a real check only alongside a path that keeps the
+            # provider's name while taking the folder's number.
+            log.warn(
+                'incipit album: series from the folder path is a franchise '
+                'CONTAINER -- "%s, %s" for "%s". Applied (the folder is the '
+                'operator stating the shelf, and no provider placed this book), '
+                'but the API would refuse this name from a provider. If this '
+                'book has a real sub-series, state it in the corpus instead.',
+                self.series, self.volume, self.title
+            )
         else:
             log.warn(
                 'incipit album: series from the folder path -- "%s, %s" for "%s"',

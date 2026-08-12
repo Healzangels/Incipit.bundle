@@ -239,5 +239,100 @@ class RangeFolderSpan(unittest.TestCase):
             tool.metadata.title_sort,
             'Secrets of the Immortal Nicholas Flamel - The Lost Stories Collection')
 
+
+class ContainerNameIsLogged(unittest.TestCase):
+    """
+        The folder fallback may supply a FRANCHISE CONTAINER name -- the one
+        answer the API refuses when a PROVIDER offers it. The bundle still
+        applies it (the folder is the operator stating the shelf, and these are
+        books no provider can place), but it must say so: censused 2026-08-11
+        that is 4 albums on prod and 3 on test, and without a log line there is
+        nothing to notice a future one by.
+    """
+
+    COSMERE = ROOT + '/Brandon Sanderson/The Cosmere/18 - Arcanum Unbounded/a.m4b'
+    W40K = ROOT + '/Guy Haley/Warhammer 40,000/1 - Belisarius Cawl/b.m4b'
+    REAL = ROOT + '/Rick Riordan/Percy Jackson and the Olympians/1 - The Lightning Thief/l.m4b'
+
+    def setUp(self):
+        self.lines = []
+        self.saved = UT.log
+
+        class Recorder(object):
+            def __init__(self, sink):
+                self.sink = sink
+
+            def warn(self, message, *args):
+                self.sink.append(message % args if args else message)
+
+            def debug(self, message, *args):
+                return None
+
+            def info(self, message, *args):
+                return None
+
+            def error(self, message, *args):
+                return None
+
+        UT.log = Recorder(self.lines)
+
+    def tearDown(self):
+        UT.log = self.saved
+
+    def warned(self):
+        return ' | '.join(self.lines)
+
+    def test_a_container_from_the_folder_is_named_in_the_log(self):
+        tool = derive_tool(path=self.COSMERE, author='Brandon Sanderson',
+                           series=None, volume=None, title='Arcanum Unbounded')
+        # STILL APPLIED -- this change is observability, not behaviour.
+        self.assertEqual((tool.series, tool.volume), ('The Cosmere', 'Book 18'))
+        self.assertIn('CONTAINER', self.warned())
+        self.assertIn('The Cosmere', self.warned())
+
+    def test_the_other_container_shape_is_named_too(self):
+        tool = derive_tool(path=self.W40K, author='Guy Haley',
+                           series=None, volume=None, title='Belisarius Cawl')
+        self.assertEqual((tool.series, tool.volume), ('Warhammer 40,000', 'Book 1'))
+        self.assertIn('CONTAINER', self.warned())
+
+    def test_a_real_series_from_the_folder_is_NOT_called_a_container(self):
+        # The plain folder-path warning still fires; only the word must not.
+        tool = derive_tool(path=self.REAL, author='Rick Riordan',
+                           series=None, volume=None, title='The Lightning Thief')
+        self.assertEqual(tool.series, 'Percy Jackson and the Olympians')
+        self.assertIn('series from the folder path', self.warned())
+        self.assertNotIn('CONTAINER', self.warned())
+
+    def test_a_path_that_does_not_match_the_layout_logs_nothing(self):
+        derive_tool(path=ROOT + '/Some Author/Loose Book/x.m4b', author='Some Author',
+                    series=None, volume=None, title='Loose Book')
+        self.assertEqual(self.lines, [])
+
+
+class ContainerIdentity(unittest.TestCase):
+    """Folded-EXACT, never substring -- the same rule the API applies (R5)."""
+
+    def test_the_container_names_are_recognised(self):
+        for name in ('Warhammer 40,000', 'the cosmere', 'Cosmere Universe',
+                     'Halo', 'Camp Half-Blood Chronicles', 'Jack Ryan Universe'):
+            self.assertTrue(UT.is_container_series(name), name)
+
+    def test_a_name_CONTAINING_a_container_is_not_one(self):
+        # R5: "The Xenos: Warhammer 40,000" contains a container name.
+        for name in ('The Xenos: Warhammer 40,000', 'Warhammer 40,000: Imperial Guard',
+                     'Halo: The Forerunner Saga', 'Cosmere Companion'):
+            self.assertFalse(UT.is_container_series(name), name)
+
+    def test_a_real_series_is_not_a_container(self):
+        for name in ('The Forerunner Saga', 'Eisenhorn', 'Bill Hodges',
+                     'Percy Jackson and the Olympians', 'Holly Gibney'):
+            self.assertFalse(UT.is_container_series(name), name)
+
+    def test_an_absent_name_is_not_a_container(self):
+        self.assertFalse(UT.is_container_series(None))
+        self.assertFalse(UT.is_container_series(''))
+
+
 if __name__ == '__main__':
     unittest.main()
