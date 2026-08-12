@@ -98,33 +98,49 @@ class TestIsApiHost(ApiHostBase):
             self.assertFalse(AG.is_api_host(url))
 
 
-class TestTheTokenFollowsTheSameRule(ApiHostBase):
+class TestTheTokenPathIsGone(ApiHostBase):
     """
-        The header helper is the reason this matters, so pin it directly rather
-        than trusting that it still calls is_api_host.
+        The Hardcover token USED to ride on every request to the API host, and
+        is_api_host existed partly to keep it off third parties. Removed in
+        1.3.206: every deployment self-hosts incipit-api with its own
+        HARDCOVER_TOKEN, so the per-request forward bought nothing and cost a
+        personal API key sitting in Plex's plaintext prefs on every server.
+
+        This pins the REMOVAL. Deleting a secret-handling path is only worth
+        anything if it stays deleted, and the obvious way it comes back is
+        someone re-adding the pref for a "shared instance" that does not exist.
     """
 
-    def setUp(self):
-        self.original = AG.Prefs['api_base_url']
-        self.original_token = AG.Prefs['hardcover_token']
-        AG.Prefs.DEFAULTS['hardcover_token'] = 'secret-jwt'
+    def test_incipit_headers_is_gone(self):
+        self.assertFalse(
+            hasattr(AG, 'incipit_headers'),
+            'incipit_headers is back: the bundle is forwarding a secret again'
+        )
 
-    def tearDown(self):
-        self.set_base(self.original)
-        AG.Prefs.DEFAULTS['hardcover_token'] = self.original_token
+    def test_no_hardcover_token_pref(self):
+        self.assertNotIn(
+            'hardcover_token', AG.Prefs.DEFAULTS,
+            'the hardcover_token pref is back; the API reads HARDCOVER_TOKEN from its own env'
+        )
 
-    def test_the_token_goes_to_our_api(self):
-        self.set_base('http://incipit-api')
-        self.assertEqual(AG.incipit_headers('http://incipit-api/books?title=x'),
-                         {'x-hardcover-token': 'secret-jwt'})
-
-    def test_the_token_does_NOT_go_to_a_lookalike(self):
-        self.set_base('http://incipit-api')
-        self.assertEqual(AG.incipit_headers('http://incipit-api.attacker.example/x.jpg'), {})
-
-    def test_the_token_does_NOT_go_to_a_third_party(self):
-        self.set_base('http://10.0.1.99:3737')
-        self.assertEqual(AG.incipit_headers('https://m.media-amazon.com/images/I/a.jpg'), {})
+    def test_no_request_sends_a_hardcover_header(self):
+        # Belt and braces: nothing anywhere in the agent may name the header.
+        import os
+        code_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                'Contents', 'Code')
+        offenders = []
+        for name in os.listdir(code_dir):
+            if not name.endswith('.py'):
+                continue
+            with open(os.path.join(code_dir, name)) as handle:
+                body = handle.read()
+            # The docstring in __init__.py explains the removal, so allow a
+            # mention in a comment while refusing a live header dict.
+            for line in body.splitlines():
+                stripped = line.strip()
+                if 'x-hardcover-token' in stripped and not stripped.startswith('#'):
+                    offenders.append('%s: %s' % (name, stripped[:70]))
+        self.assertEqual(offenders, [])
 
 
 if __name__ == '__main__':

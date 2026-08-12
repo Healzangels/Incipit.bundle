@@ -24,13 +24,6 @@
         "default": ""
     },
     {
-        "id": "hardcover_token",
-        "label": "Hardcover API token (free at hardcover.app/settings). Blank = skip Hardcover.",
-        "type": "text",
-        "option": "hidden",
-        "default": ""
-    },
-    {
         "id": "keep_existing_genres",
         "label": "Keep existing genres",
         "type": "bool",

@@ -4598,10 +4598,15 @@ def is_api_host(url):
         THE SEPARATOR IS THE WHOLE GUARD. A bare startswith on the base has no
         boundary after it, so a base of "http://incipit-api" -- a plausible
         container/service-name setting, and the pref is free text -- also
-        accepts "http://incipit-api.attacker.example/x.jpg". Both callers act on
-        the answer in ways that must not reach a third party: incipit_headers
-        attaches the operator's Hardcover TOKEN, and make_request drops the
-        framework's 1s pacing. And the URLs reaching here are not all ours --
+        accepts "http://incipit-api.attacker.example/x.jpg". make_request acts
+        on the answer in ways that must not reach a third party: it drops the
+        framework's 1s pacing, and it aborts the retry ladder on a 4xx that only
+        our own API is trusted to mean. (It used to guard a second caller too --
+        incipit_headers, which attached the operator's Hardcover token. That is
+        GONE as of 1.3.206: every deployment self-hosts the API with its own
+        HARDCOVER_TOKEN, so forwarding a personal key from Plex's plaintext
+        prefs on every request bought nothing.) And the URLs reaching here are
+        not all ours --
         the alternate-cover path fetches urls straight out of a JSON body.
         Same shape with a port: base "http://host:3737" would match
         "http://host:37370/...".
@@ -4652,18 +4657,6 @@ def retry_after_seconds(err):
     return secs
 
 
-def incipit_headers(url):
-    """
-        Attaches the user's own Hardcover token, but ONLY on requests to the
-        configured incipit-api host — never to Audible or any other host, so the
-        token can't leak to a third party.
-    """
-    token = Prefs['hardcover_token']
-    if token and is_api_host(url):
-        return {'x-hardcover-token': token}
-    return {}
-
-
 def retry_uncached(update_url):
     """
         One cache-bypassing retry for a decode failure, to heal a poisoned
@@ -4689,7 +4682,6 @@ def make_request(url, cache_time=None):
         while a human-driven search always gets a current answer; ASIN data
         lookups use the default week-long cache, since those records are stable.
     """
-    headers = incipit_headers(url)
     # sleep=0 ONLY for our own local, allowlisted API — the framework's per-fetch
     # 1s pause is the largest fixed cost of a cold scan there. Third-party hosts
     # (Audible/audnexus in stock mode, Amazon image CDNs) KEEP the pacing so an
@@ -4701,7 +4693,7 @@ def make_request(url, cache_time=None):
     for attempt in range(0, num_retries):
         try:
             response = HTTP.Request(
-                url, headers=headers, cacheTime=cache_time,
+                url, cacheTime=cache_time,
                 timeout=90, sleep=fetch_sleep)
             # FORCE THE FETCH INSIDE THE LADDER.
             #
