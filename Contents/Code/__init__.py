@@ -4589,6 +4589,142 @@ def json_decode(output):
         return None
 
 
+# Third-party hosts that serve ONLY images, and so earn a lighter pace than the
+# flat 1s make_request gives every other third party.
+#
+# MEASURED, not guessed: every alternate-cover url the api served across a
+# 120-book sample of the live library (2026-08-12) resolved to one of these six
+# hosts -- m.media-amazon.com (78), assets.hardcover.app (77), img1/2/3.od-cdn.com
+# (49), is1-ssl.mzstatic.com (8) -- and the PRIMARY cover url lands on the first
+# two as well. The Amazon `ssl-images` spelling is the one entry here NOT in that
+# sample; it is Audible's older image host, included because it serves the same
+# art from the same CDN and would otherwise silently keep the 1s pace.
+#
+# Suffixes, matched on a dot boundary, because these are sharded: od-cdn.com
+# fronts img1/img2/img3 and mzstatic fronts is1-ssl/is2-ssl/..., so pinning the
+# exact hostnames would pace two thirds of OverDrive at 1s for no reason.
+#
+# WHY THIS IS SAFE, stated plainly: the 1s pace exists so a cold scan cannot
+# hammer or get throttled by a third party. That risk is real for an API that
+# meters you (Audible/audnexus/Hardcover) and negligible for an unauthenticated
+# image CDN built to serve exactly this. The scan is serialized, so even at a
+# zero gap it would issue at most ~4 requests/second -- the download itself
+# measured 229ms mean. Nothing here is an API: adding a host that answers
+# queries, rather than one that returns bytes for a picture, is the mistake this
+# list must not make.
+IMAGE_CDN_SUFFIXES = (
+    'media-amazon.com',
+    'ssl-images-amazon.com',
+    'assets.hardcover.app',
+    'od-cdn.com',
+    'mzstatic.com',
+)
+
+# A MINIMUM GAP, not a blind sleep. A flat sleep would also be paid on a plugin
+# HTTP-cache hit and on every url that happens to arrive slowly -- and the cover
+# path re-asks for the same thumb more than once per album, so that would have
+# handed back a chunk of what this change saves. Pacing only when we are
+# actually going fast costs nothing when we are not.
+IMAGE_CDN_MIN_GAP = 0.25
+# A dict rather than a module global rebound inside the function: the sandbox is
+# fine with mutating a container, and this needs no `global` statement.
+image_cdn_pace_state = {'last': 0.0, 'announced': False}
+
+# Scheme, then everything up to the first /, ? or # -- the AUTHORITY, which is
+# not yet the host.
+URL_AUTHORITY_RE = re.compile(r'^[a-z][a-z0-9+.-]*://([^/?#]*)', re.I)
+
+
+def url_host(url):
+    """
+        The lowercased hostname of `url`, or '' when there is not one.
+
+        Hand-rolled because the obvious import is not portable here: py2 has
+        `urlparse.urlparse` and py3 has `urllib.parse.urlparse`, and this module
+        is compiled by BOTH (Plex runs py2.7, the test harness is py3). `re` is
+        already imported and behaves identically on each.
+        @param url the url to read
+        @returns the hostname, lowercased, or ''
+    """
+    try:
+        match = URL_AUTHORITY_RE.match(url.strip())
+    except Exception:
+        return ''
+    if not match:
+        return ''
+    authority = match.group(1)
+    # USERINFO FIRST, and on the LAST '@'. "https://m.media-amazon.com@evil.example/x.jpg"
+    # has a host of evil.example, so a left-to-right read hands back the decoy --
+    # and these urls come straight out of a JSON response body (imageAlternates),
+    # which is exactly the reachability test_api_host.py documents for the same
+    # class of check.
+    if '@' in authority:
+        authority = authority.rsplit('@', 1)[1]
+    # An IPv6 literal is bracketed and full of colons; only a colon OUTSIDE the
+    # brackets is a port.
+    if authority.startswith('['):
+        end = authority.find(']')
+        if end != -1:
+            authority = authority[:end + 1]
+    elif ':' in authority:
+        authority = authority.split(':', 1)[0]
+    # A trailing dot is a legal absolute FQDN ("m.media-amazon.com.") and would
+    # otherwise miss every suffix below.
+    return authority.lower().rstrip('.')
+
+
+def is_image_cdn_host(url):
+    """
+        True when url targets a known image-only CDN, which is paced lighter.
+
+        The DOT BOUNDARY is the whole guard, exactly as in is_api_host: a bare
+        `endswith('od-cdn.com')` also accepts "evil-od-cdn.com", and a bare
+        substring test accepts "od-cdn.com.attacker.example". Getting this wrong
+        does not leak a secret -- there is no token on this path any more -- it
+        silently drops an attacker-shaped host to a lighter pace, which is a
+        smaller harm than is_api_host's but not one to hand over for free.
+        @param url the url to classify
+        @returns True when the host is a known image CDN
+    """
+    host = url_host(url)
+    if not host:
+        return False
+    for suffix in IMAGE_CDN_SUFFIXES:
+        if host == suffix or host.endswith('.' + suffix):
+            return True
+    return False
+
+
+def pace_image_cdn():
+    """
+        Hold IMAGE_CDN_MIN_GAP between image-CDN fetches, and no longer.
+
+        Deliberately NOT the framework's `sleep=` argument. That one takes the
+        whole pause as a number we hand it, and whether it accepts a FRACTION is
+        a framework detail this bundle cannot see or test -- if it floors to an
+        int, 0.25 silently becomes no pacing at all. Doing it here keeps the
+        argument an integer the framework has always been given, and makes the
+        gap something the test suite can assert.
+    """
+    # ONCE per plugin life, not per fetch: this fires thousands of times in a
+    # scan. It exists because the effect of this path cannot be observed from
+    # the outside -- a scan that is merely faster looks the same as one where
+    # the branch never ran -- and because a bundle change needs one log string
+    # only the new version can emit, for load proof under log rotation.
+    if not image_cdn_pace_state['announced']:
+        image_cdn_pace_state['announced'] = True
+        log.info('incipit pace: image-CDN gap %ss engaged (third parties keep 1s)',
+                 IMAGE_CDN_MIN_GAP)
+    now = time()
+    waited = now - image_cdn_pace_state['last']
+    if waited < IMAGE_CDN_MIN_GAP:
+        sleep(IMAGE_CDN_MIN_GAP - waited)
+        # Re-read: the sleep may overshoot, and stamping the pre-sleep time
+        # would let the NEXT call fire early by however much it overshot.
+        now = time()
+    image_cdn_pace_state['last'] = now
+
+
 def is_api_host(url):
     """
         True when url targets the configured incipit-api host (our own local,
@@ -4684,9 +4820,24 @@ def make_request(url, cache_time=None):
     """
     # sleep=0 ONLY for our own local, allowlisted API — the framework's per-fetch
     # 1s pause is the largest fixed cost of a cold scan there. Third-party hosts
-    # (Audible/audnexus in stock mode, Amazon image CDNs) KEEP the pacing so an
-    # unpaced cold scan can't hammer or get throttled by them.
-    fetch_sleep = 0 if is_api_host(url) else 1
+    # (Audible/audnexus in stock mode) KEEP the pacing so an unpaced cold scan
+    # can't hammer or get throttled by them.
+    #
+    # IMAGE CDNs sit between the two. Measured 2026-08-12 against the live
+    # library: 83% of books carry alternate covers averaging 1.88 urls each, and
+    # with the primary cover on the same hosts the flat 1s pace added ~50-63
+    # minutes to a cold scan of 1650 albums -- 81% of that cost being the sleep
+    # itself, not the 229ms download. They are unauthenticated CDNs built to
+    # serve pictures, so they earn a lighter pace than an API that meters us; a
+    # serialized scan cannot burst past ~4 requests/second regardless.
+    fetch_sleep = 1
+    if is_api_host(url):
+        fetch_sleep = 0
+    elif is_image_cdn_host(url):
+        # The framework argument stays an INTEGER it has always been given; the
+        # sub-second part is ours, so it is testable and cannot be floored away.
+        fetch_sleep = 0
+        pace_image_cdn()
     sleep_time = 1
     num_retries = 4
     response = None
