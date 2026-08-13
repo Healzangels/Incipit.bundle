@@ -30,9 +30,31 @@
 
 ## 🧐 About <a name = "about"></a>
 
-The aim of this project is to automate as much as possible, and make some intelligent, transparent choices for the user. All data used by this plugin is sourced from the parent aggregator, [audnex.us](https://github.com/djdembeck/audnexus). By using the audnexus API, searches and matches, which are cached, are greatly accelerated over scraping each search and item page from HTML. Additionally, the API can have multiple sources of data used for each book entry.
+Incipit matches audiobooks on their CONTENT — title, author and runtime — rather than
+on an Audible catalogue id. That is the whole reason the fork exists: a book with no
+Audible release, or one whose ASIN never made it into your tags, still gets matched.
 
-Audnexus will first search a book/author to see if it's come across it before. If it's found, it returns them straight away. If not, it requests that the aggregator import all the available data. Thus, the more people who use audnexus' client plugins, the faster the API will be and more data complete. You can also run a fork of the API yourself, see the above repo on how to do that.
+**It is self-hosted, and that is not optional.** The agent talks to your own
+[incipit-api](https://github.com/Healzangels/incipit-api) instance, set in
+`api_base_url` below. There is no shared public aggregator behind it — unlike upstream
+Audnexus, nothing here gets faster because other people use it, and no credentials
+leave your network.
+
+The API fans a search out across six providers and reconciles the answers — **Audible,
+Hardcover, Chaptarr, Apple, OverDrive and OpenLibrary** — so the match, the series, the
+genres and the cover can each come from whichever source actually has them.
+
+### What Incipit adds over Audnexus
+
+- **Runtime-corroborated matching** — the file's duration is evidence, so a wrong
+  edition or a differently-narrated recording can be demoted or vetoed.
+- **Series from a source of truth**, with franchise umbrellas rejected: a book shelves
+  under *The Elric Saga*, not *The Eternal Champion Sequence*.
+- **Genres merged** across community sources instead of Audible's alone.
+- **Cover handling that will not fight you**: local `cover.jpg` support, alternate
+  marketplace art offered as extra pickable posters, duplicate tiles suppressed by
+  perceptual comparison, and — the rail that matters — a poster you picked by hand is
+  never replaced or pruned.
 
 Available regions:
 - `[au]` - `.com.au`
@@ -81,6 +103,25 @@ git pull
 
 If you wish to use local tags/images, you can follow the directions [here](https://github.com/seanap/Plex-Audiobook-Guide#configure-metadata-agent-in-plex), but this agent assumes you will not.
 
+### Settings that matter
+
+Set in Plex under the library's agent settings.
+
+| setting | what it does |
+|---|---|
+| **`api_base_url`** | **Required.** Your incipit-api, e.g. `http://10.0.1.99:3737`. Blank falls back to Audible-only matching, losing Hardcover, OpenLibrary and duration matching. |
+| `region` | Search region. The agent was built for English-based regions. |
+| `prefer_local_cover` | Use the book folder's `cover.jpg` as the poster. |
+| `cover_mirror_mode` | Whether the selected poster is written back to `cover.jpg` — `Off`, `Seed only` (write only where none exists), or `Curation` (the pick replaces it). |
+| `online_perceptual_dedupe` | Hide a poster when another source already shows the same picture in different bytes. Uncheck to keep every variant. |
+| `series_from_folder_wins` | Trust the folder tree for series and book number over the provider. Off by default: the provider is usually right, and the folder is a fallback. |
+| `prefer_sidecar_metadata` | Trust a `metadata.json` sidecar next to the book. |
+| `keep_existing_genres` | Leave genres alone instead of merging in the community ones. |
+| `logging_level` | `WARN` by default. Cover decisions log at INFO, so raise it to INFO or DEBUG when diagnosing a poster, then put it back — a full sweep at DEBUG writes a lot. |
+
+`series_from_folder_authors` and `authors_prefer_hardcover` take comma-separated
+names, for the cases where one author needs the opposite of your default.
+
 ### Using quick match
 
 There are currently 2 quick match/search override options:
@@ -117,7 +158,7 @@ Author Name/Book Name B01234ABCD [uk]/Book Name: Subtitle.m4b
 
 In the ADVANCED tab:
 - Scanner: `Plex Music Scanner`
-- Agent: `Audnexus Agent`
+- Agent: `Incipit Agent`
 - Toggle agent settings as you please.
 - Uncheck all boxes except `Store track progress`
 - Genres: `Embedded tags`

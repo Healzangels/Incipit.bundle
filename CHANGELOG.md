@@ -1,5 +1,25 @@
 # Changelog
 
+## This file is the INHERITED Audnexus history, and stops at 1.3.2 (2024-08-12)
+
+Incipit forked from [Audnexus.bundle](https://github.com/djdembeck/Audnexus.bundle)
+and kept its changelog as provenance. Everything below is upstream's, and its links
+point at upstream's repo and issues.
+
+**Incipit's own history is not here.** It lives in the git log, and each release is a
+version bump in `Contents/Code/_version.py` + `Contents/Info.plist` (the deploy gate
+asserts the two agree). To see what changed:
+
+```
+git log --oneline v1.3.2..HEAD -- Contents/
+```
+
+Commit messages are the record deliberately: they carry the measurement a change was
+based on and the mutations that were run against it, which a one-line changelog entry
+cannot. Design rationale for the larger pieces lives in `docs/`.
+
+---
+
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
 ### [1.3.2](https://github.com/djdembeck/Audnexus.bundle/compare/v1.3.1...v1.3.2) (2024-08-12)
