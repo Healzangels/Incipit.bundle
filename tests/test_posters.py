@@ -4597,6 +4597,25 @@ class AlternateCoverOfferIsWiredIn(unittest.TestCase):
             'all %d cover_keep_list calls must pass alternate_keys; %d do'
             % (calls, carried))
 
+    def test_the_twin_prune_validates_on_the_SURVIVORS_not_the_condemned(self):
+        """
+            validate_keys KEEPS what it is given. Handing it the condemned set
+            inverts the prune into "keep only the twins, delete everything
+            else" -- the most destructive single-token mistake available here,
+            and one the unit tests cannot see because they exercise the keep
+            list builder, not the call. Mutation-verified: swapping the
+            argument left the whole suite green until this existed.
+        """
+        src = self._source()
+        self.assertNotIn(
+            'validate_keys(stale_alternates)', src,
+            'the twin prune must validate on the survivors, never the condemned')
+        branch = src[src.index('elif stale_alternates:'):]
+        branch = branch[:branch.index('\n        elif (')]
+        self.assertIn('validate_keys(keep)', branch)
+        # and it must still refuse to run with an empty keep list
+        self.assertIn('if not keep:', branch)
+
     def test_the_offer_runs_before_the_membership_lists(self):
         src = self._source()
         offered = src.index(self.CALL)
