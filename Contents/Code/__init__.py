@@ -1850,7 +1850,15 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         return added
     # Anything to judge AGAINST? With nothing on display the twin question
     # cannot be asked, so the old free path stands.
-    judgeable = bool([s for s in (shown or []) if s])
+    # What a candidate is judged against: the images already on display, PLUS
+    # the alternates accepted earlier in THIS pass.
+    #
+    # Without the second half, two alternates that are the same picture as each
+    # other both pass -- each is compared only to the cover, not to its
+    # predecessor. Measured on .99 across 30 albums (v1.3.210): 29 duplicate
+    # tiles went, and exactly one pair survived, on The Heroes -- two of its six
+    # alternates being the same picture at distance 0, both offered by us.
+    judged = [s for s in (shown or []) if s]
     for url in alternates:
         already_offered = url in helper.metadata.posters
         # THE SHORT-CIRCUIT IS NOW CONDITIONAL, and that is the whole fix.
@@ -1871,7 +1879,9 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         # refusal memo still skips known-bad urls without a fetch, the
         # perceptual verdicts are memoised, and image CDNs now pace at 0.25s
         # rather than 1s (v1.3.207).
-        if already_offered and not judgeable:
+        # `judged` GROWS as the loop runs, so this asks the current question,
+        # not the one that was true at entry.
+        if already_offered and not judged:
             added.append(url)
             continue
         # A refusal leaves no trace in the container, so without this the
@@ -1907,7 +1917,7 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         # picture for every OTHER book too -- the same trap the post-verdict
         # comment below already had to be fixed for. The cost of re-deciding
         # is one consult, and the consult is memoised.
-        if alternate_already_on_display(data, shown, url):
+        if alternate_already_on_display(data, judged, url):
             # NOT appended, deliberately: dropping out of `added` drops it from
             # the keep list, which is what lets validate_keys prune a twin an
             # OLDER version already put in the container. Returning early
@@ -1916,7 +1926,10 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         if already_offered:
             # Judged and still wanted. The container already holds it, so
             # re-offering the bytes would be a no-op -- but it must stay in
-            # `added` or the keep list drops a poster we just approved.
+            # `added` or the keep list drops a poster we just approved. It
+            # also joins `judged`: it is on display, so a later alternate
+            # that repeats it is a twin.
+            judged.append(data)
             added.append(url)
             continue
         # THE VERDICT IS YES from here, so nothing below may record a refusal.
@@ -1935,6 +1948,11 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
                      url, e)
             continue
         added.append(url)
+        # On display from here, so it becomes something the NEXT alternate is
+        # judged against. Appended only after the container write succeeded --
+        # an alternate that failed to land is not on display and must not
+        # suppress a later copy of the same picture.
+        judged.append(data)
         log.info('incipit cover: offering an alternate-marketplace cover (%s)', url)
     return added
 

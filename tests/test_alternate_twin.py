@@ -206,6 +206,63 @@ class AlreadyOfferedAlternatesAreStillJudged(TwinBase):
         self.assertEqual(fetched, [], 'must not re-fetch when it cannot judge')
 
 
+class AlternatesAreJudgedAgainstEachOther(TwinBase):
+    """
+        Two alternates that are the same picture as EACH OTHER.
+
+        Each was compared only against the cover, never against its
+        predecessor, so both passed. Measured on .99 over 30 albums
+        (v1.3.210): 29 duplicate tiles went and exactly one pair survived --
+        The Heroes, two of its six alternates identical at distance 0.
+    """
+
+    def test_the_SECOND_copy_of_one_picture_is_not_offered(self):
+        # Neither matches the cover; they match one another.
+        h = self.helper_offering(
+            ['http://x/a.jpg', 'http://x/b.jpg'],
+            {'http://x/a.jpg': TWIN, 'http://x/b.jpg': TWIN})
+        keys = AG.offer_alternate_covers(h, shown=(OTHER,))
+        self.assertEqual(keys, ['http://x/a.jpg'])
+        self.assertNotIn('http://x/b.jpg', h.metadata.posters)
+
+    def test_two_DIFFERENT_alternates_are_both_offered(self):
+        # The destructive direction: judging them against each other must not
+        # collapse genuinely different art.
+        h = self.helper_offering(
+            ['http://x/a.jpg', 'http://x/b.jpg'],
+            {'http://x/a.jpg': TWIN, 'http://x/b.jpg': LOCAL})
+        keys = AG.offer_alternate_covers(h, shown=(OTHER,))
+        self.assertEqual(keys, ['http://x/a.jpg', 'http://x/b.jpg'])
+
+    def test_a_twin_of_an_ALREADY_OFFERED_alternate_is_not_added(self):
+        # The container already holds A from an earlier pass; B is the same
+        # picture. A is on display, so B is a twin of it -- and A only counts
+        # as something to compare against if the keep path feeds `judged`.
+        h = self.helper_offering(
+            ['http://x/a.jpg', 'http://x/b.jpg'],
+            {'http://x/a.jpg': TWIN, 'http://x/b.jpg': TWIN})
+        h.metadata.posters['http://x/a.jpg'] = 'existing'
+        keys = AG.offer_alternate_covers(h, shown=(OTHER,))
+        self.assertEqual(keys, ['http://x/a.jpg'])
+        self.assertNotIn('http://x/b.jpg', h.metadata.posters)
+
+    def test_an_alternate_that_FAILED_to_land_does_not_suppress_a_later_copy(self):
+        # It is not on display, so it cannot be the reason to hide a twin --
+        # otherwise one failed container write loses the picture entirely.
+        class Boom(dict):
+            def __setitem__(self, key, value):
+                if key == 'http://x/a.jpg':
+                    raise IOError('container write failed')
+                dict.__setitem__(self, key, value)
+
+        h = self.helper_offering(
+            ['http://x/a.jpg', 'http://x/b.jpg'],
+            {'http://x/a.jpg': TWIN, 'http://x/b.jpg': TWIN})
+        h.metadata.posters = Boom()
+        keys = AG.offer_alternate_covers(h, shown=(OTHER,))
+        self.assertEqual(keys, ['http://x/b.jpg'])
+
+
 class OfferAlternatesSkipsTwinsMore(TwinBase):
     def test_WITHOUT_shown_every_acceptable_alternate_is_offered(self):
         # Callers that pass nothing must behave exactly as before this change.
