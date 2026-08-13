@@ -124,8 +124,10 @@ class OfferAlternatesSkipsTwins(TwinBase):
         h = self.helper_offering(
             ['http://x/twin.jpg', 'http://x/other.jpg'],
             {'http://x/twin.jpg': TWIN, 'http://x/other.jpg': OTHER})
-        keys = AG.offer_alternate_covers(h, shown=(PRIMARY, None))
+        keys, stale = AG.offer_alternate_covers(h, shown=(PRIMARY, None))
         self.assertEqual(keys, ['http://x/other.jpg'])
+        # Never offered, so there is no tile to prune: declining is enough.
+        self.assertEqual(stale, [])
         self.assertNotIn('http://x/twin.jpg', h.metadata.posters)
         self.assertIn('http://x/other.jpg', h.metadata.posters)
 
@@ -168,16 +170,19 @@ class AlreadyOfferedAlternatesAreStillJudged(TwinBase):
         h = self.helper_offering(['http://x/twin.jpg'], {'http://x/twin.jpg': TWIN})
         # It is already on display, exactly as an older version left it.
         h.metadata.posters['http://x/twin.jpg'] = 'existing'
-        keys = AG.offer_alternate_covers(h, shown=(PRIMARY,))
+        keys, stale = AG.offer_alternate_covers(h, shown=(PRIMARY,))
         # Absent from the keep list is what lets validate_keys prune it.
         self.assertEqual(keys, [])
         self.assertEqual(self.refusals, [])
+        # ...and NAMED, so the caller can prune it even when the membership
+        # branch that owns the keep list never runs (the prod Lamb case).
+        self.assertEqual(stale, ['http://x/twin.jpg'])
 
     def test_a_GENUINE_alternate_already_in_the_container_is_KEPT(self):
         # The destructive direction: judging must not evict art that is fine.
         h = self.helper_offering(['http://x/other.jpg'], {'http://x/other.jpg': OTHER})
         h.metadata.posters['http://x/other.jpg'] = 'existing'
-        keys = AG.offer_alternate_covers(h, shown=(PRIMARY,))
+        keys, stale = AG.offer_alternate_covers(h, shown=(PRIMARY,))
         self.assertEqual(keys, ['http://x/other.jpg'])
         # And NOT re-written into the container. Falling through to the offer
         # block would put a fresh Proxy.Media over an entry Plex already holds
@@ -201,7 +206,7 @@ class AlreadyOfferedAlternatesAreStillJudged(TwinBase):
 
         AG.fetch_url_bytes = counting
         h.metadata.posters['http://x/other.jpg'] = 'existing'
-        keys = AG.offer_alternate_covers(h, shown=(None, None))
+        keys, stale = AG.offer_alternate_covers(h, shown=(None, None))
         self.assertEqual(keys, ['http://x/other.jpg'])
         self.assertEqual(fetched, [], 'must not re-fetch when it cannot judge')
 
@@ -221,7 +226,7 @@ class AlternatesAreJudgedAgainstEachOther(TwinBase):
         h = self.helper_offering(
             ['http://x/a.jpg', 'http://x/b.jpg'],
             {'http://x/a.jpg': TWIN, 'http://x/b.jpg': TWIN})
-        keys = AG.offer_alternate_covers(h, shown=(OTHER,))
+        keys, stale = AG.offer_alternate_covers(h, shown=(OTHER,))
         self.assertEqual(keys, ['http://x/a.jpg'])
         self.assertNotIn('http://x/b.jpg', h.metadata.posters)
 
@@ -231,7 +236,7 @@ class AlternatesAreJudgedAgainstEachOther(TwinBase):
         h = self.helper_offering(
             ['http://x/a.jpg', 'http://x/b.jpg'],
             {'http://x/a.jpg': TWIN, 'http://x/b.jpg': LOCAL})
-        keys = AG.offer_alternate_covers(h, shown=(OTHER,))
+        keys, stale = AG.offer_alternate_covers(h, shown=(OTHER,))
         self.assertEqual(keys, ['http://x/a.jpg', 'http://x/b.jpg'])
 
     def test_a_twin_of_an_ALREADY_OFFERED_alternate_is_not_added(self):
@@ -242,7 +247,7 @@ class AlternatesAreJudgedAgainstEachOther(TwinBase):
             ['http://x/a.jpg', 'http://x/b.jpg'],
             {'http://x/a.jpg': TWIN, 'http://x/b.jpg': TWIN})
         h.metadata.posters['http://x/a.jpg'] = 'existing'
-        keys = AG.offer_alternate_covers(h, shown=(OTHER,))
+        keys, stale = AG.offer_alternate_covers(h, shown=(OTHER,))
         self.assertEqual(keys, ['http://x/a.jpg'])
         self.assertNotIn('http://x/b.jpg', h.metadata.posters)
 
@@ -259,7 +264,7 @@ class AlternatesAreJudgedAgainstEachOther(TwinBase):
             ['http://x/a.jpg', 'http://x/b.jpg'],
             {'http://x/a.jpg': TWIN, 'http://x/b.jpg': TWIN})
         h.metadata.posters = Boom()
-        keys = AG.offer_alternate_covers(h, shown=(OTHER,))
+        keys, stale = AG.offer_alternate_covers(h, shown=(OTHER,))
         self.assertEqual(keys, ['http://x/b.jpg'])
 
 
@@ -269,8 +274,150 @@ class OfferAlternatesSkipsTwinsMore(TwinBase):
         h = self.helper_offering(
             ['http://x/twin.jpg', 'http://x/other.jpg'],
             {'http://x/twin.jpg': TWIN, 'http://x/other.jpg': OTHER})
-        keys = AG.offer_alternate_covers(h)
+        keys, stale = AG.offer_alternate_covers(h)
         self.assertEqual(keys, ['http://x/twin.jpg', 'http://x/other.jpg'])
+
+
+
+
+class TwinPruneKeepList(unittest.TestCase):
+    """
+        The keep list for the stale-twin prune, built by SUBTRACTION.
+
+        The safety argument lives here. cover_keep_list CONSTRUCTS a keep list
+        from the online/local decisions, and in the very state this prune exists
+        for it returns EMPTY (thumb withheld, mirror skipped) -- so reusing it
+        would call validate_keys([]) and empty our namespace, which on a
+        thumb-less match can hold the only copy of the operator's curated
+        cover.jpg. Subtracting means nothing can be lost that was not named.
+    """
+
+    def test_only_the_condemned_key_is_dropped(self):
+        keep = AG.twin_prune_keep_list(
+            ['http://x/cover.jpg', 'incipit-local-cover', 'http://x/twin.jpg'],
+            ['http://x/twin.jpg'])
+        self.assertEqual(keep, ['http://x/cover.jpg', 'incipit-local-cover'])
+
+    def test_our_online_and_local_entries_SURVIVE(self):
+        # The existing membership branch owns those decisions; this prune must
+        # not borrow them. Both are kept even though cover_keep_list, in this
+        # state, would have dropped both.
+        keep = AG.twin_prune_keep_list(['http://x/cover.jpg', 'incipit-local-cover'], [])
+        self.assertEqual(keep, ['http://x/cover.jpg', 'incipit-local-cover'])
+
+    def test_nothing_condemned_means_nothing_removed(self):
+        mine = ['http://x/a.jpg', 'http://x/b.jpg']
+        self.assertEqual(AG.twin_prune_keep_list(mine, []), mine)
+        self.assertEqual(AG.twin_prune_keep_list(mine, None), mine)
+
+    def test_a_duplicate_candidate_lands_once(self):
+        # The online cover can also appear among the alternates.
+        keep = AG.twin_prune_keep_list(
+            ['http://x/cover.jpg', 'http://x/cover.jpg'], [])
+        self.assertEqual(keep, ['http://x/cover.jpg'])
+
+    def test_falsy_keys_never_enter_the_keep_list(self):
+        # helper.thumb_secondary is routinely None.
+        self.assertEqual(
+            AG.twin_prune_keep_list([None, '', 'http://x/a.jpg'], []), ['http://x/a.jpg'])
+
+    def test_condemning_EVERYTHING_yields_an_empty_list_for_the_caller_to_refuse(self):
+        # The function reports the truth; the CALLER fails closed on it rather
+        # than handing validate_keys an empty list.
+        self.assertEqual(AG.twin_prune_keep_list(['http://x/a.jpg'], ['http://x/a.jpg']), [])
+
+
+class TwinPruneIsWiredIn(unittest.TestCase):
+    """The branch itself: a prune nobody calls removes nothing."""
+
+    SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       '..', 'Contents', 'Code', '__init__.py')
+
+    def source(self):
+        with open(self.SRC) as handle:
+            return handle.read()
+
+    def test_the_branch_is_keyed_on_what_was_condemned(self):
+        self.assertIn('elif stale_alternates:', self.source())
+
+    def code_of_branch(self):
+        """The branch's CODE, comments stripped.
+
+        Its comments name `cover_keep_list` and `validate_keys` to explain why
+        it avoids them, so a plain substring test reads a warning as a
+        violation -- which is exactly what it did first time round.
+        """
+        src = self.source()
+        branch = src[src.index('elif stale_alternates:'):]
+        branch = branch[:branch.index('posters.validate_keys(')]
+        return '\n'.join(l for l in branch.splitlines()
+                          if not l.strip().startswith('#'))
+
+    def test_it_does_NOT_reuse_cover_keep_list(self):
+        # The one-line "fix" that empties the namespace.
+        self.assertNotIn('cover_keep_list(', self.code_of_branch())
+
+    def test_it_fails_closed_on_an_empty_keep_list(self):
+        src = self.source()
+        branch = src[src.index('elif stale_alternates:'):]
+        head = branch[:branch.index('posters.validate_keys(')]
+        self.assertIn('if not keep:', head)
+
+    def test_the_prune_announces_itself_at_WARN(self):
+        # Prod ships at WARN. An info-level prune is invisible exactly where it
+        # needs to be auditable -- the file's meta-test enforces this too.
+        src = self.source()
+        branch = src[src.index('elif stale_alternates:'):]
+        branch = branch[:branch.index('posters.validate_keys(')]
+        self.assertIn('log.warn(', branch)
+
+class TwinPruneCandidates(unittest.TestCase):
+    """Which keys the prune is allowed to KEEP. Omitting one deletes it."""
+
+    def test_the_local_mirror_key_is_a_candidate(self):
+        # Spec invariant 4. It is never condemned, but if it is not a candidate
+        # the subtraction cannot keep it and validate_keys drops the operator's
+        # curated cover entry. A mutation removing it survived every other test.
+        mine = AG.twin_prune_candidates('http://x/cover.jpg', None,
+                                        'incipit-local-cover', [])
+        self.assertIn('incipit-local-cover', mine)
+
+    def test_the_online_cover_and_its_secondary_are_candidates(self):
+        mine = AG.twin_prune_candidates('http://x/a.jpg', 'http://x/b.jpg', 'L', [])
+        self.assertIn('http://x/a.jpg', mine)
+        self.assertIn('http://x/b.jpg', mine)
+
+    def test_surviving_alternates_are_candidates(self):
+        mine = AG.twin_prune_candidates('T', None, 'L', ['http://x/alt.jpg'])
+        self.assertIn('http://x/alt.jpg', mine)
+
+    def test_no_alternates_is_not_an_error(self):
+        self.assertEqual(AG.twin_prune_candidates('T', None, 'L', None), ['T', None, 'L'])
+
+
+class TwinPruneUsesTheSubtraction(unittest.TestCase):
+    """
+        The branch must compute its keep list by SUBTRACTION.
+
+        A mutation replacing it with `keep = list(stale_alternates)` -- keep
+        ONLY the condemned tile, prune everything else of ours -- survived every
+        behavioural test, because nothing exercises the branch end to end. This
+        pins the wiring the way the offer-is-invoked tests do.
+    """
+
+    SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       '..', 'Contents', 'Code', '__init__.py')
+
+    def test_the_branch_calls_twin_prune_keep_list_with_the_condemned_set(self):
+        with open(self.SRC) as handle:
+            src = handle.read()
+        branch = src[src.index('elif stale_alternates:'):]
+        branch = branch[:branch.index('posters.validate_keys(')]
+        self.assertIn('twin_prune_keep_list(present, stale_alternates)', branch)
+        # The ASSIGNMENT shape, not just a mention: `mine = [x] or
+        # twin_prune_candidates(...)` keeps the call in the text while
+        # bypassing it, and a bare substring test passes on that.
+        self.assertIn('mine = twin_prune_candidates(', branch)
 
 
 if __name__ == '__main__':

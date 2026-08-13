@@ -4575,7 +4575,7 @@ class AlternateCoverOfferIsWiredIn(unittest.TestCase):
     # `offer_alternate_covers(helper)` and so broke the moment the call gained
     # an argument -- a mirror of the current spelling rather than a guard on
     # the wiring, which is the thing they exist to protect.
-    CALL = 'alternate_keys = offer_alternate_covers('
+    CALL = 'alternate_keys, stale_alternates = offer_alternate_covers('
 
     def test_the_offer_is_invoked(self):
         self.assertIn(self.CALL, self._source())
@@ -4681,13 +4681,13 @@ class AlternateCoversAreJudgedByTheirPixels(unittest.TestCase):
 
             AG.alternate_cover_acceptable = (
                 lambda payload: judged.append(payload) or False)
-            self.assertEqual(AG.offer_alternate_covers(FakeHelper()), [],
+            self.assertEqual(AG.offer_alternate_covers(FakeHelper())[0], [],
                              'a NO from the predicate must withhold the tile')
             self.assertEqual(judged, [data],
                              'the predicate must judge the fetched bytes')
             AG.verdict_memo.clear()
             AG.alternate_cover_acceptable = lambda payload: True
-            self.assertEqual(AG.offer_alternate_covers(FakeHelper()),
+            self.assertEqual(AG.offer_alternate_covers(FakeHelper())[0],
                              ['https://x/alt.jpg'],
                              'a YES must offer it -- or the wiring is dead')
         finally:
@@ -5176,7 +5176,7 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
         url = 'https://hardcover/print-jacket.jpg'
         for _ in range(27):
             helper = self._helper([url])
-            self.assertEqual(AG.offer_alternate_covers(helper), [],
+            self.assertEqual(AG.offer_alternate_covers(helper)[0], [],
                              'a portrait jacket is never offered')
         self.assertEqual(len(fetched), 1,
                          'tracks 2..27 must not re-fetch a known-bad url')
@@ -5210,7 +5210,7 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
         AG.fetch_url_bytes = html_fetch
         for _ in range(27):
             self.assertEqual(
-                AG.offer_alternate_covers(self._helper(['https://overdrive/html.jpg'])),
+                AG.offer_alternate_covers(self._helper(['https://overdrive/html.jpg']))[0],
                 [], 'an HTML body is never offered as art')
         self.assertEqual(len(fetched), 1,
                          'tracks 2..27 must not re-fetch a known-bad url')
@@ -5245,7 +5245,7 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
                 posters = ExplodingPosters()
 
         AG.fetch_url_bytes = counting_fetch
-        self.assertEqual(AG.offer_alternate_covers(FakeHelper()), [],
+        self.assertEqual(AG.offer_alternate_covers(FakeHelper())[0], [],
                          'a failed container write offers nothing this pass')
         self.assertNotIn(self.KEY, AG.verdict_memo,
                          'a good image must not be blacklisted library-wide '
@@ -5253,7 +5253,7 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
         # ...and the proof it is not merely absent from the dict: the very next
         # book with the same url still gets its tile.
         good = self._helper(['https://audible-uk/square.jpg'])
-        self.assertEqual(AG.offer_alternate_covers(good),
+        self.assertEqual(AG.offer_alternate_covers(good)[0],
                          ['https://audible-uk/square.jpg'])
         self.assertEqual(len(fetched), 2, 'the retry has to re-fetch')
 
@@ -5271,7 +5271,7 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
         helper = self._helper([url])
         for _ in range(27):
             # Same helper: the container persists between tracks.
-            self.assertEqual(AG.offer_alternate_covers(helper), [url])
+            self.assertEqual(AG.offer_alternate_covers(helper)[0], [url])
         self.assertEqual(len(fetched), 1)
         self.assertIn(url, helper.metadata.posters)
         self.assertNotIn(self.KEY, AG.verdict_memo,
@@ -5284,7 +5284,7 @@ class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
 
         AG.fetch_url_bytes = by_url
         helper = self._helper(['https://x/bad.jpg', 'https://x/good.jpg'])
-        self.assertEqual(AG.offer_alternate_covers(helper), ['https://x/good.jpg'])
+        self.assertEqual(AG.offer_alternate_covers(helper)[0], ['https://x/good.jpg'])
 
     def test_the_memo_is_bounded(self):
         for i in range(600):

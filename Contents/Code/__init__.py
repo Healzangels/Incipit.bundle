@@ -1816,10 +1816,57 @@ def alternate_already_on_display(data, shown, url):
     return False
 
 
+def twin_prune_candidates(thumb, secondary, local_key, alternate_keys):
+    """
+        Every framework key this agent can have put in the container.
+
+        A CLOSED set, named rather than enumerated: the container arrives
+        deserialized and can carry a SIBLING library's entries (bundles are
+        shared per guid), so iterating it risks adopting keys that are not ours.
+        Naming ours cannot.
+
+        The local-mirror key belongs here even though the prune never condemns
+        it -- leaving it out means the subtraction below cannot keep it, and
+        validate_keys would drop the operator's curated cover entry.
+        @returns the candidate keys, in priority order
+    """
+    mine = [thumb, secondary, local_key]
+    for key in (alternate_keys or []):
+        mine.append(key)
+    return mine
+
+
+def twin_prune_keep_list(mine_present, stale):
+    """
+        The keep list for the stale-twin prune: OUR keys currently in the
+        container, minus the ones this pass condemned.
+
+        SUBTRACTION, not construction -- and that is the whole safety argument.
+        cover_keep_list builds a keep list from the online/local decisions, and
+        in the state this prune exists for it returns EMPTY (thumb withheld,
+        mirror skipped), so using it would call validate_keys([]) and empty our
+        namespace. Here nothing can be lost that was not named as condemned.
+
+        Order is preserved and duplicates collapse, so the caller can pass the
+        same key twice (the online cover can also appear among alternates)
+        without it landing twice in the keep list.
+        @param mine_present our framework keys the container currently holds
+        @param stale the condemned keys
+        @returns the keys to keep
+    """
+    keep = []
+    for key in (mine_present or []):
+        if key and key not in (stale or []) and key not in keep:
+            keep.append(key)
+    return keep
+
+
 def offer_alternate_covers(helper, sort_order=3, shown=None):
     """
         Offer the api's `imageAlternates` as extra pickable posters, returning
-        the keys actually added.
+        `(added, stale)` -- the keys to keep, and the keys the container
+        already holds that this pass judged redundant and the caller should
+        prune.
 
         A DIFFERENT Audible marketplace's art for the same recording. The api
         gates them on the narrator sets matching (one ASIN can front different
@@ -1841,13 +1888,17 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         @returns list of keys added to the container
     """
     added = []
+    # Condemned keys the container ALREADY holds -- returned so the caller can
+    # prune them. Separate from `added` because the two answer different
+    # questions: what to keep, and what to actively remove.
+    stale = []
     # NOT getattr(): the sandbox blocks it (the guard suite caught that, as it
     # caught hasattr in the parser). thumb_alternates is initialised on the
     # helper, and a missing one is an AttributeError this try already covers.
     try:
         alternates = helper.thumb_alternates or []
     except Exception:
-        return added
+        return added, stale
     # Anything to judge AGAINST? With nothing on display the twin question
     # cannot be asked, so the old free path stands.
     # What a candidate is judged against: the images already on display, PLUS
@@ -1922,6 +1973,17 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
             # the keep list, which is what lets validate_keys prune a twin an
             # OLDER version already put in the container. Returning early
             # instead would have left existing twins on display forever.
+            #
+            # CONDEMNED, and recorded as such when the container already holds
+            # it. Leaving a key out of the keep list only removes a tile when
+            # the membership prune actually RUNS, and that branch is gated on
+            # the online/local cover state -- nothing to do with alternates.
+            # Measured on prod 2026-08-13: the twin was declined correctly on
+            # every refresh and survived every one of them, because both gate
+            # conditions were false. The caller needs to know WHICH keys were
+            # condemned to prune them itself.
+            if already_offered:
+                stale.append(url)
             continue
         if already_offered:
             # Judged and still wanted. The container already holds it, so
@@ -1954,7 +2016,7 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         # suppress a later copy of the same picture.
         judged.append(data)
         log.info('incipit cover: offering an alternate-marketplace cover (%s)', url)
-    return added
+    return added, stale
 
 
 def should_prune_local_twin(upload_holds_selection, local_present):
@@ -4458,7 +4520,7 @@ class AudiobookAlbum(Agent.Album):
             # `shown` is what is ALREADY on display: the online cover we just
             # offered and the local cover.jpg. An alternate matching either is
             # a twin tile, not a choice -- see alternate_already_on_display.
-            alternate_keys = offer_alternate_covers(
+            alternate_keys, stale_alternates = offer_alternate_covers(
                 helper, shown=(thumb_data, cover_bytes))
 
             # SELECT the online cover only when there is no local cover to be the
@@ -4504,6 +4566,56 @@ class AudiobookAlbum(Agent.Album):
                     helper.metadata.posters.validate_keys(keep)
                 except Exception as e:
                     log.error('incipit cover: membership prune failed (%s)', e)
+            elif stale_alternates:
+                # THE PRUNE THE CONDEMNED TWIN WOULD OTHERWISE NEVER GET.
+                #
+                # The branch above is gated on the online/local cover state, and
+                # on prod 2026-08-13 both of its conditions were false -- Local
+                # Media Assets displayed the cover (so our copy was not listed)
+                # and the online cover was withheld as redundant. The twin was
+                # declined correctly on every refresh and survived every one,
+                # because leaving a key out of the keep list removes nothing
+                # unless validate_keys runs. Census: ~660 of 1650 prod albums.
+                #
+                # NOT cover_keep_list here, deliberately. In exactly this state
+                # it returns an EMPTY list (thumb withheld, mirror skipped), and
+                # validate_keys([]) empties our whole namespace -- which on a
+                # thumb-less match can hold the only copy of the operator's
+                # curated cover.jpg. This keep list is built by SUBTRACTION so
+                # nothing this pass did not condemn can be lost.
+                #
+                # Our framework-side keys are a CLOSED set we can name -- the
+                # online cover, its secondary, the local-mirror key and the
+                # alternates -- so membership tests enumerate them without
+                # iterating the container. That matters: the container arrives
+                # deserialized and can carry a SIBLING library's entries
+                # (bundles are shared per guid), and naming only our own keys
+                # cannot sweep one of those in.
+                mine = twin_prune_candidates(
+                    helper.thumb, helper.thumb_secondary, local_key,
+                    alternate_keys)
+                present = []
+                for key in mine:
+                    if key and key in helper.metadata.posters:
+                        present.append(key)
+                keep = twin_prune_keep_list(present, stale_alternates)
+                if not keep:
+                    # FAIL CLOSED. An empty keep list here is not "remove the
+                    # twin", it is "remove everything of ours" -- the one
+                    # outcome this branch exists to avoid.
+                    log.info('incipit cover: twin prune skipped -- nothing of '
+                             'ours left to keep, refusing to empty the namespace')
+                else:
+                    # WARN, not info: prod ships at WARN, and a prune nobody can
+                    # see at the shipped level is how a poster disappears with
+                    # no way to tell what took it. The meta-test enforces this
+                    # for every prune in the file.
+                    log.warn('incipit cover: pruning %d stale twin tile(s) our '
+                             'own alternates no longer offer', len(stale_alternates))
+                    try:
+                        helper.metadata.posters.validate_keys(keep)
+                    except Exception as e:
+                        log.error('incipit cover: twin prune failed (%s)', e)
         elif (
             mirror_skipped and mirror_byte_exact
             and local_key in helper.metadata.posters

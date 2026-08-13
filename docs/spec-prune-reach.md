@@ -1,6 +1,15 @@
 # Spec — make the alternate prune REACH a stale twin
 
-Status: proposed, not implemented. Target: bundle v1.3.212.
+Status: IMPLEMENTED in v1.3.212. Kept as the rationale record --
+particularly why the one-line fix is wrong, which is the part a future
+reader is most likely to re-derive the hard way.
+
+Deviation from the design as written: `our_container_keys()` was NOT
+needed. Our framework-side keys turned out to be a CLOSED set we can
+name (`twin_prune_candidates`) -- the online cover, its secondary, the
+local-mirror key and the alternates -- so membership tests enumerate
+them without iterating the container at all. That removes the
+sibling-library hazard the spec worried about rather than guarding it.
 
 ## The defect
 
