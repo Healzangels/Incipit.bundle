@@ -1848,18 +1848,30 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         alternates = helper.thumb_alternates or []
     except Exception:
         return added
-    # DIAGNOSTIC (v1.3.209). The twin suppression fires on some albums and not
-    # others -- Lamb's twin went, Gravesong's distance-2 twin survived two
-    # forced refreshes. Two candidates: this URL short-circuit re-adding an
-    # alternate offered by an OLDER version without ever judging it, or `shown`
-    # arriving empty so there is nothing to compare against. One line per
-    # alternate tells them apart instead of guessing; both were guesses so far.
-    log.info('incipit cover-alt: %d alternate(s), %d shown image(s) to judge against',
-             len(alternates), len([s for s in (shown or []) if s]))
+    # Anything to judge AGAINST? With nothing on display the twin question
+    # cannot be asked, so the old free path stands.
+    judgeable = bool([s for s in (shown or []) if s])
     for url in alternates:
-        if url in helper.metadata.posters:
-            log.info('incipit cover-alt: ALREADY in the container -- kept '
-                     'WITHOUT being judged (%s)', url)
+        already_offered = url in helper.metadata.posters
+        # THE SHORT-CIRCUIT IS NOW CONDITIONAL, and that is the whole fix.
+        #
+        # It used to be unconditional -- "a re-offer costs a fetch and changes
+        # nothing" -- which was true right up until v1.3.208 made re-offering a
+        # DECISION. Measured on .99 (v1.3.209 diagnostic build, Gravesong):
+        # "3 alternate(s), 2 shown image(s) to judge against" followed by
+        # "ALREADY in the container -- kept WITHOUT being judged". So the twin
+        # suppression only ever reached alternates being offered for the FIRST
+        # time, and every twin already in a container was re-added forever.
+        # Lamb only looked fixed because a cross-match had rebuilt its
+        # container from scratch.
+        #
+        # An already-offered alternate is therefore re-fetched and re-judged
+        # when there is something to judge it against. That fetch is the cost
+        # the short-circuit existed to avoid, so it is bounded three ways: the
+        # refusal memo still skips known-bad urls without a fetch, the
+        # perceptual verdicts are memoised, and image CDNs now pace at 0.25s
+        # rather than 1s (v1.3.207).
+        if already_offered and not judgeable:
             added.append(url)
             continue
         # A refusal leaves no trace in the container, so without this the
@@ -1896,8 +1908,17 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         # comment below already had to be fixed for. The cost of re-deciding
         # is one consult, and the consult is memoised.
         if alternate_already_on_display(data, shown, url):
+            # NOT appended, deliberately: dropping out of `added` drops it from
+            # the keep list, which is what lets validate_keys prune a twin an
+            # OLDER version already put in the container. Returning early
+            # instead would have left existing twins on display forever.
             continue
-        log.info('incipit cover-alt: judged NOT a twin -- offering (%s)', url)
+        if already_offered:
+            # Judged and still wanted. The container already holds it, so
+            # re-offering the bytes would be a no-op -- but it must stay in
+            # `added` or the keep list drops a poster we just approved.
+            added.append(url)
+            continue
         # THE VERDICT IS YES from here, so nothing below may record a refusal.
         # It used to: one blanket `except Exception` wrapped the container write
         # as well, and since fetch_url_bytes and alternate_cover_acceptable both

@@ -145,6 +145,68 @@ class OfferAlternatesSkipsTwins(TwinBase):
         AG.offer_alternate_covers(h, shown=(PRIMARY,))
         self.assertEqual(self.refusals, ['http://x/bad.jpg'])
 
+class AlreadyOfferedAlternatesAreStillJudged(TwinBase):
+    """
+        The half-fix that v1.3.208 shipped, and the case that had no test.
+
+        The loop short-circuited on `url in helper.metadata.posters` -- "a
+        re-offer costs a fetch and changes nothing" -- which stopped being
+        true the moment re-offering became a DECISION. Measured on .99 with
+        the v1.3.209 diagnostic build (Gravesong): "3 alternate(s), 2 shown
+        image(s) to judge against" then "ALREADY in the container -- kept
+        WITHOUT being judged". So a twin an older version had already offered
+        was re-added forever, and only containers rebuilt from scratch ever
+        looked fixed.
+    """
+
+    def fetches(self):
+        calls = []
+        real = AG.fetch_url_bytes
+        return calls, real
+
+    def test_a_twin_ALREADY_in_the_container_is_dropped_from_the_keep_list(self):
+        h = self.helper_offering(['http://x/twin.jpg'], {'http://x/twin.jpg': TWIN})
+        # It is already on display, exactly as an older version left it.
+        h.metadata.posters['http://x/twin.jpg'] = 'existing'
+        keys = AG.offer_alternate_covers(h, shown=(PRIMARY,))
+        # Absent from the keep list is what lets validate_keys prune it.
+        self.assertEqual(keys, [])
+        self.assertEqual(self.refusals, [])
+
+    def test_a_GENUINE_alternate_already_in_the_container_is_KEPT(self):
+        # The destructive direction: judging must not evict art that is fine.
+        h = self.helper_offering(['http://x/other.jpg'], {'http://x/other.jpg': OTHER})
+        h.metadata.posters['http://x/other.jpg'] = 'existing'
+        keys = AG.offer_alternate_covers(h, shown=(PRIMARY,))
+        self.assertEqual(keys, ['http://x/other.jpg'])
+        # And NOT re-written into the container. Falling through to the offer
+        # block would put a fresh Proxy.Media over an entry Plex already holds
+        # -- a redundant re-offer, which is how the serialize traps mint a
+        # twin. Asserting only the keep list cannot see that: the url lands in
+        # `added` either way, so this is the assertion that gives the branch
+        # its keep (it survived mutation with the keep-list check alone).
+        self.assertEqual(h.metadata.posters['http://x/other.jpg'], 'existing')
+
+    def test_with_NOTHING_to_judge_against_the_free_path_is_kept(self):
+        # No shown images means the twin question cannot be asked, so an
+        # already-offered alternate must cost neither a fetch nor its place.
+        fetched = []
+        blobs = {'http://x/other.jpg': OTHER}
+        h = self.helper_offering(['http://x/other.jpg'], blobs)
+        inner = AG.fetch_url_bytes
+
+        def counting(url):
+            fetched.append(url)
+            return inner(url)
+
+        AG.fetch_url_bytes = counting
+        h.metadata.posters['http://x/other.jpg'] = 'existing'
+        keys = AG.offer_alternate_covers(h, shown=(None, None))
+        self.assertEqual(keys, ['http://x/other.jpg'])
+        self.assertEqual(fetched, [], 'must not re-fetch when it cannot judge')
+
+
+class OfferAlternatesSkipsTwinsMore(TwinBase):
     def test_WITHOUT_shown_every_acceptable_alternate_is_offered(self):
         # Callers that pass nothing must behave exactly as before this change.
         h = self.helper_offering(
