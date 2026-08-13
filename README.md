@@ -233,3 +233,16 @@ There are a few tricks to know about using fix match for books and authors:
 
 **This agent cannot create collections for your series'. 
 If you would like to set up automatic collections for book series', you can do so with the guide here: [Audnexus + Kometa: Audiobook Series Collections](https://github.com/book-tools/audnexus-kometa-series)**
+
+## ✍️ Credits
+
+Incipit is a fork of [Audnexus.bundle](https://github.com/djdembeck/Audnexus.bundle) by
+[@djdembeck](https://github.com/djdembeck), and keeps its GPL-3.0 licence. The search,
+update and Plex-agent scaffolding are upstream's work; what this fork adds is described
+in [About](#about). The inherited release history is in
+[CHANGELOG.md](CHANGELOG.md).
+
+Series data comes via [rreading-glasses](https://github.com/blampe/rreading-glasses)
+(GPL-3.0), which is what the `GOODREADS_SERIES_URL` setting on the API points at.
+
+- [Contributing](CONTRIBUTING.md)
