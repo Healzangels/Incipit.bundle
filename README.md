@@ -77,6 +77,9 @@ Getting the agent up and running is a very smooth process, whether this is your 
 ### Prerequisites
 
 - Plex Media Server `v1.24.4.5081` or greater.
+- A running [incipit-api](https://github.com/Healzangels/incipit-api) instance, and its
+  URL to put in `api_base_url`. The agent degrades to Audible-only matching without it —
+  no Hardcover, no OpenLibrary, no duration matching.
 - `git` installed on system, as this is the preferred method of installing/updating the agent. You can also extract the zip instead.
 - Files are expected to be in/tested with common audiobook [file structure](https://support.plex.tv/articles/200265296-adding-music-media-from-folders/) and tags, specifically from either [Bragi Books](https://github.com/djdembeck/bragibooks) or [Seanap's guide](https://github.com/seanap/Plex-Audiobook-Guide). In particular, you are expected to have the following structure: `Author Name/Book Name/Book Name: Subtitle.m4b` with `album` and `albumartist` tags. This is imperative for proper matching!
 
@@ -88,12 +91,28 @@ If you are new to getting plugins on your system or do not have access to `git`,
 1. Clone (or unzip) this project into your Plex `Plug-ins` directory:
 
 ```
-git clone https://github.com/djdembeck/Audnexus.bundle.git
+git clone https://github.com/Healzangels/Incipit.bundle.git
 ```
 
 2. Restart your Plex Media Server.
 
-For future updates, run the below commmand from within the `Audnexus.bundle` folder.
+**If Plex runs in a container**, the plugin files must be readable by the user Plex runs
+as — usually `nobody:users`. A `git pull` as root leaves them owned by root and the
+plugin simply will not load:
+
+```
+chown -R nobody:users .
+```
+
+**Plex does not hot-reload a bundle.** After updating the files, a resident plugin keeps
+serving the OLD code from memory indefinitely. Either restart Plex, or reload just the
+plugin — which takes seconds and does not interrupt playback:
+
+```
+curl -s "http://<plex-host>:32400/:/plugins/com.plexapp.agents.incipit/restart?X-Plex-Token=<token>"
+```
+
+For future updates, run the below command from within the `Incipit.bundle` folder.
 
 ```
 git pull
@@ -180,12 +199,15 @@ Just like adding a new library, upgrading one can take some time to switch all y
 ### Manually fixing matches
 There are a few tricks to know about using fix match for books and authors:
 - You may use [Quick Match](#using-quick-match) if you already know the ASIN.
-- Some authors do not have an Audible profile. These will not have an Audnexus DB entry.
-- You may need to modify author names in search to find them (for example, removing a middle initial). This is a search limitation we are looking to improve.
+- Some authors have no Audible profile. Incipit still matches the books, and can take the author portrait from Hardcover instead (`authors_prefer_hardcover`).
+- You may need to modify author names in search to find them (for example, removing a middle initial). This is a search limitation.
 - Book results come back in the format of: `"TITLE" by AUTHOR_FIRSTINITIAL.AUTHOR_LASTNAME w/ NARRATOR_FIRSTINITIAL.NARRATOR_LASTNAME`
 - Year field cannot be used by music agents (what we use), so it's an irrelevant parameter.
-- Scores are based on the following criteria: Book title ([Levenshtein distance](https://en.wikipedia.org/wiki/Levenshtein_distance)), Author(s) name ([Levenshtein distance](https://en.wikipedia.org/wiki/Levenshtein_distance)), language of book vs language of library (2 points), and 1 point deduction for each result (relevance score).
-- Identical results for book may appear. Typically the one with a score of `100` is the 'correct' one.
+- Scoring starts from title and author similarity ([Levenshtein distance](https://en.wikipedia.org/wiki/Levenshtein_distance)), then weighs evidence upstream does not have:
+  - **RUNTIME.** A candidate whose stated length disagrees with the file's real duration is demoted, and can be vetoed outright. This is what lets a wrong edition lose to a right one that scores lower on text alone.
+  - Language mismatch against the library's language, bundle/omnibus listings, volume numbering and AI-narrated editions are each demoted.
+  - An ASIN you supply via Quick Match pins the result rather than competing with it.
+- Near-identical results are normal and usually REAL: separate editions of one recording. They are deliberately kept separate rather than merged, so you can pick the one you want. The highest score is generally right; where two differ only by cover art, either will match the same book.
 
 ### Data that the agent brings to your library:
 
@@ -203,9 +225,7 @@ There are a few tricks to know about using fix match for books and authors:
 - Release date.
 - Record label (publisher)
 - Review (plot summary)
-- Genres and sub-genres:
-  - Up to 2 parent category genres.
-  - Up to 4 sub-category genres.
+- Genres merged across sources rather than taken from Audible alone, then normalised to drop shelf noise and cross-source duplicates. Measured library-wide: ~7.8 genres per album, where Audible alone gives at most 6.
 - Narrator as `Style` tag.
 - Authors as `Mood` tag.
 - Series as `Mood` tag (prefixed by `Series:`)
