@@ -1768,7 +1768,55 @@ def remember_alternate_refusal(url):
     remember_verdict(ALTERNATE_REFUSAL_TAG, url, 'refused', True)
 
 
-def offer_alternate_covers(helper, sort_order=3):
+def alternate_already_on_display(data, shown, url):
+    """
+        True when this alternate is the SAME PICTURE as one already offered.
+
+        The feature's own promise is "real choice rather than duplicate tiles"
+        -- so an alternate that merely repeats a picture already in the
+        container is the one case it must not add. Measured live 2026-08-12 on
+        Lamb (prod rk 740608): the container held our 500x500 cover and, from a
+        near-tie row scoring 99, the SAME artwork at 1024x1024. The api judged
+        them distance 2 (similar); the genuinely different OverDrive jacket
+        scored 26. So the verdict this needs already exists -- it simply was
+        never consulted on this path.
+
+        NOT same_picture(): that helper is asymmetric on purpose, keeping OUR
+        copy when the other tile is a worse re-encode, because there the other
+        tile belongs to a different agent and withholding ours can leave the
+        operator with only the bad one. Here BOTH tiles are ours and the one
+        being kept is the DEFAULT, so nothing disappears from display -- the
+        only thing lost is a second copy of a picture already shown. Reusing
+        the asymmetry would have kept the Lamb twin precisely because the
+        duplicate was the higher-resolution one.
+
+        Fails OPEN, like every other consult here: no verdict means offer it.
+        A duplicate tile is cosmetic; a hidden cover option is not.
+        @param data the candidate alternate's bytes
+        @param shown iterable of byte blobs already on display
+        @param url the alternate's url, for logging
+        @returns True when the alternate should be skipped
+    """
+    for other in (shown or []):
+        if not other:
+            continue
+        # Byte-identical is free and needs no api, no pref and no network.
+        if same_image(data, other):
+            log.info('incipit cover: alternate is the picture already shown '
+                     '-- not offering a second copy (%s)', url)
+            return True
+        if not perceptual_dedupe_enabled():
+            continue
+        if not aspect_could_match(data, other):
+            continue
+        if images_similar_via_api(data, other, 'incipit cover-alt') is True:
+            log.info('incipit cover: alternate is the same picture at a '
+                     'different size -- not offering a twin tile (%s)', url)
+            return True
+    return False
+
+
+def offer_alternate_covers(helper, sort_order=3, shown=None):
     """
         Offer the api's `imageAlternates` as extra pickable posters, returning
         the keys actually added.
@@ -1830,6 +1878,14 @@ def offer_alternate_covers(helper, sort_order=3):
             if data:
                 log.info('incipit cover: alternate refused -- not square art (%s)', url)
             remember_alternate_refusal(url)
+            continue
+        # Redundant HERE, which is not the same as bad. Deliberately NOT
+        # recorded as a refusal: that memo is module-global and keyed on the
+        # url alone, so filing a contextual verdict in it would suppress this
+        # picture for every OTHER book too -- the same trap the post-verdict
+        # comment below already had to be fixed for. The cost of re-deciding
+        # is one consult, and the consult is memoised.
+        if alternate_already_on_display(data, shown, url):
             continue
         # THE VERDICT IS YES from here, so nothing below may record a refusal.
         # It used to: one blanket `except Exception` wrapped the container write
@@ -4349,7 +4405,11 @@ class AudiobookAlbum(Agent.Album):
             # Extra marketplace art, offered before the membership lists are
             # computed so both of them can carry the keys. Never the default
             # (sort_order well below), and never the selection.
-            alternate_keys = offer_alternate_covers(helper)
+            # `shown` is what is ALREADY on display: the online cover we just
+            # offered and the local cover.jpg. An alternate matching either is
+            # a twin tile, not a choice -- see alternate_already_on_display.
+            alternate_keys = offer_alternate_covers(
+                helper, shown=(thumb_data, cover_bytes))
 
             # SELECT the online cover only when there is no local cover to be the
             # default. With a local cover set it is merely OFFERED, not selected;

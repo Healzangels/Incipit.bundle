@@ -4571,9 +4571,22 @@ class AlternateCoverOfferIsWiredIn(unittest.TestCase):
         with open(self.SRC) as handle:
             return handle.read()
 
+    # Matched as a PREFIX, not as one exact line. These pinned the literal
+    # `offer_alternate_covers(helper)` and so broke the moment the call gained
+    # an argument -- a mirror of the current spelling rather than a guard on
+    # the wiring, which is the thing they exist to protect.
+    CALL = 'alternate_keys = offer_alternate_covers('
+
     def test_the_offer_is_invoked(self):
-        self.assertIn('alternate_keys = offer_alternate_covers(helper)',
-                      self._source())
+        self.assertIn(self.CALL, self._source())
+
+    def test_the_offer_is_told_what_is_ALREADY_on_display(self):
+        # Without `shown` it cannot tell a genuine alternative from a second
+        # copy of the cover already in the container (prod Lamb, 2026-08-12:
+        # the same artwork at 500px and 1024px, both offered).
+        src = self._source()
+        call = src[src.index(self.CALL):]
+        self.assertIn('shown=', call[:200])
 
     def test_every_keep_list_call_carries_the_alternates(self):
         src = self._source()
@@ -4586,7 +4599,7 @@ class AlternateCoverOfferIsWiredIn(unittest.TestCase):
 
     def test_the_offer_runs_before_the_membership_lists(self):
         src = self._source()
-        offered = src.index('alternate_keys = offer_alternate_covers(helper)')
+        offered = src.index(self.CALL)
         first_keep = src.index('keep = cover_keep_list(')
         self.assertLess(offered, first_keep,
                         'alternates must be offered before keep is computed')
