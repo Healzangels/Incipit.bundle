@@ -1,6 +1,7 @@
 # Spec — reach the residual twin (the "nothing left to keep" case)
 
-Status: proposed, not implemented. Target: bundle v1.3.213.
+Status: CLOSED — WON'T FIX, on this spec's own sizing gate (2026-08-13).
+Kept as the rationale record and in case the numbers change.
 Follows `spec-prune-reach.md` (v1.3.212), which cleared the majority.
 
 ## What v1.3.212 leaves behind
@@ -112,10 +113,27 @@ It is cosmetic either way.
   and that the surviving tile is ours;
 * re-run the census and compare against the ~660 baseline.
 
-## SIZE THIS FIRST
+## SIZED — and the answer is DON'T BUILD IT
 
-Before implementing, count prod albums that are BOTH residual (v1.3.212 skipped
-them) AND have a non-ours selection. The 2-of-8 sample suggests ~25% of affected
-albums are residual and ~all of those have upload selections, so the reachable
-set is perhaps 150 albums. If it comes out much smaller, this is not worth the
-reversal of `online_redundant` and should be closed as won't-fix.
+Measured 2026-08-13 on 30 prod albums carrying a stale twin, refreshed under
+v1.3.212:
+
+    cleared by v1.3.212      26  (87%)
+    RESIDUAL                  4  (13%)
+    residual reachable        4  of 4 (all select an upload://)
+    selections changed        0
+
+    extrapolated over ~660 affected albums:  ~572 clear, ~88 residual
+
+The gate this spec set before measuring was ~150 reachable albums. The real
+number is **~88**, comfortably under it, so this closes as WON'T FIX by its own
+criterion rather than by taste.
+
+Two things reinforce that. v1.3.212 clears 87%, better than the 75% the first
+8-album sample suggested -- the residual is a smaller tail than it looked. And
+the cost has not changed: reversing a deliberate `online_redundant` decision, on
+the destructive `validate_keys` path, to remove a cosmetic duplicate tile.
+
+REOPEN IF: the residual share rises materially (re-run the sizing after a full
+library rebuild, when container state is fresh), or if a mechanism appears that
+does not require re-offering a withheld tile.
