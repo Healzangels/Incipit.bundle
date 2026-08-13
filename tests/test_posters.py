@@ -4597,6 +4597,27 @@ class AlternateCoverOfferIsWiredIn(unittest.TestCase):
             'all %d cover_keep_list calls must pass alternate_keys; %d do'
             % (calls, carried))
 
+    def test_the_twin_prune_is_GATED_ON_THE_SELECTION(self):
+        """
+            v1.3.212 shipped without this and its own spec required it
+            (invariant 5). validate_keys removes every metadata tile of ours
+            not in the keep list, and the keep list can only name framework
+            keys THIS pass set -- so a selected tile of ours under a stale url
+            key, or one that IS the condemned alternate, gets evicted. Found
+            by a pre-sweep snapshot of prod (23 of 1650 albums select one of
+            ours; 9 carry a matching alternate), not by the tests.
+        """
+        src = self._source()
+        branch = src[src.index('elif stale_alternates'):]
+        branch = branch[:branch.index('\n        elif (')]
+        self.assertIn('twin_prune_blocked_by_selection(dup_state)', branch)
+        # POLARITY, not just presence: `and not blocked...` reads as the
+        # same substring and inverts the rail into 'prune ONLY when the
+        # selection is ours' -- the exact harm it exists to prevent. That
+        # mutation survived the presence check alone.
+        self.assertNotIn('and not twin_prune_blocked_by_selection', branch)
+        self.assertIn('elif stale_alternates and twin_prune_blocked_by_selection(dup_state):', branch)
+
     def test_the_twin_prune_validates_on_the_SURVIVORS_not_the_condemned(self):
         """
             validate_keys KEEPS what it is given. Handing it the condemned set

@@ -1836,6 +1836,50 @@ def twin_prune_candidates(thumb, secondary, local_key, alternate_keys):
     return mine
 
 
+def twin_prune_blocked_by_selection(dup_state):
+    """
+        True when the stale-twin prune must NOT run, because pruning our
+        namespace could take the operator's own pick with it.
+
+        THE RAIL THAT v1.3.212 SHIPPED WITHOUT. `validate_keys` removes every
+        one of our metadata tiles that is not in the keep list, and the keep
+        list can only name FRAMEWORK keys this pass put in the dict. A selected
+        tile of ours that sits under a stale url key -- or that IS the condemned
+        alternate -- is therefore not in `keep`, and the prune evicts it. That
+        is the picked-poster-evaporates failure, arriving through a new door.
+
+        Measured on prod 2026-08-13 before the nightly sweep: of 1650 albums,
+        1617 select an upload:// and 10 another agent -- neither of which
+        validate_keys can touch -- but 23 select one of OURS, and 9 of those
+        carry an alternate that matches the selected picture. Lamb survived
+        only because its keep list came out empty and the fail-closed guard
+        fired first.
+
+        FAILS CLOSED: no state, or unreadable state, means do not prune. The
+        cost of a wrong True is a duplicate tile nobody removes; the cost of a
+        wrong False is the operator's chosen cover disappearing.
+
+        The `metadata://` prefix is load-bearing, not decoration: an UPLOAD key
+        can also carry our agent name (prod Lamb holds
+        `upload://posters/com.plexapp.agents.incipit_b20a3838...`). Matching on
+        the agent name alone would block the prune on every album that has one,
+        which is most of them.
+        @param dup_state the read_poster_state tuple, or None
+        @returns True when the prune must be skipped
+    """
+    if not dup_state:
+        return True
+    try:
+        selected = dup_state[1]
+    except Exception:
+        return True
+    if not selected:
+        return False
+    selected = str(selected)
+    return (selected.startswith('metadata://')
+            and 'com.plexapp.agents.incipit' in selected)
+
+
 def twin_prune_keep_list(mine_present, stale):
     """
         The keep list for the stale-twin prune: OUR keys currently in the
@@ -4566,6 +4610,13 @@ class AudiobookAlbum(Agent.Album):
                     helper.metadata.posters.validate_keys(keep)
                 except Exception as e:
                     log.error('incipit cover: membership prune failed (%s)', e)
+            elif stale_alternates and twin_prune_blocked_by_selection(dup_state):
+                # The operator picked one of OUR tiles (or we cannot tell).
+                # Pruning our namespace can take that pick with it, so the
+                # duplicate stays. A twin tile is cosmetic; a chosen cover
+                # vanishing is not.
+                log.info('incipit cover: twin prune skipped -- the selection is '
+                         'ours (or unreadable), so pruning could evict it')
             elif stale_alternates:
                 # THE PRUNE THE CONDEMNED TWIN WOULD OTHERWISE NEVER GET.
                 #

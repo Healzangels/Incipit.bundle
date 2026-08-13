@@ -420,5 +420,41 @@ class TwinPruneUsesTheSubtraction(unittest.TestCase):
         self.assertIn('mine = twin_prune_candidates(', branch)
 
 
+
+
+class TheSelectionRail(unittest.TestCase):
+    """
+        v1.3.212 shipped the prune with NO selection rail, and its own spec
+        listed one as invariant 5. Found by a pre-sweep snapshot of prod, not
+        by the tests: 23 of 1650 albums select one of OUR metadata tiles and 9
+        of those carry an alternate matching the selected picture. Lamb
+        survived only because its keep list came out empty first.
+    """
+
+    OURS = ('metadata://posters/com.plexapp.agents.incipit_'
+            'b20a3838f4cfcf0c8d6c5e626198600ea5db6741')
+    UPLOAD = 'upload://posters/com.plexapp.agents.incipit_b20a3838f4cfcf0c8d6c'
+    LMA = 'metadata://posters/com.plexapp.agents.localmedia_69c1c6c5dc0578ec18'
+
+    def test_our_own_selected_tile_BLOCKS_the_prune(self):
+        self.assertTrue(AG.twin_prune_blocked_by_selection(('1', self.OURS, [], None)))
+
+    def test_an_UPLOAD_selection_does_not_block(self):
+        # validate_keys cannot touch an upload, and prod Lamb proves the key
+        # can still carry our agent name -- matching on the name alone would
+        # block the prune on nearly every album.
+        self.assertFalse(AG.twin_prune_blocked_by_selection(('1', self.UPLOAD, [], None)))
+
+    def test_another_agents_selection_does_not_block(self):
+        self.assertFalse(AG.twin_prune_blocked_by_selection(('1', self.LMA, [], None)))
+
+    def test_no_selection_at_all_does_not_block(self):
+        self.assertFalse(AG.twin_prune_blocked_by_selection(('1', None, [], None)))
+
+    def test_UNREADABLE_state_FAILS_CLOSED(self):
+        # A blip must never be read as "nothing of the operator's is selected".
+        for bad in (None, (), False):
+            self.assertTrue(AG.twin_prune_blocked_by_selection(bad), repr(bad))
+
 if __name__ == '__main__':
     unittest.main()
