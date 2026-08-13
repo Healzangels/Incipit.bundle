@@ -1,149 +1,115 @@
 <!-- omit in toc -->
-# Contributing to Audnexus.bundle
+# Contributing to Incipit.bundle
 
-First off, thanks for taking the time to contribute! ❤️
-
-All types of contributions are encouraged and valued. See the [Table of Contents](#table-of-contents) for different ways to help and details about how this project handles them. Please make sure to read the relevant section before making your contribution. It will make it a lot easier for us maintainers and smooth out the experience for all involved. The community looks forward to your contributions. 🎉
-
-> And if you like the project, but just don't have time to contribute, that's fine. There are other easy ways to support the project and show your appreciation, which we would also be very happy about:
-> - Star the project
-> - Tweet about it
-> - Refer this project in your project's readme
-> - Mention the project at local meetups and tell your friends/colleagues
+Thanks for taking the time. This guide is short and specific, because the things
+most likely to waste your afternoon here are not general good practice — they are
+consequences of running inside Plex's plugin sandbox.
 
 <!-- omit in toc -->
 ## Table of Contents
 
-- [I Have a Question](#i-have-a-question)
-- [I Want To Contribute](#i-want-to-contribute)
-  - [Reporting Bugs](#reporting-bugs)
-  - [Suggesting Enhancements](#suggesting-enhancements)
-  - [Your First Code Contribution](#your-first-code-contribution)
-  - [Improving The Documentation](#improving-the-documentation)
-- [Styleguides](#styleguides)
-  - [Commit Messages](#commit-messages)
-- [Join The Project Team](#join-the-project-team)
+- [The sandbox will break your code silently](#the-sandbox-will-break-your-code-silently)
+- [Running the tests](#running-the-tests)
+- [Rules the suite enforces on you](#rules-the-suite-enforces-on-you)
+- [Testing against a real server](#testing-against-a-real-server)
+- [What a good change looks like here](#what-a-good-change-looks-like-here)
+- [Reporting bugs](#reporting-bugs)
+- [Licence](#licence)
 
+## The sandbox will break your code silently
 
+Plex runs this bundle under **Python 2.7 inside RestrictedPython**. When you use
+something it disallows, the plugin does not raise — it fails to compile and simply
+never loads, while Plex carries on and the agent quietly returns nothing.
 
-## I Have a Question
+The two that catch people:
 
-> If you want to ask a question, we assume that you have read the available [Documentation](https://github.com/djdembeck/Audnexus.bundle).
+- **No leading-underscore names.** Not variables, not functions, not attributes.
+  `_helper`, `self._cache`, `from _version import version` at the wrong spot — all
+  fatal. `test_deploy_gate.py` scans the whole bundle for these.
+- **No `getattr` / `hasattr`.** Duck-type with `try/except AttributeError` instead.
+  Both were caught by the guard suite after reaching production.
 
-Before you ask a question, it is best to search for existing [Issues](https://github.com/djdembeck/Audnexus.bundle/issues) that might help you. In case you have found a suitable issue and still need clarification, you can write your question in this issue. It is also advisable to search the internet for answers first.
+Also worth knowing: augmented assignment is restricted (`test_sandbox_operators.py`
+allows only `+=`), and `basestring` exists in Plex's py2.7 but NameErrors under the
+py3 test harness — so do not reach for it.
 
-If you then still feel the need to ask a question and need clarification, we recommend the following:
+## Running the tests
 
-- Open an [Issue](https://github.com/djdembeck/Audnexus.bundle/issues/new).
-- Provide as much context as you can about what you're running into.
-- Provide project and platform versions (nodejs, npm, etc), depending on what seems relevant.
+Standard library `unittest`, no dependencies:
 
-We will then take care of the issue as soon as possible.
+```
+python3 -m unittest discover -s tests
+```
 
-<!--
-You might want to create a separate issue tag for questions and include it in this description. People should then tag their issues accordingly.
+The harness runs on **Python 3** while Plex runs the same code on **2.7**. That gap is
+real: byte/str handling differs, and a function that returns bytes in production can
+return `None` under the harness. Where that matters the tests say so.
 
-Depending on how large the project is, you may want to outsource the questioning, e.g. to Stack Overflow or Gitter. You may add additional contact and information possibilities:
-- IRC
-- Slack
-- Gitter
-- Stack Overflow tag
-- Blog
-- FAQ
-- Roadmap
-- E-Mail List
-- Forum
--->
+## Rules the suite enforces on you
 
-## I Want To Contribute
+These are meta-tests. They fail loudly, but knowing about them saves a confusing red:
 
-> ### Legal Notice <!-- omit in toc -->
-> When contributing to this project, you must agree that you have authored 100% of the content, that you have the necessary rights to the content and that the content you contribute may be provided under the project license.
+- **Version bumps go in two files.** `Contents/Code/_version.py` and
+  `Contents/Info.plist` must agree, or the deploy gate fails.
+- **Every prune announces itself at WARN.** Anything that removes a poster must log
+  at `warn`, because the shipped default level is WARN and a prune nobody can see is
+  how art disappears with no way to tell what took it. `log.error` in an except
+  handler is a failure report, not an announcement, and does not count.
+- **`if __name__ == '__main__':` must be the LAST top-level statement** in a test
+  file. Append a class after it and `python3 tests/that_file.py` silently skips it.
 
-### Reporting Bugs
+## Testing against a real server
 
-<!-- omit in toc -->
-#### Before Submitting a Bug Report
+**Plex never hot-reloads a bundle.** After changing files, a resident plugin keeps
+serving the old code from memory indefinitely — you can watch it happily answer
+refreshes with the version you just replaced. Reload just the plugin:
 
-A good bug report shouldn't leave others needing to chase you up for more information. Therefore, we ask you to investigate carefully, collect information and describe the issue in detail in your report. Please complete the following steps in advance to help us fix any potential bug as fast as possible.
+```
+curl -s "http://<plex-host>:32400/:/plugins/com.plexapp.agents.incipit/restart?X-Plex-Token=<token>"
+```
 
-- Make sure that you are using the latest version.
-- Determine if your bug is really a bug and not an error on your side e.g. using incompatible environment components/versions (Make sure that you have read the [documentation](https://github.com/djdembeck/Audnexus.bundle). If you are looking for support, you might want to check [this section](#i-have-a-question)).
-- To see if other users have experienced (and potentially already solved) the same issue you are having, check if there is not already a bug report existing for your bug or error in the [bug tracker](https://github.com/djdembeck/Audnexus.bundle/issues?q=label%3Abug).
-- Also make sure to search the internet (including Stack Overflow) to see if users outside of the GitHub community have discussed the issue.
-- Collect information about the bug:
-  - Stack trace (Traceback)
-  - OS, Platform and Version (Windows, Linux, macOS, x86, ARM)
-  - Version of the interpreter, compiler, SDK, runtime environment, package manager, depending on what seems relevant.
-  - Possibly your input and the output
-  - Can you reliably reproduce the issue? And can you also reproduce it with older versions?
+Two more traps when verifying live:
 
-<!-- omit in toc -->
-#### How Do I Submit a Good Bug Report?
+- If Plex runs in a container, the files must be readable by its user (usually
+  `nobody:users`). Files left owned by root simply do not load.
+- Cover decisions log at INFO, but the shipped level is WARN, so raise
+  `logging_level` while diagnosing and put it back afterwards — a full library sweep
+  at DEBUG writes a great deal.
 
-> You must never report security related issues, vulnerabilities or bugs to the issue tracker, or elsewhere in public. Instead sensitive bugs must be sent by email to <>.
-<!-- You may add a PGP key to allow the messages to be sent encrypted as well. -->
+## What a good change looks like here
 
-We use GitHub issues to track bugs and errors. If you run into an issue with the project:
+This codebase is maintained by measurement rather than intuition, and the comments
+and commit messages carry that record. Concretely:
 
-- Open an [Issue](https://github.com/djdembeck/Audnexus.bundle/issues/new). (Since we can't be sure at this point whether it is a bug or not, we ask you not to talk about a bug yet and not to label the issue.)
-- Explain the behavior you would expect and the actual behavior.
-- Please provide as much context as possible and describe the *reproduction steps* that someone else can follow to recreate the issue on their own. This usually includes your code. For good bug reports you should isolate the problem and create a reduced test case.
-- Provide the information you collected in the previous section.
+- **Say what you measured.** "Fixes duplicate covers" is weaker than "measured on 30
+  albums: 75 tiles → 42, 0 selections changed, 0 pictures lost".
+- **Mutate your fix.** Break it deliberately and confirm a test goes red. A green
+  suite proves nothing about a test that never constrained the code. Several bugs
+  here were found exactly this way, including one that shipped.
+- **Prefer a rule to a special case.** Naming one franchise umbrella removed twelve
+  hand-written per-book pins.
+- **Poster changes carry an extra duty.** Users hand-curate covers. A change that can
+  remove a tile must never be able to remove the one they picked, and must fail
+  closed when it cannot tell.
 
-Once it's filed:
+Design rationale for larger pieces lives in [`docs/`](docs/), including specs that
+were deliberately **not** built and why.
 
-- The project team will label the issue accordingly.
-- A team member will try to reproduce the issue with your provided steps. If there are no reproduction steps or no obvious way to reproduce the issue, the team will ask you for those steps and mark the issue as `needs-repro`. Bugs with the `needs-repro` tag will not be addressed until they are reproduced.
-- If the team is able to reproduce the issue, it will be marked `needs-fix`, as well as possibly other tags (such as `critical`), and the issue will be left to be [implemented by someone](#your-first-code-contribution).
+## Reporting bugs
 
-<!-- You might want to create an issue template for bugs and errors that can be used as a guide and that defines the structure of the information to be included. If you do so, reference it here in the description. -->
+Open an issue at
+[Healzangels/Incipit.bundle/issues](https://github.com/Healzangels/Incipit.bundle/issues).
 
+Useful to include: what the agent did versus what you expected, the album/author it
+happened on, your `logging_level` and the relevant lines from
+`PMS Plugin Logs/com.plexapp.agents.incipit.log`, and your bundle version from
+`Contents/Code/_version.py`.
 
-### Suggesting Enhancements
+Please do not file security issues publicly — raise them privately with the
+maintainer through GitHub instead.
 
-This section guides you through submitting an enhancement suggestion for Audnexus.bundle, **including completely new features and minor improvements to existing functionality**. Following these guidelines will help maintainers and the community to understand your suggestion and find related suggestions.
+## Licence
 
-<!-- omit in toc -->
-#### Before Submitting an Enhancement
-
-- Make sure that you are using the latest version.
-- Read the [documentation](https://github.com/djdembeck/Audnexus.bundle) carefully and find out if the functionality is already covered, maybe by an individual configuration.
-- Perform a [search](https://github.com/djdembeck/Audnexus.bundle/issues) to see if the enhancement has already been suggested. If it has, add a comment to the existing issue instead of opening a new one.
-- Find out whether your idea fits with the scope and aims of the project. It's up to you to make a strong case to convince the project's developers of the merits of this feature. Keep in mind that we want features that will be useful to the majority of our users and not just a small subset. If you're just targeting a minority of users, consider writing an add-on/plugin library.
-
-<!-- omit in toc -->
-#### How Do I Submit a Good Enhancement Suggestion?
-
-Enhancement suggestions are tracked as [GitHub issues](https://github.com/djdembeck/Audnexus.bundle/issues).
-
-- Use a **clear and descriptive title** for the issue to identify the suggestion.
-- Provide a **step-by-step description of the suggested enhancement** in as many details as possible.
-- **Describe the current behavior** and **explain which behavior you expected to see instead** and why. At this point you can also tell which alternatives do not work for you.
-- You may want to **include screenshots and animated GIFs** which help you demonstrate the steps or point out the part which the suggestion is related to. You can use [this tool](https://www.cockos.com/licecap/) to record GIFs on macOS and Windows, and [this tool](https://github.com/colinkeenan/silentcast) or [this tool](https://github.com/GNOME/byzanz) on Linux. <!-- this should only be included if the project has a GUI -->
-- **Explain why this enhancement would be useful** to most Audnexus.bundle users. You may also want to point out the other projects that solved it better and which could serve as inspiration.
-
-<!-- You might want to create an issue template for enhancement suggestions that can be used as a guide and that defines the structure of the information to be included. If you do so, reference it here in the description. -->
-
-### Your First Code Contribution
-<!-- TODO
-include Setup of env, IDE and typical getting started instructions?
-
--->
-
-### Improving The Documentation
-<!-- TODO
-Updating, improving and correcting the documentation
-
--->
-
-## Styleguides
-### Commit Messages
-This project uses [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/), and all PRs/contributions must use them as well.
-
-## Join The Project Team
-<!-- TODO -->
-
-<!-- omit in toc -->
-## Attribution
-This guide is based on the **contributing-gen**. [Make your own](https://github.com/bttger/contributing-gen)!
+By contributing you agree your work is provided under this project's licence
+(GPL-3.0), inherited from [Audnexus.bundle](https://github.com/djdembeck/Audnexus.bundle).
