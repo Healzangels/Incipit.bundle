@@ -1848,8 +1848,18 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         alternates = helper.thumb_alternates or []
     except Exception:
         return added
+    # DIAGNOSTIC (v1.3.209). The twin suppression fires on some albums and not
+    # others -- Lamb's twin went, Gravesong's distance-2 twin survived two
+    # forced refreshes. Two candidates: this URL short-circuit re-adding an
+    # alternate offered by an OLDER version without ever judging it, or `shown`
+    # arriving empty so there is nothing to compare against. One line per
+    # alternate tells them apart instead of guessing; both were guesses so far.
+    log.info('incipit cover-alt: %d alternate(s), %d shown image(s) to judge against',
+             len(alternates), len([s for s in (shown or []) if s]))
     for url in alternates:
         if url in helper.metadata.posters:
+            log.info('incipit cover-alt: ALREADY in the container -- kept '
+                     'WITHOUT being judged (%s)', url)
             added.append(url)
             continue
         # A refusal leaves no trace in the container, so without this the
@@ -1887,6 +1897,7 @@ def offer_alternate_covers(helper, sort_order=3, shown=None):
         # is one consult, and the consult is memoised.
         if alternate_already_on_display(data, shown, url):
             continue
+        log.info('incipit cover-alt: judged NOT a twin -- offering (%s)', url)
         # THE VERDICT IS YES from here, so nothing below may record a refusal.
         # It used to: one blanket `except Exception` wrapped the container write
         # as well, and since fetch_url_bytes and alternate_cover_acceptable both
