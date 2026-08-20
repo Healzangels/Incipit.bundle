@@ -1844,7 +1844,7 @@ class ArtistSearchTool(SearchTool):
         # FULL remaining surname. group(2) used to be a single \w+, which dropped
         # every surname word after the first — "A. E. van Vogt" -> "A E van",
         # "W. E. B. Du Bois" -> "W E B Du". Capture the whole remainder instead.
-        initials_regex = "^((?:[A-Z]\.\s?)*[A-Z]\.)(?!\S)\s*(.+)$"
+        initials_regex = r"^((?:[A-Z]\.\s?)*[A-Z]\.)(?!\S)\s*(.+)$"
         initials_matched = re.search(initials_regex, name)
         if initials_matched:
             log.debug('Found initials to clean')

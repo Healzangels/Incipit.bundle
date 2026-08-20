@@ -1223,7 +1223,7 @@ class AlbumUpdateTool(UpdateTool):
         string = str(string)
         if not string.strip():
             return ''
-        book_regex = '(Book ?(\d*\.)?\d+[+-]?[\d]?)'
+        book_regex = r'(Book ?(\d*\.)?\d+[+-]?[\d]?)'
         if not re.match(book_regex, string):
             prefixed_string = ('Book ' + string)
             return prefixed_string
