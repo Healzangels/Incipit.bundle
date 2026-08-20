@@ -154,9 +154,12 @@ class TestMediaDurationProbe(unittest.TestCase):
         # is exactly how a second copy gets written. Pin the wiring at source.
         code = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Contents', 'Code')
-        search = open(os.path.join(code, 'search_tools.py')).read()
-        update = open(os.path.join(code, 'update_tools.py')).read()
-        agent = open(os.path.join(code, '__init__.py')).read()
+        with open(os.path.join(code, 'search_tools.py')) as handle:
+            search = handle.read()
+        with open(os.path.join(code, 'update_tools.py')) as handle:
+            update = handle.read()
+        with open(os.path.join(code, '__init__.py')) as handle:
+            agent = handle.read()
         self.assertIn('duration = media_duration_ms(self.media)', search)
         self.assertIn('media_duration_ms(self.media)', update)
         self.assertIn('runtime_verdict(', update)
@@ -169,7 +172,8 @@ class TestMediaDurationProbe(unittest.TestCase):
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Contents', 'Code')
         total = 0
         for fn in ('search_tools.py', 'update_tools.py', '__init__.py'):
-            total += open(os.path.join(code, fn)).read().count('track_iter = tracks.values()')
+            with open(os.path.join(code, fn)) as handle:
+                total += handle.read().count('track_iter = tracks.values()')
         self.assertEqual(total, 1, 'the duration probe has been copied again')
 
 

@@ -54,7 +54,8 @@ def _function(tree, name, must_mention=None):
 
 class AlternateKeysBinding(unittest.TestCase):
     def setUp(self):
-        self.tree = ast.parse(open(AGENT).read())
+        with open(AGENT) as handle:
+            self.tree = ast.parse(handle.read())
         self.fn = _function(self.tree, FUNC, must_mention=NAME)
         self.assertIsNotNone(self.fn, 'no %s() referencing %r -- renamed, or the name is gone?' % (FUNC, NAME))
 
