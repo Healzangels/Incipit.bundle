@@ -456,7 +456,7 @@ class TestFilenameAsinNeedsTheB0Anchor(unittest.TestCase):
         self.assertEqual(tool.check_for_asin(), 'B08WF9JR2P_us')
 
     def test_an_ISBN_in_the_album_TAG_does_not_quick_match_on_a_scan(self):
-        """
+        r"""
         The shape-only regex (r'(?=.\d)[A-Z\d]{10}') exists for TYPED queries,
         where a human is deliberately naming an identity. This branch fed it
         `self.media.album` -- the album TAG -- on every AUTOMATIC scan, ungated.
