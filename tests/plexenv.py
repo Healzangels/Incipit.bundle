@@ -162,13 +162,15 @@ def _make_framework():
         Error = staticmethod(lambda *a, **kw: None)
 
     Log = _Log()
-    # Track is here for the same reason Artist and Album are: the bundle
-    # subclasses it. Its absence was not a silent gap -- every module that
-    # imports the agent failed to import at all, which is the behaviour to
-    # keep. Add a type here whenever the bundle starts declaring a new one.
+    # NO Track. Plex's AgentKit has no Track attribute -- proven live on
+    # 2026-08-26, v1.3.214: `class AudiobookTrack(Agent.Track)` raised
+    # AttributeError: 'AgentKit' object has no attribute 'Track' and took the
+    # whole plugin down with "Exception starting plug-in". Adding Track HERE
+    # is what let that ship: the harness modelled a type the sandbox does not
+    # have, so 743 tests passed against a bundle that could not start. Only
+    # ever mirror what AgentKit actually exposes.
     Agent = types.SimpleNamespace(Artist=type('Artist', (object,), {}),
-                                  Album=type('Album', (object,), {}),
-                                  Track=type('Track', (object,), {}))
+                                  Album=type('Album', (object,), {}))
     Datetime = types.SimpleNamespace(ParseDate=_unavailable)
 
     return {
