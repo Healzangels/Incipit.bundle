@@ -5240,3 +5240,57 @@ def make_request(url, cache_time=None):
                 # refuses. tests/test_sandbox_operators.py pins this.
                 sleep_time = sleep_time * 2
     return response
+
+
+class AudiobookTrack(Agent.Track):
+    """
+        Registers this identifier for TRACKS. That is the whole job.
+
+        Plex stamps a com.plexapp.agents.incipit guid onto every track in an
+        incipit library, but the identifier was declared only for Artist and
+        Album -- so every track-level getAgent lookup failed by construction and
+        logged "Unable to find metadata agent provider for identifier
+        'com.plexapp.agents.incipit'". The error count is simply how many tracks
+        got touched: measured 2026-08-18, section 6 held 3,849 tracks and the
+        18:00 hour logged 3,864 errors, fifteen apart. Nothing downstream ever
+        failed, which is why this sat unexplained for weeks.
+
+        primary_provider = False, and update() writes NOTHING, both deliberately.
+        A track agent that OWNS the type and writes nothing BLANKS the title of
+        every track in the library -- those titles come from the file tags via
+        localmedia, and this agent has no track metadata of its own to put back.
+        The registration is the fix; contributing data is not wanted and would be
+        the dangerous part.
+
+        If Plex declines to register a non-primary track agent (in which case
+        /system/agents?mediaType=10 still will not list this identifier and the
+        errors continue), that is a SAFE failed experiment -- nothing is written
+        either way. Do not "fix" it by flipping primary_provider to True without
+        first capturing every track title and diffing them afterwards.
+    """
+    name = 'Incipit'
+    languages = [
+        Locale.Language.English,
+        'de',
+        'es',
+        'fr',
+        'it',
+        'ja',
+    ]
+    primary_provider = False
+    accepts_from = ['com.plexapp.agents.localmedia']
+
+    def search(self, results, media, lang, manual):
+        """
+            Never offer a track result. Tracks are matched by their album; an
+            incipit "track match" is not a thing this agent knows how to do, and
+            offering one would let a wrong pick overwrite a good file tag.
+        """
+        return
+
+    def update(self, metadata, media, lang, force):
+        """
+            Intentionally empty. See the class docstring: writing nothing is the
+            point, and writing anything here risks the file-tag titles.
+        """
+        return

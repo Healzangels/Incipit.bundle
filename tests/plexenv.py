@@ -162,8 +162,13 @@ def _make_framework():
         Error = staticmethod(lambda *a, **kw: None)
 
     Log = _Log()
+    # Track is here for the same reason Artist and Album are: the bundle
+    # subclasses it. Its absence was not a silent gap -- every module that
+    # imports the agent failed to import at all, which is the behaviour to
+    # keep. Add a type here whenever the bundle starts declaring a new one.
     Agent = types.SimpleNamespace(Artist=type('Artist', (object,), {}),
-                                  Album=type('Album', (object,), {}))
+                                  Album=type('Album', (object,), {}),
+                                  Track=type('Track', (object,), {}))
     Datetime = types.SimpleNamespace(ParseDate=_unavailable)
 
     return {
