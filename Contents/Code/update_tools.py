@@ -327,6 +327,94 @@ def series_from_path_segments(segments, author_names):
     return (series_folder, number.group(1))
 
 
+# A series-folder NAME that marks an edition grouping, never a series. Chaptarr
+# files split and language editions under folders such as "Insomnia
+# Split-Volume", "Needful Things (Split-Volume)" and "The English Edition"; the
+# fallback turned each into a one-book shelf ("Insomnia Split-Volume, Book 1 -
+# Insomnia"). Word-bounded, so a real series name that merely contains the
+# letters is untouched.
+FOLDER_EDITION_RE = re.compile(
+    r'split[\s-]?volume|\bedition\b|\bomnibus\b|\bbox[\s-]?set\b', re.IGNORECASE)
+
+
+def folder_book_number(book_folder):
+    """
+        The number of a numbered book folder as a float -- "01 - X" and "1 - X"
+        compare equal -- or None for a range folder or an unnumbered one.
+    """
+    if FOLDER_RANGE_RE.match(book_folder or ''):
+        return None
+    number = FOLDER_NUMBER_RE.match(book_folder or '')
+    if not number:
+        return None
+    try:
+        return float(number.group(1))
+    except ValueError:
+        return None
+
+
+def folder_book_title(book_folder):
+    """The title half of a numbered book folder: "1 - The Stand" -> "The Stand"."""
+    return re.sub(r'^\s*\d{1,3}(?:\.\d{1,2})?\s*[-._\s]\s*', '', book_folder or '')
+
+
+def folder_series_refusal(series_folder, book_folder, siblings):
+    """
+        Why a folder-derived series must NOT become a shelf, or None when it may.
+
+        Chaptarr files EVERY book as <Author>/<Series>/<NN - Title>, inventing a
+        series folder even for a book that belongs to none. When neither the
+        provider nor Goodreads names a series, the fallback trusted that folder
+        and built a shelf holding one book: "Stand, Book 1 - The Stand",
+        "Insomnia Split-Volume, Book 1 - Insomnia", "Different Seasons, Book 1 -
+        Apt Pupil" beside the collection it comes from, also at Book 1. Measured
+        against every album path on prod 2026-09-23.
+
+        Three shapes, each a folder that states no series:
+          * an EDITION MARKER in the folder name (FOLDER_EDITION_RE);
+          * a ONE-BOOK folder numbered 1 and named after the book itself -- the
+            folder's name is the title, or is contained in it ("Sunset" holding
+            "Just After Sunset");
+          * a folder whose books ALL carry the same number -- a collection and
+            its own novella both filed at 1 -- so the number is a default, not a
+            position.
+
+        What it deliberately leaves alone, each a live case: a one-book folder
+        with a DIFFERENT name ("The Cosmere" holding Arcanum Unbounded at 18 is
+        the operator filing a book no provider can place -- the reason this
+        fallback exists); a one-book folder numbered past 1 ("Dune" holding only
+        "3 - Children of Dune"); any folder whose books carry different numbers,
+        however wrong those numbers are. A book that Chaptarr mis-filed into
+        another author's series ("Katie Kazoo, Switcheroo" holding Cormac
+        McCarthy's Child of God) is out of reach of any name rule; that is a
+        folder to move, not a pattern to infer.
+
+        `siblings` is the list of the OTHER book-folder names in the same series
+        folder, or None when they could not be read -- then only the name-only
+        edition rule applies, and the fallback behaves as it did before.
+        See incipit-api docs/design/spec-shelf-titles-across-the-board.md.
+    """
+    if FOLDER_EDITION_RE.search(series_folder or ''):
+        return 'an edition marker, not a series'
+    if siblings is None:
+        return None
+    own = folder_book_number(book_folder)
+    if not siblings:
+        folder_key = series_key(series_folder)
+        title_key = series_key(folder_book_title(book_folder))
+        if own != 1.0 or not folder_key or not title_key:
+            return None
+        # Containment needs a real word: a two-letter folder ("It") must not be
+        # "contained" in every title that happens to spell it.
+        if folder_key == title_key or (len(folder_key) >= 4 and folder_key in title_key):
+            return 'a one-book folder named after the book'
+        return None
+    numbers = set([folder_book_number(sibling) for sibling in siblings] + [own])
+    if own is not None and len(numbers) == 1:
+        return 'every book in the folder carries the same number'
+    return None
+
+
 class UpdateTool:
     def __init__(self, content_type, force, lang, media, metadata, prefs):
         self.content_type = content_type
@@ -794,6 +882,35 @@ class AlbumUpdateTool(UpdateTool):
         log.debug('incipit series-from-path: no file path in update media')
         return None
 
+    def series_folder_siblings(self, path):
+        """
+            The OTHER book-folder names beside this book's folder, or None when
+            they cannot be read.
+
+            Impure on purpose and kept thin: Core.storage is the sandbox's only
+            filesystem reader under PlexPluginCodePolicy=Elevated, and it is out
+            of reach of the unit suite. Every decision lives in the pure
+            folder_series_refusal; this only gathers its input. ANY failure --
+            no list_dir in this framework build, a permission error, an
+            unmounted share -- returns None, and None means the edition rule
+            alone applies, so the fallback behaves exactly as it did before.
+        """
+        try:
+            parts = path.split('/')
+            book = parts[-2]
+            names = Core.storage.list_dir('/'.join(parts[:-2]))
+        except Exception as e:
+            log.debug('incipit series-from-path: could not list the series folder '
+                      'of "%s" (%s)', path, e)
+            return None
+        siblings = []
+        for name in names or []:
+            if name == book:
+                continue
+            if FOLDER_NUMBER_RE.match(name) or FOLDER_RANGE_RE.match(name):
+                siblings.append(name)
+        return siblings
+
     def folder_series_wins(self):
         """
             Whether the FOLDER should override a provider that supplied BOTH a
@@ -952,6 +1069,19 @@ class AlbumUpdateTool(UpdateTool):
         # print. Restore it only alongside a path that keeps the provider's
         # name, and compare against provider_series, not self.series.
         derived_series = folder_wins or not provider_series or unnumbered_provider_series
+        # A folder that states no series must not become a shelf. Only when the
+        # folder is about to SUPPLY the series, and never when the operator has
+        # told the folder to win: that setting is an explicit claim about this
+        # library's folders, and it outranks an inference about them.
+        if derived_series and not folder_wins:
+            parts = [segment for segment in path.split('/') if segment.strip()]
+            refusal = folder_series_refusal(
+                series_name, parts[-2] if len(parts) >= 2 else '',
+                self.series_folder_siblings(path))
+            if refusal:
+                log.info('incipit series-from-path: folder "%s" is %s -- not using it '
+                         'as a series; path="%s"', series_name, refusal, path)
+                return
         if derived_series:
             self.series = series_name
         if folder_wins or not self.volume:
