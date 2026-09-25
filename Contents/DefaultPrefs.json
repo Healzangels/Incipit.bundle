@@ -42,6 +42,12 @@
         "default": "true"
     },
     {
+        "id": "series_from_folder_fallback",
+        "label": "Fill a missing series + book number from the folder tree (<Author>/<Series>/<NN> - <Title>). Unchecked: series come only from the metadata sources, never from folder names",
+        "type": "bool",
+        "default": "false"
+    },
+    {
         "id": "series_from_folder_wins",
         "label": "Trust the folder for series + book number, even when the provider supplies one (fixes a series whose books disagree, e.g. sub-series vs parent series)",
         "type": "bool",

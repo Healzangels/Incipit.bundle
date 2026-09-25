@@ -68,6 +68,11 @@ def derive_tool(**kw):
 
 OSRETH = ROOT + '/Katherine Addison/The Chronicles of Osreth'
 
+# The FALLBACK is opt-in since v1.3.217 (series_from_folder_fallback, default off).
+# Every test below that exercises what the fallback does opts in explicitly; the
+# shipped default is pinned by FolderFallbackIsOptIn at the end of this file.
+FALLBACK = {'series_from_folder_fallback': True}
+
 
 class FolderWinsPerAuthor(unittest.TestCase):
     """The listed author's folder overrides a provider that supplied both halves."""
@@ -164,7 +169,7 @@ class UnlistedAuthorsAreUntouched(unittest.TestCase):
 
 
 class ExistingBehaviourStillHolds(unittest.TestCase):
-    """The paths that already worked must not regress."""
+    """The paths that already worked must not regress (the fallback opted in)."""
 
     def test_global_pref_still_works(self):
         self.assertEqual(
@@ -180,20 +185,20 @@ class ExistingBehaviourStillHolds(unittest.TestCase):
         self.assertEqual(
             derive(path=ROOT + '/Brandon Sanderson/The Cosmere/18 - Arcanum Unbounded/a.m4b',
                    author='Brandon Sanderson', series='The Mistborn Saga', volume='',
-                   title='Arcanum Unbounded'),
+                   title='Arcanum Unbounded', prefs=FALLBACK),
             ('The Cosmere', 'Book 18'))
 
     def test_no_provider_series_takes_the_folder(self):
         self.assertEqual(
             derive(path=ROOT + '/TheFirstDefier/Defiance of the Fall/10 - Book Ten/d.m4b',
                    author='TheFirstDefier', series='', volume='',
-                   title='Defiance of the Fall, Book 10'),
+                   title='Defiance of the Fall, Book 10', prefs=FALLBACK),
             ('Defiance of the Fall', 'Book 10'))
 
     def test_a_standalone_gets_nothing(self):
         self.assertEqual(
             derive(path=ROOT + '/Andy Weir/Artemis/a.m4b', author='Andy Weir',
-                   series='', volume='', title='Artemis'),
+                   series='', volume='', title='Artemis', prefs=FALLBACK),
             ('', ''))
 
 
@@ -211,7 +216,7 @@ class RangeFolderSpan(unittest.TestCase):
         tool = derive_tool(
             path=ROOT + '/Michael Scott/Secrets of the Immortal Nicholas Flamel' + '/1-9 - The Lost Stories Collection/x.m4b',
             author='Michael Scott', series='', volume='',
-            title='The Lost Stories Collection')
+            title='The Lost Stories Collection', prefs=FALLBACK)
         self.assertEqual(tool.series, 'Secrets of the Immortal Nicholas Flamel')
         self.assertEqual(tool.volume, '')
         self.assertTrue(tool.series_span,
@@ -220,7 +225,8 @@ class RangeFolderSpan(unittest.TestCase):
     def test_a_numbered_folder_does_NOT_set_it(self):
         tool = derive_tool(
             path=ROOT + '/Michael Scott/Secrets of the Immortal Nicholas Flamel' + '/1 - The Alchemyst/x.m4b',
-            author='Michael Scott', series='', volume='', title='The Alchemyst')
+            author='Michael Scott', series='', volume='', title='The Alchemyst',
+            prefs=FALLBACK)
         self.assertEqual(tool.volume, 'Book 1')
         self.assertFalse(tool.series_span,
                          'a normal numbered book is not a span')
@@ -230,7 +236,7 @@ class RangeFolderSpan(unittest.TestCase):
         tool = derive_tool(
             path=ROOT + '/Michael Scott/Secrets of the Immortal Nicholas Flamel' + '/1-9 - The Lost Stories Collection/x.m4b',
             author='Michael Scott', series='', volume='',
-            title='The Lost Stories Collection')
+            title='The Lost Stories Collection', prefs=FALLBACK)
         tool.force = True
         tool.metadata = type('M', (), {'title': 'The Lost Stories Collection',
                                        'title_sort': ''})()
@@ -284,7 +290,8 @@ class ContainerNameIsLogged(unittest.TestCase):
 
     def test_a_container_from_the_folder_is_named_in_the_log(self):
         tool = derive_tool(path=self.COSMERE, author='Brandon Sanderson',
-                           series=None, volume=None, title='Arcanum Unbounded')
+                           series=None, volume=None, title='Arcanum Unbounded',
+                           prefs=FALLBACK)
         # STILL APPLIED -- this change is observability, not behaviour.
         self.assertEqual((tool.series, tool.volume), ('The Cosmere', 'Book 18'))
         self.assertIn('CONTAINER', self.warned())
@@ -292,21 +299,23 @@ class ContainerNameIsLogged(unittest.TestCase):
 
     def test_the_other_container_shape_is_named_too(self):
         tool = derive_tool(path=self.W40K, author='Guy Haley',
-                           series=None, volume=None, title='Belisarius Cawl')
+                           series=None, volume=None, title='Belisarius Cawl',
+                           prefs=FALLBACK)
         self.assertEqual((tool.series, tool.volume), ('Warhammer 40,000', 'Book 1'))
         self.assertIn('CONTAINER', self.warned())
 
     def test_a_real_series_from_the_folder_is_NOT_called_a_container(self):
         # The plain folder-path warning still fires; only the word must not.
         tool = derive_tool(path=self.REAL, author='Rick Riordan',
-                           series=None, volume=None, title='The Lightning Thief')
+                           series=None, volume=None, title='The Lightning Thief',
+                           prefs=FALLBACK)
         self.assertEqual(tool.series, 'Percy Jackson and the Olympians')
         self.assertIn('series from the folder path', self.warned())
         self.assertNotIn('CONTAINER', self.warned())
 
     def test_a_path_that_does_not_match_the_layout_logs_nothing(self):
         derive_tool(path=ROOT + '/Some Author/Loose Book/x.m4b', author='Some Author',
-                    series=None, volume=None, title='Loose Book')
+                    series=None, volume=None, title='Loose Book', prefs=FALLBACK)
         self.assertEqual(self.lines, [])
 
 
@@ -332,6 +341,84 @@ class ContainerIdentity(unittest.TestCase):
     def test_an_absent_name_is_not_a_container(self):
         self.assertFalse(UT.is_container_series(None))
         self.assertFalse(UT.is_container_series(''))
+
+
+
+class FolderFallbackIsOptIn(unittest.TestCase):
+    """
+    v1.3.217: with the shipped defaults the folder is not a series source.
+
+    Operator, 2026-09-25: "would rather a cleaner by api lookup from a source of
+    truth unless the user has checked to use folders". Chaptarr invents a series
+    folder for every book, and measured on prod the numbered shelves no metadata
+    source could place were mostly folder junk -- a foreign-language name, edition
+    listings, a mis-filed book. These run on FakePrefs.DEFAULTS, i.e. the real
+    DefaultPrefs.json, so they pin the SHIPPED behaviour, not a literal.
+    """
+
+    ABSOLUTE = ROOT + '/David Baldacci/Absoliuti galia/1 - Absolute Power/a.m4b'
+
+    def test_by_default_the_folder_is_never_read(self):
+        tool = tool_for(path=self.ABSOLUTE, author='David Baldacci', series='',
+                        volume='', title='Absolute Power')
+
+        def read_the_folder():
+            raise AssertionError('the folder was consulted with the fallback off')
+
+        tool.album_file_path = read_the_folder
+        tool.derive_series_from_path()
+        self.assertEqual((tool.series, tool.volume), ('', ''))
+
+    def test_a_foreign_language_folder_is_not_a_shelf_by_default(self):
+        # Absolute Power sits under Chaptarr's Lithuanian "Absoliuti galia"; the
+        # layout matches and no refusal rule can tell a translation from a series.
+        self.assertEqual(
+            derive(path=self.ABSOLUTE, author='David Baldacci', series='', volume='',
+                   title='Absolute Power'),
+            ('', ''))
+
+    def test_opting_in_restores_the_fallback(self):
+        # The same book with the box ticked: the folder is trusted, junk and all --
+        # which is exactly why it is the operator's call.
+        self.assertEqual(
+            derive(path=self.ABSOLUTE, author='David Baldacci', series='', volume='',
+                   title='Absolute Power', prefs=FALLBACK),
+            ('Absoliuti galia', 'Book 1'))
+
+    def test_by_default_an_unnumbered_provider_series_keeps_its_name(self):
+        # The provider's own name stands; no folder number is grafted on and no
+        # folder name replaces it.
+        self.assertEqual(
+            derive(path=ROOT + '/Brandon Sanderson/The Cosmere/18 - Arcanum Unbounded/a.m4b',
+                   author='Brandon Sanderson', series='The Mistborn Saga', volume='',
+                   title='Arcanum Unbounded'),
+            ('The Mistborn Saga', ''))
+
+    def test_by_default_a_range_folder_makes_no_span(self):
+        tool = derive_tool(
+            path=ROOT + '/Michael Scott/Secrets of the Immortal Nicholas Flamel'
+            + '/1-9 - The Lost Stories Collection/x.m4b',
+            author='Michael Scott', series='', volume='',
+            title='The Lost Stories Collection')
+        self.assertEqual((tool.series, tool.volume, tool.series_span), ('', '', False))
+
+    def test_the_folder_still_wins_when_told_to_for_a_listed_author(self):
+        # The explicit overrides are the stronger claim and do not need the box:
+        # prod lists Raymond E. Feist.
+        self.assertEqual(
+            derive(path=ROOT + '/Raymond E. Feist/The Riftwar Saga/2 - Silverthorn/s.m4b',
+                   author='Raymond E. Feist', series='The Riftwar Saga', volume='Book 3',
+                   title='Silverthorn',
+                   prefs={'series_from_folder_authors': 'Raymond E. Feist'}),
+            ('The Riftwar Saga', 'Book 2'))
+
+    def test_the_global_override_still_wins_without_the_box(self):
+        self.assertEqual(
+            derive(path=ROOT + '/TheFirstDefier/Defiance of the Fall/10 - Book Ten/d.m4b',
+                   author='TheFirstDefier', series='', volume='',
+                   title='Defiance of the Fall, Book 10',
+                   prefs={'series_from_folder_wins': True}),
+            ('Defiance of the Fall', 'Book 10'))
 
 
 if __name__ == '__main__':

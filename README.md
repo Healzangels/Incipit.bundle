@@ -133,7 +133,8 @@ Set in Plex under the library's agent settings.
 | `prefer_local_cover` | Use the book folder's `cover.jpg` as the poster. |
 | `cover_mirror_mode` | Whether the selected poster is written back to `cover.jpg` — `Off`, `Seed only` (write only where none exists), or `Curation` (the pick replaces it). |
 | `online_perceptual_dedupe` | Hide a poster when another source already shows the same picture in different bytes. Uncheck to keep every variant. |
-| `series_from_folder_wins` | Trust the folder tree for series and book number over the provider. Off by default: the provider is usually right, and the folder is a fallback. |
+| `series_from_folder_fallback` | Fill a book's MISSING series and book number from the folder tree (`<Author>/<Series>/<NN> - <Title>`). Off by default: series come only from the metadata sources, because folder names (Chaptarr invents one for every book) are not a source of truth. |
+| `series_from_folder_wins` | Trust the folder tree for series and book number over the provider. Off by default: the provider is usually right. Applies whatever `series_from_folder_fallback` says -- it is the stronger claim. |
 | `prefer_sidecar_metadata` | Trust a `metadata.json` sidecar next to the book. |
 | `keep_existing_genres` | Leave genres alone instead of merging in the community ones. |
 | `logging_level` | `WARN` by default. Cover decisions log at INFO, so raise it to INFO or DEBUG when diagnosing a poster, then put it back — a full sweep at DEBUG writes a lot. |

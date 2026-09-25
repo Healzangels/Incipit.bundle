@@ -957,7 +957,8 @@ class AlbumUpdateTool(UpdateTool):
 
     def derive_series_from_path(self):
         """
-            Fill a MISSING series (name + book number) from the on-disk folder
+            OPT-IN (series_from_folder_fallback, default off): fill a MISSING
+            series (name + book number) from the on-disk folder
             layout <Author>/<Series>/<NN> - <Title>/, and strip a bare trailing
             "(<Series>)" a provider baked into the title (e.g. "Cube Route
             (Xanth)" -> "Cube Route"). The folder layout must clearly match (see
@@ -983,6 +984,18 @@ class AlbumUpdateTool(UpdateTool):
         # the folder to win outright, in which case run even with both present.
         folder_wins = self.folder_series_wins()
         if self.series and self.volume and not folder_wins:
+            return
+        # The folder is a SOURCE only when the operator says so: the fallback is
+        # opt-in, and the two override prefs behind folder_wins are explicit claims
+        # about this library's folders. Folder names are not a source of truth --
+        # Chaptarr invents a series folder for every book, and this library's
+        # folders carried foreign-language names ("Absoliuti galia"), edition
+        # listings ("Insomnia Split-Volume") and a mis-filed book ("Child of God"
+        # under "Katie Kazoo, Switcheroo"). Measured on prod 2026-09-25: of the
+        # numbered shelves no metadata source could place, most were that junk.
+        # Operator, same day: "would rather a cleaner by api lookup from a source
+        # of truth unless the user has checked to use folders".
+        if not folder_wins and not bool(self.prefs['series_from_folder_fallback']):
             return
         raw = self.album_file_path()
         if not raw:
