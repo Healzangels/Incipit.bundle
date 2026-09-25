@@ -109,6 +109,23 @@ def _levenshtein(a, b):
     return prev[-1]
 
 
+# Directory listings a test REGISTERS for Core.storage.list_dir: FAKE_DIRS[path] =
+# [names]. An unregistered path raises an ORDINARY error, which the plugin reads
+# as "listing unavailable" -- production's behaviour when a share cannot be read --
+# so a test that is not about sibling folders keeps that semantics, and one that
+# is states what the folder holds. Before this the fake had no list_dir at all:
+# the AttributeError was swallowed the same way, so no test ever reached the
+# sibling wiring and seven mutations of it passed the whole suite (2026-09-25).
+# Tests that register a listing must clear it (tearDown) -- this is module state.
+FAKE_DIRS = {}
+
+
+def _list_dir(path):
+    if path in FAKE_DIRS:
+        return list(FAKE_DIRS[path])
+    raise OSError('no listing registered for %r' % (path,))
+
+
 def _make_framework():
     """The inert framework globals, as simple namespaces."""
     String = types.SimpleNamespace(
@@ -146,7 +163,8 @@ def _make_framework():
     HTTP = types.SimpleNamespace(Request=_unavailable, Headers={}, CacheTime=0,
                                  ClearCache=lambda: None)
     Core = types.SimpleNamespace(storage=types.SimpleNamespace(load=_unavailable,
-                                                               save=_unavailable))
+                                                               save=_unavailable,
+                                                               list_dir=_list_dir))
     Proxy = types.SimpleNamespace(Media=lambda data, **kw: ('media', len(data or b'')),
                                   Preview=lambda *a, **kw: None)
     # Plex's Log is BOTH callable and a namespace -- logging.py uses `Log(msg)`

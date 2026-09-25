@@ -1628,10 +1628,18 @@ class TagTool:
             the correct sub-series.
 
             Only "Series:" entries are touched -- the field is shared with
-            AUTHOR moods, which are re-added verbatim. And only when this record
-            actually HAS a series: a sparse record must never be able to wipe a
-            shelf it cannot replace, which is the same guard add_genres and
-            add_narrators_to_styles already make.
+            AUTHOR moods, which are re-added verbatim. On a routine update, only
+            when this record actually HAS a series: a sparse record must never be
+            able to wipe a shelf it cannot replace, which is the same guard
+            add_genres and add_narrators_to_styles already make.
+
+            A FORCED refresh of a record with no series retires them too -- the
+            terms on which set_metadata_sort_title already rebuilds the sort title
+            without a series prefix, so the two agree. Without it, a shelf the
+            folder fallback built (off by default since 1.3.217) or a listing the
+            API now refuses lost its sort prefix on refresh and kept its mood for
+            good: "Series: Absoliuti galia" on Absolute Power, "Series: Insomnia
+            Split-Volume" on Insomnia.
 
             clear()+add() rather than a selective remove(): those two are the
             only set operations this file already proves against the sandbox.
@@ -1641,7 +1649,7 @@ class TagTool:
             wanted.append("Series: " + self.helper.series)
         if self.helper.series2:
             wanted.append("Series: " + self.helper.series2)
-        if not wanted:
+        if not wanted and not self.helper.force:
             return
         # Rebuild only when something is actually stale. A rewrite Plex logs as
         # "something changed" costs a per-track tags write, which is the cost

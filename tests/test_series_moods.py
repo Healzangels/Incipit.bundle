@@ -15,7 +15,8 @@ WHY THIS EXISTS
     pass can fix this; only the writer can.
 
     The field is SHARED with author moods, and the retire must never cost them,
-    nor may a record with no series wipe a shelf it cannot replace.
+    nor may a record with no series wipe a shelf it cannot replace -- except on a
+    FORCED refresh, which already rebuilds the sort title without the series.
 """
 
 import os
@@ -55,14 +56,15 @@ class FakeMetadata(object):
 
 
 class Helper(object):
-    def __init__(self, moods=(), series=None, series2=None):
+    def __init__(self, moods=(), series=None, series2=None, force=False):
         self.metadata = FakeMetadata(moods)
         self.series = series
         self.series2 = series2
+        self.force = force
 
 
-def tagger(moods=(), series=None, series2=None):
-    helper = Helper(moods, series, series2)
+def tagger(moods=(), series=None, series2=None, force=False):
+    helper = Helper(moods, series, series2, force)
     tool = UT.TagTool(helper, {})
     return tool, helper
 
@@ -106,6 +108,26 @@ class TestStaleSeriesMoodIsRetired(unittest.TestCase):
         self.assertEqual(
             sorted(helper.metadata.moods.items), ['Series: Discworld', 'Terry Pratchett']
         )
+
+    def test_a_FORCED_refresh_with_no_series_retires_the_stale_one(self):
+        # 1.3.217: the folder fallback is opt-in, so a folder-built shelf comes
+        # back from a forced refresh with no series. The sort title already drops
+        # its prefix on force; the mood must go on the same terms, or the junk
+        # shelf lives on as a permanent tag the operator cannot clear in Plex.
+        tool, helper = tagger(
+            moods=['David Baldacci', 'Series: Absoliuti galia'], series=None, force=True
+        )
+        tool.add_series_to_moods()
+        self.assertEqual(helper.metadata.moods.items, ['David Baldacci'])
+
+    def test_a_forced_refresh_with_no_series_and_nothing_stale_does_not_churn(self):
+        tool, helper = tagger(moods=['David Baldacci'], series=None, force=True)
+        moods = helper.metadata.moods
+        cleared = []
+        moods.clear = lambda: cleared.append(True)
+        tool.add_series_to_moods()
+        self.assertEqual(cleared, [])
+        self.assertEqual(moods.items, ['David Baldacci'])
 
     def test_no_rewrite_when_nothing_is_stale(self):
         # A rewrite is logged by Plex as "something changed" and costs a

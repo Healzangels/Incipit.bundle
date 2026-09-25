@@ -421,5 +421,72 @@ class FolderFallbackIsOptIn(unittest.TestCase):
             ('Defiance of the Fall', 'Book 10'))
 
 
+class SiblingListingWiring(unittest.TestCase):
+    """
+    The refusal rules read the SERIES folder's listing through Core.storage.
+    These run end to end through derive_series_from_path with a registered
+    listing, so the wiring -- which folder is listed, the book's own folder left
+    out, only numbered entries counted, the refusal returning, folder_wins
+    exempt -- is pinned, not just the pure rule function.
+    """
+
+    def setUp(self):
+        plexenv.FAKE_DIRS.clear()
+
+    def tearDown(self):
+        plexenv.FAKE_DIRS.clear()
+
+    def listed(self, folder, names):
+        plexenv.FAKE_DIRS[ROOT + folder] = names
+
+    def test_a_lone_book_named_after_its_folder_is_refused(self):
+        self.listed('/Stephen King/The Stand', ['1 - The Stand'])
+        self.assertEqual(
+            derive(path=ROOT + '/Stephen King/The Stand/1 - The Stand/s.m4b',
+                   author='Stephen King', series='', volume='', title='The Stand',
+                   prefs=FALLBACK),
+            ('', ''))
+
+    def test_a_stray_file_beside_it_does_not_make_it_a_series(self):
+        # Only numbered entries are sibling BOOKS; a cover.jpg is not one.
+        self.listed('/Stephen King/The Stand', ['1 - The Stand', 'cover.jpg'])
+        self.assertEqual(
+            derive(path=ROOT + '/Stephen King/The Stand/1 - The Stand/s.m4b',
+                   author='Stephen King', series='', volume='', title='The Stand',
+                   prefs=FALLBACK),
+            ('', ''))
+
+    def test_the_books_own_folder_is_not_its_sibling(self):
+        # 'Dune' holding only '3 - Children of Dune': a lone book past #1 keeps its
+        # series. Counting its own folder would make it "every book on the same
+        # number" and refuse it.
+        self.listed('/Frank Herbert/Dune', ['3 - Children of Dune'])
+        self.assertEqual(
+            derive(path=ROOT + '/Frank Herbert/Dune/3 - Children of Dune/c.m4b',
+                   author='Frank Herbert', series='', volume='', title='Children of Dune',
+                   prefs=FALLBACK),
+            ('Dune', 'Book 3'))
+
+    def test_a_first_book_with_numbered_siblings_keeps_its_series(self):
+        self.listed('/TheFirstDefier/Defiance of the Fall',
+                    ['1 - Defiance of the Fall', '2 - Defiance of the Fall 2'])
+        self.assertEqual(
+            derive(path=ROOT + '/TheFirstDefier/Defiance of the Fall/1 - Defiance of the Fall/d.m4b',
+                   author='TheFirstDefier', series='', volume='', title='Defiance of the Fall',
+                   prefs=FALLBACK),
+            ('Defiance of the Fall', 'Book 1'))
+
+    def test_the_folder_still_wins_over_the_refusal_when_told_to(self):
+        # folder_wins is an explicit claim about this library's folders; the
+        # refusal is an inference about them, and never overrides the claim.
+        self.listed('/Raymond E. Feist/Magician', ['1 - Magician'])
+        self.assertEqual(
+            derive(path=ROOT + '/Raymond E. Feist/Magician/1 - Magician/m.m4b',
+                   author='Raymond E. Feist', series='', volume='', title='Magician',
+                   prefs={'series_from_folder_authors': 'Raymond E. Feist'}),
+            ('Magician', 'Book 1'))
+
+
+
 if __name__ == '__main__':
     unittest.main()
