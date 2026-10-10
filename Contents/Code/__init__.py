@@ -451,6 +451,56 @@ def local_cover_is_portrait(data):
     return (float(height) / float(width)) >= PORTRAIT_RATIO
 
 
+# The smallest SHORT EDGE a local square may have and still stand in for a book's
+# cover (select_local_square_art). The embeds that motivated it are 1600x1600;
+# a postage-stamp embed must never replace a full-size jacket.
+LOCAL_SQUARE_MIN_EDGE = 600
+
+
+def is_square_art(dims):
+    """
+        True when (width, height) is square-ish: neither side PORTRAIT_RATIO times
+        the other. A confident yes only -- unmeasurable (None) is not square.
+    """
+    if not dims:
+        return False
+    width, height = dims
+    if width <= 0 or height <= 0:
+        return False
+    ratio = float(height) / float(width)
+    return ratio < PORTRAIT_RATIO and (1.0 / ratio) < PORTRAIT_RATIO
+
+
+def local_square_candidate(entries, artist_bytes):
+    """
+        The best SQUARE image among Local Media Assets' poster tiles, or None.
+
+        `entries` is [(container_key, image_bytes)]. Only Local Media Assets'
+        tiles qualify -- the art the book's own files carry (the embedded cover,
+        a square cover.jpg) -- never our own keys, an upload (a person's pick
+        is theirs, and a de-selected one was de-selected on purpose), or another
+        agent's. The artist photo never qualifies, however square: that is the
+        poison the cover guards exist to keep off a book. Largest short edge
+        wins (what survives Plex's square tile), then the smaller key, so the
+        answer is a function of the tile set.
+    """
+    best = None
+    for key, data in entries:
+        if not data or 'com.plexapp.agents.localmedia' not in (key or ''):
+            continue
+        if selection_is_artist_art(artist_bytes, data):
+            continue
+        dims = image_dimensions(data)
+        if not is_square_art(dims):
+            continue
+        edge = min(dims[0], dims[1])
+        if edge < LOCAL_SQUARE_MIN_EDGE:
+            continue
+        if best is None or edge > best[0] or (edge == best[0] and key < best[1]):
+            best = (edge, key, data)
+    return best[2] if best else None
+
+
 # Destination temp name for the sidecar write. Deliberately NOT "._"-prefixed:
 # that namespace is exactly what vfs_fruit vetoes (see write_cover_sidecar).
 COVER_TMP_SUFFIX = '.incipit-tmp'
@@ -2822,6 +2872,14 @@ def correct_portrait_selection(helper, cover_bytes, square_bytes):
     """
     if not cover_bytes or not square_bytes:
         return
+    # "Without a square to offer" includes an online cover MEASURED as a jacket
+    # too: a Hardcover/OpenLibrary book record serves the print cover, and
+    # moving a book from one jacket onto another is churn, not a fix (the four
+    # James Potter books, 2026-10-10). Unmeasurable bytes still proceed, as
+    # before -- this refuses only what it can prove is not square.
+    square_dims = image_dimensions(square_bytes)
+    if square_dims and not is_square_art(square_dims):
+        return
     tag = 'incipit portrait-fix'
     guid = helper.metadata.guid
     try:
@@ -2912,6 +2970,111 @@ def correct_portrait_selection(helper, cover_bytes, square_bytes):
     # line already answered: the selection is the jacket, and square_bytes is
     # not the jacket or there would be nothing to fix.
     upload_and_select_poster(guid, square_bytes, tag, token=sha, state=state,
+                             selected=current)
+
+
+def select_local_square_art(helper, online_bytes, cover_bytes):
+    """
+        When nothing square exists online or in cover.jpg, make the book's own
+        SQUARE local art -- its embedded cover, as Local Media Assets offers it
+        -- the selection instead of the print jacket.
+
+        Measured 2026-10-10: of 1,756 prod albums exactly four showed a portrait
+        poster, all four G. Norman Lippert's James Potter books. Fan audiobooks:
+        no store sells them, so the match is a Hardcover BOOK record whose cover
+        is the 1900x2850 print jacket, Apple's square lookup finds nothing, and
+        three folders hold a cover.jpg that is that same jacket. The only square
+        art anywhere was the 1600x1600 cover embedded in each .m4b, which Local
+        Media Assets offered as a tile and correct_portrait_selection, by its own
+        docstring, could not select. The agent cannot read the art out of the
+        file itself (Core.storage.load would load the whole audiobook), but it
+        does not need to: Plex already extracted it, and the tile's bytes are one
+        localhost GET away.
+
+        The same discipline as correct_portrait_selection, which owns the
+        neighbouring case (a square online cover): FAILS CLOSED on every read,
+        acts only on a selection the agent owns and has MEASURED as a portrait
+        jacket, never on a field-locked (human) pick, and never selects the
+        artist photo. It moves the selection through the upload lever, the one
+        way to change a persisted pick.
+        @param helper the album update helper
+        @param online_bytes the online cover's bytes this pass, or None
+        @param cover_bytes cover.jpg's bytes this pass, or None
+    """
+    if online_bytes and is_square_art(image_dimensions(online_bytes)):
+        # An online square exists: the container default and the portrait
+        # correction own this book.
+        return
+    tag = 'incipit local-square'
+    guid = helper.metadata.guid
+    try:
+        token = pad_family_shas(online_bytes)[0][0] if online_bytes else 'no-online-cover'
+    except Exception as e:
+        log.error('%s: could not hash the online cover (%s)', tag, e)
+        return
+    if not should_run(tag, guid, token, 90):
+        return
+    state = read_poster_state(guid, tag)
+    if state is None:
+        return
+    rk, selected_key, keys, parent_thumb = state
+    if not selected_key:
+        mark_done(tag, guid, token)
+        return
+    # Ours: the container poster we supplied, or an upload of an image we hold
+    # this pass (the online jacket, or cover.jpg that select_local_cover may have
+    # uploaded). Anything else -- a person's upload, another agent's tile -- is
+    # theirs and is never changed.
+    owned = []
+    for image in (online_bytes, cover_bytes):
+        if image:
+            try:
+                for fam_sha, fam_ignored in pad_family_shas(image):
+                    owned.append(fam_sha)
+            except Exception:
+                pass
+    if not selection_is_agent_owned(selected_key, owned):
+        log.info('%s: the selection is not the agent\'s -- leaving it', tag)
+        mark_done(tag, guid, token)
+        return
+    current, known = selected_poster_bytes(rk, selected_key, tag)
+    if not known:
+        # No mark_done: a blip must retry on the next pass.
+        log.error('%s: could not read the selected poster -- NOT overriding it '
+                  'on rk %s', tag, rk)
+        return
+    if not local_cover_is_portrait(current):
+        mark_done(tag, guid, token)
+        return
+    locked, lock_known = thumb_field_locked(rk, tag)
+    if not lock_known:
+        log.error('%s: could not read the thumb field lock -- NOT overriding the '
+                  'selection on rk %s', tag, rk)
+        return
+    if locked:
+        log.info('%s: the jacket was chosen by a human (thumb field locked) -- '
+                 'leaving it', tag)
+        mark_done(tag, guid, token)
+        return
+    artist_bytes, artist_known = artist_poster_bytes(guid, tag, parent_thumb)
+    if not artist_known:
+        # Cannot rule out the artist photo, so cannot choose among the tiles.
+        log.error('%s: could not read the artist poster -- NOT choosing a local '
+                  'square on rk %s', tag, rk)
+        return
+    entries = []
+    for key in keys:
+        if 'com.plexapp.agents.localmedia' in (key or ''):
+            entries.append((key, poster_file_bytes(rk, key, tag)))
+    square = local_square_candidate(entries, artist_bytes)
+    if square is None:
+        log.info('%s: rk %s shows a portrait jacket and no square exists online, '
+                 'in cover.jpg or in the local art -- the jacket stays', tag, rk)
+        mark_done(tag, guid, token)
+        return
+    log.warn('%s: rk %s shows a portrait jacket and no square exists online or in '
+             'cover.jpg; selecting the square art the book\'s own files carry', tag, rk)
+    upload_and_select_poster(guid, square, tag, token=token, state=state,
                              selected=current)
 
 
@@ -4802,6 +4965,18 @@ class AudiobookAlbum(Agent.Album):
                 # otherwise the deferral is correct and powerless forever, which
                 # is exactly the 3 albums measured frozen on a portrait.
                 correct_portrait_selection(helper, cover_bytes, thumb_data)
+        # NO SQUARE ANYWHERE BUT THE BOOK'S OWN FILES (v1.3.219): when neither the
+        # online cover nor cover.jpg is square, select the square art the files
+        # carry (select_local_square_art). Asked only when this pass holds the
+        # online cover's bytes, or there is no online cover at all: "is the online
+        # cover square?" has no answer without them, so a sibling track or a plain
+        # pass waits for the next forced one rather than paying a fetch to ask.
+        # Before the mirror below, so a curation session persists the square.
+        if (
+            prefer_local and not local_set
+            and (thumb_data is not None or not helper.thumb)
+        ):
+            select_local_square_art(helper, thumb_data, cover_bytes)
         # Back up the currently-selected poster to cover.jpg (opt-in). Runs
         # AFTER the select: select_local_cover is ownership-guarded (a user's
         # custom upload survives it), so what is selected HERE is the state
