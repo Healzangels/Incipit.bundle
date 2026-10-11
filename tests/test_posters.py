@@ -5159,6 +5159,113 @@ class HumanLockedSelection(unittest.TestCase):
         self.assertEqual(AG.thumb_field_locked('55', 't'), (True, False))
 
 
+class OwnAuthorUploadIsJudgedBySha(unittest.TestCase):
+    """
+    PLEX LOCKS THE FIELD ON EVERY UPLOAD -- THE AGENT'S OWN INCLUDED.
+
+    Measured on prod 2026-10-11: 211 of 211 artist upload selections carried
+    <Field locked="1" name="thumb"/>, and 201 of them were the sha of the
+    agent's own provider image. converge_author_art asked the lock FIRST for
+    every selection, so after the agent's first upload no direction could move
+    the artist again: removing Craig Alanson from authors_prefer_hardcover
+    logged "the poster was chosen by a human" about the agent's own Hardcover
+    upload and kept it. The lock is asked only of a CONTAINER key now, the
+    rule correct_portrait_selection and select_local_cover already follow; an
+    upload is judged by its sha.
+    """
+
+    TARGET, OTHER = 'https://t.example/new.jpg', 'https://o.example/old.jpg'
+    T_BYTES = b'\xff\xd8\xff\xe0 the target portrait'
+    O_BYTES = b'\xff\xd8\xff\xe0 the other portrait'
+
+    def setUp(self):
+        AG.recent_work_memo.clear()
+        self.saved = (AG.read_poster_state, AG.fetch_url_bytes,
+                      AG.upload_and_select_poster, AG.thumb_field_locked)
+        self.uploads = []
+        self.lock_reads = []
+        self.selected = None
+        outer = self
+        AG.read_poster_state = lambda guid, tag: (
+            '55', outer.selected, [outer.selected] if outer.selected else [], None)
+        AG.fetch_url_bytes = lambda url: {
+            outer.TARGET: outer.T_BYTES, outer.OTHER: outer.O_BYTES}.get(url)
+
+        def upload(guid, data, tag, **kw):
+            # What Plex does with the POST: a new upload://<sha1> becomes the
+            # selection, and the field is locked (measured, every upload).
+            outer.uploads.append((tag, data))
+            outer.selected = 'upload://posters/' + AG.hashlib.sha1(data).hexdigest()
+            return True
+        AG.upload_and_select_poster = upload
+        AG.thumb_field_locked = (
+            lambda rk, tag: outer.lock_reads.append(rk) or (True, True))
+
+    def tearDown(self):
+        (AG.read_poster_state, AG.fetch_url_bytes,
+         AG.upload_and_select_poster, AG.thumb_field_locked) = self.saved
+        AG.recent_work_memo.clear()
+
+    def _helper(self):
+        class FakeMetadata(object):
+            guid = 'com.plexapp.agents.incipit://B0OWNUPLOAD'
+            posters = {}
+
+        class FakeHelper(object):
+            metadata = FakeMetadata()
+
+        return FakeHelper()
+
+    def test_our_own_upload_of_the_other_image_moves_although_plex_locked_it(self):
+        # Every pad generation: the pref re-select mints v1..v3, and a
+        # generation the agent minted must not read as a human's pick.
+        for fam_sha, fam_ignored in AG.pad_family_shas(self.O_BYTES):
+            AG.recent_work_memo.clear()
+            self.uploads = []
+            self.selected = 'upload://posters/' + fam_sha
+            AG.converge_author_art(self._helper(), self.TARGET, self.OTHER,
+                                   'incipit author-art-unpin', own_uploads_only=True)
+            self.assertEqual([t for t, d in self.uploads], ['incipit author-art-unpin'],
+                             'our own upload %s froze the artist' % fam_sha[:8])
+            self.assertEqual(self.uploads[0][1], self.T_BYTES)
+        self.assertEqual(self.lock_reads, [],
+                         'an upload is judged by its sha; the lock says nothing')
+
+    def test_a_foreign_upload_is_never_touched(self):
+        # The operator's own poster: no family sha of either provider image.
+        self.selected = 'upload://posters/' + 'f' * 40
+        for direction in AG.ART_DIRECTION_TAGS:
+            AG.recent_work_memo.clear()
+            AG.converge_author_art(self._helper(), self.TARGET, self.OTHER, direction,
+                                   own_uploads_only=direction.endswith('unpin'))
+        self.assertEqual(self.uploads, [])
+
+    def test_a_locked_container_pick_still_stops_every_direction(self):
+        # The class the lock DOES resolve: click vs scan default on our own
+        # container key. A mutation dropping the gate entirely dies here.
+        self.selected = 'metadata://posters/com.plexapp.agents.incipit_aaa'
+        for direction in AG.ART_DIRECTION_TAGS:
+            AG.recent_work_memo.clear()
+            AG.converge_author_art(self._helper(), self.TARGET, self.OTHER, direction)
+        self.assertEqual(self.uploads, [])
+        self.assertEqual(len(self.lock_reads), len(AG.ART_DIRECTION_TAGS))
+
+    def test_pin_unpin_repin_round_trip_survives_plex_locking_every_upload(self):
+        # The operator's flip, end to end, with Plex behaving as measured:
+        # each landed upload is selected AND locked.
+        self.selected = 'metadata://posters/com.plexapp.agents.incipit_bbb'
+        AG.thumb_field_locked = lambda rk, tag: (
+            (self.selected or '').startswith('upload'), True)
+        hc, aud = self.TARGET, self.OTHER
+        AG.converge_author_art(self._helper(), hc, aud, 'incipit author-art-select')
+        AG.converge_author_art(self._helper(), aud, hc, 'incipit author-art-unpin',
+                               own_uploads_only=True)
+        AG.converge_author_art(self._helper(), hc, aud, 'incipit author-art-select')
+        self.assertEqual([d for t, d in self.uploads],
+                         [self.T_BYTES, self.O_BYTES, self.T_BYTES],
+                         'pin -> unpin -> re-pin must each move the selection')
+
+
 class AlternateRefusalsAreRememberedAcrossTracks(unittest.TestCase):
     """
         A refused alternate leaves NO trace in the container, so without a memo

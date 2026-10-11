@@ -1204,6 +1204,13 @@ def thumb_field_locked(rk, tag):
         never-touched artist carries no Field element at all, and the lock
         survives plain and forced refreshes.
 
+        It ALSO stamps it on every POSTed upload, the agent's own included
+        (prod, 2026-10-10/11: 215 of 215 album and 211 of 211 artist upload
+        selections locked, the agent's own byte-proven among them). So the
+        lock tells click from default only for a CONTAINER key; an upload's
+        author is its sha (selection_is_agent_owned), and every caller asks
+        the lock of a container key alone.
+
         This is exactly the click-vs-default signal the ownership rules in
         converge_author_art declared Plex never exposes -- the premise under
         which the fit direction was allowed to override a click-pick between
@@ -2728,15 +2735,31 @@ def converge_author_art(helper, target_url, other_url, tag, own_uploads_only=Fal
         return
     rk, selected_key, keys, parent_thumb = state
     # A HUMAN pick is inviolable, whatever it points at -- see
-    # thumb_field_locked for the signal and its measurement. This runs FIRST,
-    # before the ownership shas and before any CDN fetch: it protects the one
-    # class the byte-sha rules cannot (a click-pick between the agent's own
-    # two provider images, which the fit direction overrode by design until
-    # the operator overruled that on 2026-08-08), and it makes every pass
-    # over a curated artist cheaper, not costlier. Only consulted when a
-    # selection EXISTS: a fresh artist with nothing selected has nothing a
-    # human could have chosen.
-    if selected_key:
+    # thumb_field_locked for the signal and its measurement. It protects the
+    # one class the byte-sha rules cannot (a click-pick between the agent's
+    # own two CONTAINER images, which the fit direction overrode by design
+    # until the operator overruled that on 2026-08-08), before any CDN fetch.
+    # Only consulted when a selection EXISTS: a fresh artist with nothing
+    # selected has nothing a human could have chosen.
+    #
+    # And only of a CONTAINER key, the class the lock resolves -- the rule
+    # correct_portrait_selection and select_local_cover already follow. Plex
+    # locks the field on EVERY poster upload, the agent's own included:
+    # measured on prod 2026-10-11, 211 of 211 artist upload selections were
+    # locked and 201 of them carried the sha of the agent's own provider
+    # image. So for an upload:// key the lock says nothing about who chose it,
+    # and asking it froze every artist after the agent's first upload -- a
+    # pin, an unpin or a new fit verdict could never move it again. An upload
+    # is judged by its sha below instead: a foreign one is never touched, our
+    # own is ours to move.
+    #
+    # What that gives up, knowingly: a sha names who wrote the CONTENT, not
+    # who made the SELECTION. A person who re-picks one of our own uploads in
+    # the picker, or adds a poster from the provider's own URL (pirate aba's
+    # upload is byte-identical to his Audible photo), reads as ours here, and
+    # a direction that wants the other image will move it. Picking our
+    # CONTAINER tile, or uploading any other file, stays inviolable.
+    if selected_key and not selected_key.startswith('upload'):
         locked, lock_known = thumb_field_locked(rk, tag)
         if not lock_known:
             # No mark_done: a transient failure must RETRY, not be suppressed.
