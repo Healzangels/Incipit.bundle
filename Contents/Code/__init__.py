@@ -3017,9 +3017,11 @@ def select_local_square_art(helper, online_bytes, cover_bytes):
         The same discipline as correct_portrait_selection, which owns the
         neighbouring case (a square online cover): FAILS CLOSED on every read,
         acts only on a selection the agent owns and has MEASURED as a portrait
-        jacket, never on a field-locked (human) pick, and never selects the
-        artist photo. It moves the selection through the upload lever, the one
-        way to change a persisted pick.
+        jacket, never on a human pick (a person's upload, or a container tile
+        whose field is locked -- an upload's author is its sha, since Plex
+        locks every upload), never when cover.jpg is square, and never selects
+        the artist photo. It moves the selection through the upload lever, the
+        one way to change a persisted pick.
         @param helper the album update helper
         @param online_bytes the online cover's bytes this pass, or None
         @param cover_bytes cover.jpg's bytes this pass, or None
@@ -3027,6 +3029,12 @@ def select_local_square_art(helper, online_bytes, cover_bytes):
     if online_bytes and is_square_art(image_dimensions(online_bytes)):
         # An online square exists: the container default and the portrait
         # correction own this book.
+        return
+    if cover_bytes and is_square_art(image_dimensions(cover_bytes)):
+        # A square cover.jpg is curated art, and select_local_cover owns it --
+        # also when it stood down because a person chose something else. Local
+        # Media Assets offers that file as a tile too, and the larger embed
+        # would outrank it below, so stand down rather than choose between them.
         return
     tag = 'incipit local-square'
     guid = helper.metadata.guid
@@ -3069,16 +3077,24 @@ def select_local_square_art(helper, online_bytes, cover_bytes):
     if not local_cover_is_portrait(current):
         mark_done(tag, guid, token)
         return
-    locked, lock_known = thumb_field_locked(rk, tag)
-    if not lock_known:
-        log.error('%s: could not read the thumb field lock -- NOT overriding the '
-                  'selection on rk %s', tag, rk)
-        return
-    if locked:
-        log.info('%s: the jacket was chosen by a human (thumb field locked) -- '
-                 'leaving it', tag)
-        mark_done(tag, guid, token)
-        return
+    # WHO CHOSE IT, by the rule thumb_field_locked records: Plex locks the field
+    # on every upload, the agent's own included, so the lock tells a click from
+    # a default only for a CONTAINER key. An upload that reached this line
+    # carries one of `owned` -- selection_is_agent_owned stood every other upload
+    # down above -- so it is a jacket the agent provably wrote, which v1.3.219
+    # mistook for a human pick and left. A person's own upload, a tile a person
+    # clicked, and every square poster never get this far.
+    if not selected_key.startswith('upload'):
+        locked, lock_known = thumb_field_locked(rk, tag)
+        if not lock_known:
+            log.error('%s: could not read the thumb field lock -- NOT overriding '
+                      'the selection on rk %s', tag, rk)
+            return
+        if locked:
+            log.info('%s: the jacket was chosen by a human (thumb field locked) '
+                     '-- leaving it', tag)
+            mark_done(tag, guid, token)
+            return
     artist_bytes, artist_known = artist_poster_bytes(guid, tag, parent_thumb)
     if not artist_known:
         # Cannot rule out the artist photo, so cannot choose among the tiles.

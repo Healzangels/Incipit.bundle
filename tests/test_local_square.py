@@ -108,12 +108,14 @@ class SelectLocalSquareArt(unittest.TestCase):
         self.lock_known = True
         self.artist_known = True
         self.state_reads = []
+        self.lock_reads = []
         self.uploads = []
         outer = self
         AG.read_poster_state = lambda guid, tag: outer.state_reads.append(guid) or outer.state
         AG.selected_poster_bytes = lambda rk, key, tag: (outer.selected, outer.selected_known)
         AG.poster_file_bytes = lambda rk, key, tag: outer.tiles.get(key)
-        AG.thumb_field_locked = lambda rk, tag: (outer.locked, outer.lock_known)
+        AG.thumb_field_locked = (
+            lambda rk, tag: outer.lock_reads.append(rk) or (outer.locked, outer.lock_known))
         AG.artist_poster_bytes = (
             lambda guid, tag, parent_thumb=None: (ARTIST, outer.artist_known))
 
@@ -153,15 +155,55 @@ class SelectLocalSquareArt(unittest.TestCase):
         self.assertEqual(self.state_reads, [])
 
     def test_a_persons_upload_is_never_changed(self):
+        # Locked, as Plex leaves every upload; ownership stands it down first.
         self.state = ('754956', 'upload://posters/feedfacecafe', self.state[2], self.state[3])
+        self.locked = True
+        self.run_it()
+        self.assertEqual(self.uploads, [])
+
+    def test_the_hand_uploaded_embedded_art_stays(self):
+        # The live James Potter state since 2026-10-10: the operator uploaded each
+        # book's own embedded art. Not bytes the agent holds, and square besides.
+        sha = AG.pad_family_shas(EMBEDDED)[0][0]
+        self.state = ('754956', 'upload://posters/' + sha, self.state[2], self.state[3])
+        self.selected = EMBEDDED
+        self.locked = True
         self.run_it()
         self.assertEqual(self.uploads, [])
 
     def test_our_own_upload_of_the_jacket_is_ours_to_move(self):
+        # Plex locks EVERY upload, the agent's own included (prod 2026-10-10: 215
+        # of 215 album upload selections), so the lock is not asked of an upload
+        # the agent provably wrote. v1.3.219 asked it, and stood down.
         sha = AG.pad_family_shas(JACKET)[0][0]
         self.state = ('754956', 'upload://posters/' + sha, self.state[2], self.state[3])
+        self.locked = True
         self.run_it()
         self.assertEqual(self.uploads, [EMBEDDED])
+        self.assertEqual(self.lock_reads, [])
+
+    def test_our_own_upload_of_cover_jpg_is_ours_to_move(self):
+        cover = png(1900, 2850, b'cover.jpg, the same print jacket saved to disk')
+        sha = AG.pad_family_shas(cover)[0][0]
+        self.state = ('754950', 'upload://posters/' + sha, self.state[2], self.state[3])
+        self.selected = cover
+        self.locked = True
+        self.run_it(cover=cover)
+        self.assertEqual(self.uploads, [EMBEDDED])
+
+    def test_an_unreadable_lock_never_matters_for_our_own_upload(self):
+        sha = AG.pad_family_shas(JACKET)[0][0]
+        self.state = ('754956', 'upload://posters/' + sha, self.state[2], self.state[3])
+        self.lock_known = False
+        self.run_it()
+        self.assertEqual(self.uploads, [EMBEDDED])
+
+    def test_a_square_cover_jpg_is_curated_art_and_left_alone(self):
+        # Local Media Assets offers cover.jpg as a tile too, and the larger embed
+        # would outrank it, so the function stands down before choosing at all.
+        self.run_it(cover=png(1400, 1400, b'a curated square cover.jpg'))
+        self.assertEqual(self.uploads, [])
+        self.assertEqual(self.state_reads, [])
 
     def test_a_selection_that_is_already_square_is_left(self):
         self.selected = EMBEDDED
@@ -169,9 +211,12 @@ class SelectLocalSquareArt(unittest.TestCase):
         self.assertEqual(self.uploads, [])
 
     def test_a_field_locked_jacket_is_a_human_pick(self):
+        # The default state selects our CONTAINER tile: the one key form whose
+        # lock tells a person's click from a scan default.
         self.locked = True
         self.run_it()
         self.assertEqual(self.uploads, [])
+        self.assertEqual(self.lock_reads, ['754956'])
 
     def test_an_unreadable_lock_fails_closed_and_retries_next_pass(self):
         self.lock_known = False
