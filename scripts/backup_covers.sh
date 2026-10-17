@@ -71,14 +71,25 @@ if [ "$FOUND" = "0" ]; then
 	exit 2
 fi
 
-rsync "${RSYNC_OPTS[@]}" "$SRC/" "$DEST/"
+ITEMS="$(mktemp)"
+trap 'rm -f "$ITEMS"' EXIT
+rsync "${RSYNC_OPTS[@]}" "$SRC/" "$DEST/" | tee "$ITEMS"
 
-if [ "$DRY" != "--dry-run" ]; then
+# What THIS run replaced. --itemize-changes marks a received file ">f"; a new one
+# is ">f+++++++++", anything else updates an existing file, whose old version
+# --backup just moved into $HIST. Count those lines, not $HIST: $HIST is per day,
+# so a second run on the same day would repeat the first run's count.
+REPLACED="$(grep -c '^>f[^+]' "$ITEMS" || true)"
+
+if [ "$DRY" = "--dry-run" ]; then
+	echo "would replace: $REPLACED"
+else
 	KEPT="$(find "$DEST" -name cover.jpg -type f | wc -l | tr -d ' ')"
-	REPLACED="$(find "$HIST" -type f 2>/dev/null | wc -l | tr -d ' ')"
+	SUPERSEDED="$(find "$HIST" -type f 2>/dev/null | wc -l | tr -d ' ')"
 	echo
 	echo "backed up: $KEPT cover.jpg files"
-	echo "superseded versions kept in $HIST: $REPLACED"
+	echo "superseded versions kept in $HIST: $SUPERSEDED"
+	echo "replaced by this run: $REPLACED"
 	# A large replaced count on a routine run means covers CHANGED since the last
 	# backup. During a scan the correct number is zero — the same red flag the
 	# runbook records for "poster-backup: saved".
